@@ -1,9 +1,0 @@
-read_verilog -sv *.v
-hierarchy -top main
-proc
-flatten
-opt
-memory
-opt
-write_json netlist.json
-stat
