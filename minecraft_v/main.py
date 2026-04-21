@@ -1,5 +1,6 @@
 import argparse
-import json
+
+from minecraft_v.models import Netlist
 
 
 def main():
@@ -8,9 +9,9 @@ def main():
     args = parser.parse_args()
 
     with open(args.netlist) as f:
-        netlist = json.load(f)
+        netlist = Netlist.model_validate_json(f.read())
 
-    print(json.dumps(netlist, indent=2))
+    print(netlist.model_dump_json(indent=2))
 
 
 if __name__ == "__main__":
