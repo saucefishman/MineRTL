@@ -84,6 +84,7 @@ def main():
     parser.add_argument("--out-litematic", type=str, default="build/result.litematic")
     parser.add_argument("--module", type=str, default="main")
     parser.add_argument("--schematics-dir", type=str, default="schematics")
+    parser.add_argument("--schematic-name", type=str, default=None)
     args = parser.parse_args()
 
     out_litematic = Path(args.out_litematic)
@@ -97,12 +98,14 @@ def main():
     with open(args.netlist) as f:
         netlist = Netlist.model_validate_json(f.read())
 
+    schematic_name = args.schematic_name or args.module
+
     module = netlist.modules.get(args.module)
     if module is None:
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
-    build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir), out_path=out_litematic, schematic_name=args.module)
+    build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir), out_path=out_litematic, schematic_name=schematic_name)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 
