@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Yosys JSON netlist format: https://github.com/YosysHQ-Docs/yosys-cmd-ref/blob/main/source/cmd/write_json.rst
 
@@ -19,7 +19,7 @@ class Cell(BaseModel):
     type: str
     # Parameter values are binary bit-vector strings, e.g. "00000001"
     parameters: dict[str, str]
-    port_directions: dict[str, Literal["input", "output", "inout"]]
+    port_directions: dict[str, Literal["input", "output", "inout"]] = Field(default_factory=dict)
     connections: dict[str, Bits]
 
 

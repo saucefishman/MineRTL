@@ -1,10 +1,23 @@
+#### Prerequisites
 1. Install [yosys](https://github.com/yosyshq/yosys)
 2. Install [uv](https://github.com/astral-sh/uv)
-3. Install Python dependencies
+#### Getting started
+
+1. Install Python dependencies
 ```sh
 uv sync
 ```
-4. Generate the netlist with
+2. Generate the netlist with
 ```sh
 ./synth.sh examples/counter
+```
+The netlist will be generated in `build/artifacts/netlist.json`.
+
+
+### Development
+#### Testing
+
+Run tests with
+```sh
+uv run pytest
 ```
