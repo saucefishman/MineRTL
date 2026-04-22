@@ -105,6 +105,11 @@ def main():
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
+
+    component_list_path = Path("build/artifacts/component_list.json")
+    component_list_path.write_text(component_list.model_dump_json(indent=2))
+    print(f"Wrote component list: {component_list_path.resolve()}")
+
     build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir), out_path=out_litematic, schematic_name=schematic_name)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
