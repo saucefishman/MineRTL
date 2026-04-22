@@ -1,3 +1,5 @@
+![image](assets/logo.png)
+
 #### Prerequisites
 1. Install [yosys](https://github.com/yosyshq/yosys)
 2. Install [uv](https://github.com/astral-sh/uv)
