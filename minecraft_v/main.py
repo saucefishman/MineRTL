@@ -22,7 +22,7 @@ _CELL_TYPE_MAP = {
     "$_NOT_": ComponentType.NOT,
     "$_XOR_": ComponentType.XOR,
     "$_DFF_P_": ComponentType.DFF,
-    "$_DFFE_PP_": ComponentType.DFF,
+    "$_DFFE_PP_": ComponentType.DFFE,
     "fulladder": ComponentType.FULL_ADDER,
     "$_MUX_": ComponentType.MUX,
 }
