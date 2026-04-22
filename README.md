@@ -7,11 +7,16 @@
 ```sh
 uv sync
 ```
-2. Generate the netlist with
+2. Generate the schematic with
 ```sh
 ./synth.sh examples/counter
 ```
-The netlist will be generated in `build/artifacts/netlist.json`.
+The resulting schematic will be in `build/result.litematic`.
+
+You can change the output location by passing the --out-litematic flag to the synth.sh script, for example:
+```sh 
+./synth.sh examples/counter --out-litematic "/Users/saucefishman/Documents/curseforge/minecraft/Instances/mchprs fabric/schematics/counter.litematic"
+```
 
 
 ### Development
