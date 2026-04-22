@@ -7,3 +7,14 @@ requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.13.3",
 ]
+
+[tool.setuptools.packages.find]
+include = ["minecraft_v*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

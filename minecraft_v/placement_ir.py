@@ -11,6 +11,10 @@ class ComponentType(str, Enum):
     NOT = "NOT"
     XOR = "XOR"
     DFF = "DFF"
+    DFFE = "DFFE"
+    DLATCH = "DLATCH"
+    FULL_ADDER = "FULLADDER"
+    MUX = "MUX"
     INPUT_PIN = "INPUT_PIN"
     OUTPUT_PIN = "OUTPUT_PIN"
     CUSTOM = "CUSTOM"
@@ -19,11 +23,17 @@ class Direction(str, Enum):
     IN = "IN"
     OUT = "OUT"
 
+class CardinalDirection(str, Enum):
+    NORTH = "north"
+    SOUTH = "south"
+    EAST = "east"
+    WEST = "west"
+
 class PinRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
     direction: Direction
-    side: str | None = None
+    side: CardinalDirection | None = None
     offset: tuple[int, int, int] = (0, 0, 0)
 
 class Footprint(BaseModel):
