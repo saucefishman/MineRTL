@@ -23,4 +23,4 @@ write_json build/artifacts/netlist.json
 stat
 "
 
-uv run python -m minecraft_v --netlist build/artifacts/netlist.json
+uv run python -m minecraft_v --netlist build/artifacts/netlist.json "${@:2}"
