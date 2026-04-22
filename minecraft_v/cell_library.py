@@ -1,24 +1,14 @@
-import argparse
-from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
 
-from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_ir import (
-    CURRENT_SCHEMA_VERSION,
     CardinalDirection,
-    Component,
-    ComponentList,
     ComponentType,
     Direction,
     Footprint,
-    NetConnection,
-    NetEndpoint,
     PinRef,
 )
-from minecraft_v.placement_engine import build_litematic_from_component_list
 
-_CELL_TYPE_MAP = {
+CELL_TYPE_MAP: dict[str, ComponentType] = {
     "$_AND_": ComponentType.AND,
     "$_OR_": ComponentType.OR,
     "$_NOT_": ComponentType.NOT,
@@ -31,12 +21,11 @@ _CELL_TYPE_MAP = {
 
 @dataclass
 class SchematicInfo:
-    file_prefix: str  # e.g. "dff" for dff.litematic
+    file_prefix: str
     footprint: Footprint
-    pins: list[PinRef]  
+    pins: list[PinRef]
 
-
-_SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
+SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
     ComponentType.AND: SchematicInfo(
         file_prefix="and",
         footprint=Footprint(width=3, height=2, depth=3),
@@ -114,103 +103,8 @@ _SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
     ),
 }
 
-
-def _apply_schematic(pin_name: str, direction: Direction, schematic: SchematicInfo) -> PinRef:
-    # Copies side/offset from the schematic template onto a netlist-derived pin.
+def apply_schematic_pin(pin_name: str, direction: Direction, schematic: SchematicInfo) -> PinRef:
     template = next((p for p in schematic.pins if p.name == pin_name and p.direction == direction), None)
     if template is None:
         raise ValueError(f"pin '{pin_name}' not in schematic for '{schematic.file_prefix}'")
     return PinRef(name=pin_name, direction=direction, side=template.side, offset=template.offset)
-
-
-def module_to_component_list(module: Module) -> ComponentList:
-    components: list[Component] = []
-    # bit_id -> [(component_id, pin_name, Direction)]
-    bit_endpoints: dict[int, list[tuple[str, str, Direction]]] = defaultdict(list)
-
-    for port_name, port in module.ports.items():
-        pin_dir = Direction.OUT if port.direction == "input" else Direction.IN
-        comp_type = ComponentType.INPUT_PIN if port.direction == "input" else ComponentType.OUTPUT_PIN
-        pins = []
-        for i, bit in enumerate(port.bits):
-            if isinstance(bit, int):
-                pin_name = port_name if len(port.bits) == 1 else f"{port_name}[{i}]"
-                pins.append(PinRef(name=pin_name, direction=pin_dir))
-                bit_endpoints[bit].append((port_name, pin_name, pin_dir))
-        components.append(Component(id=port_name, type=comp_type, pins=pins))
-
-    for cell_name, cell in module.cells.items():
-        if cell.type not in _CELL_TYPE_MAP:
-            known = ", ".join(sorted(_CELL_TYPE_MAP))
-            raise ValueError(
-                f"Unknown cell type '{cell.type}' in cell '{cell_name}'. "
-                f"Known types: {known}"
-            )
-
-        comp_type = _CELL_TYPE_MAP[cell.type]
-        schematic = _SCHEMATIC_MAP[comp_type]
-        pins = []
-        for pin_name, dir_str in cell.port_directions.items():
-            pin_dir = Direction.IN if dir_str == "input" else Direction.OUT
-            pins.append(_apply_schematic(pin_name, pin_dir, schematic))
-            for bit in cell.connections.get(pin_name, []):
-                if isinstance(bit, int):
-                    bit_endpoints[bit].append((cell_name, pin_name, pin_dir))
-
-        components.append(Component(
-            id=cell_name,
-            type=comp_type,
-            pins=pins,
-            params=dict(cell.parameters),
-            footprint=schematic.footprint,
-        ))
-
-    nets: list[NetConnection] = []
-    for bit_id, endpoints in bit_endpoints.items():
-        sources = [(cid, pn) for cid, pn, d in endpoints if d == Direction.OUT]
-        sinks = [NetEndpoint(component_id=cid, pin_name=pn) for cid, pn, d in endpoints if d == Direction.IN]
-        if not sources or not sinks:
-            continue
-        nets.append(NetConnection(
-            net_id=f"net_{bit_id}",
-            source=NetEndpoint(component_id=sources[0][0], pin_name=sources[0][1]),
-            sinks=sinks,
-        ))
-
-    return ComponentList(
-        schema_version=CURRENT_SCHEMA_VERSION,
-        components=components,
-        nets=nets,
-    )
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--netlist", required=True)
-    parser.add_argument("--out-litematic", type=str, default=None)
-    parser.add_argument("--module", type=str, default="main")
-    parser.add_argument("--schematics-dir", type=str, default="schematics")
-    args = parser.parse_args()
-
-    with open(args.netlist) as f:
-        netlist = Netlist.model_validate_json(f.read())
-
-    if args.out_litematic:
-        module = netlist.modules.get(args.module)
-        if module is None:
-            available = ", ".join(sorted(netlist.modules))
-            raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
-        component_list = module_to_component_list(module)
-        out_path = Path(args.out_litematic)
-        build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir), out_path=out_path, schematic_name=args.module)
-        print(f"Wrote litematic: {out_path.resolve()}")
-        return
-
-    for module_name, module in netlist.modules.items():
-        print(f"Module: {module_name}")
-        component_list = module_to_component_list(module)
-        print(component_list.model_dump_json(indent=2))
-
-
-if __name__ == "__main__":
-    main()
