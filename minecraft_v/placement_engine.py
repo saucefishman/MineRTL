@@ -1,5 +1,5 @@
 from __future__ import annotations
-from collections import deque
+import heapq
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -20,15 +20,26 @@ AIR = BlockState("minecraft:air")
 STONE = BlockState("minecraft:stone")
 REDSTONE = BlockState("minecraft:redstone_wire")
 
+_HORIZ_DIRS: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_DIRS_6: tuple[tuple[int, int, int], ...] = (
+    (1, 0, 0), (-1, 0, 0),
+    (0, 1, 0), (0, -1, 0),
+    (0, 0, 1), (0, 0, -1),
+)
+
+
 def _block_str(block: BlockState) -> str:
     return str(block)
+
 
 def _is_air(block: BlockState) -> bool:
     text = _block_str(block)
     return text == "minecraft:air" or text.startswith("minecraft:air[")
 
+
 def _is_redstone_wire(block: BlockState) -> bool:
     return "redstone_wire" in _block_str(block)
+
 
 def _non_air_bounds(template: Region) -> tuple[int, int, int, int, int, int]:
     xs: list[int] = []
@@ -42,14 +53,11 @@ def _non_air_bounds(template: Region) -> tuple[int, int, int, int, int, int]:
             zs.append(z)
     if not xs:
         return (
-            template.min_x(),
-            template.min_y(),
-            template.min_z(),
-            template.max_x(),
-            template.max_y(),
-            template.max_z(),
+            template.min_x(), template.min_y(), template.min_z(),
+            template.max_x(), template.max_y(), template.max_z(),
         )
     return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+
 
 def _needs_support(block: BlockState) -> bool:
     name = _block_str(block)
@@ -60,6 +68,7 @@ def _needs_support(block: BlockState) -> bool:
         or "minecraft:redstone_torch[" in name
         or name == "minecraft:redstone_torch"
     )
+
 
 def _ensure_support(
     workspace: Region,
@@ -76,6 +85,7 @@ def _ensure_support(
         workspace[x, y - 1, z] = STONE
         solid.add(below)
 
+
 def _paste_template(
     workspace: Region,
     template: Region,
@@ -90,15 +100,14 @@ def _paste_template(
         if _is_air(block):
             continue
         x, y, z = pos
-        wx = dx + (x - tmin_x)
-        wy = dy + (y - tmin_y)
-        wz = dz + (z - tmin_z)
+        wx, wy, wz = dx + (x - tmin_x), dy + (y - tmin_y), dz + (z - tmin_z)
         workspace[wx, wy, wz] = block
         solid.add((wx, wy, wz))
         placed.append(((wx, wy, wz), block))
     for cell, block in placed:
         if _needs_support(block):
             _ensure_support(workspace, solid, cell)
+
 
 def _pin_world(
     origin: tuple[int, int, int],
@@ -108,6 +117,7 @@ def _pin_world(
     ox, oy, oz = origin
     px, py, pz = pin.offset
     return (ox + px, oy + py, oz + (footprint.depth - 1 - pz))
+
 
 _SIDE_NORMAL: dict[str, tuple[int, int, int]] = {
     CardinalDirection.SOUTH.value: (0, 0, 1),
@@ -123,10 +133,12 @@ _OPPOSITE_SIDE: dict[str, str] = {
     CardinalDirection.WEST.value: CardinalDirection.EAST.value,
 }
 
+
 def _io_repeater_facing(component_type: ComponentType, side: CardinalDirection) -> str:
     if component_type == ComponentType.OUTPUT_PIN:
         return _OPPOSITE_SIDE[side.value]
     return side.value
+
 
 def _inside_footprint(
     pos: tuple[int, int, int],
@@ -140,6 +152,7 @@ def _inside_footprint(
         and oy <= y < oy + footprint.height
         and oz <= z < oz + footprint.depth
     )
+
 
 def _io_repeater_cell(
     pin_world: tuple[int, int, int],
@@ -157,16 +170,13 @@ def _io_repeater_cell(
         cz += nz
     if bounds is not None:
         min_x, min_y, min_z, max_x, max_y, max_z = bounds
-        if not (
-            min_x <= cx <= max_x
-            and min_y <= cy <= max_y
-            and min_z <= cz <= max_z
-        ):
+        if not (min_x <= cx <= max_x and min_y <= cy <= max_y and min_z <= cz <= max_z):
             raise ValueError(
-                f"IO repeater cell {(cx, cy, cz)} is outside workspace bounds {bounds}; "
+                f"IO repeater cell {(cx, cy, cz)} outside bounds {bounds}; "
                 f"pin_world={pin_world} origin={origin} side={side.value}"
             )
     return (cx, cy, cz)
+
 
 def _default_io_side(component: Component, pin: PinRef) -> CardinalDirection:
     if pin.side is not None:
@@ -177,16 +187,68 @@ def _default_io_side(component: Component, pin: PinRef) -> CardinalDirection:
         return CardinalDirection.NORTH
     raise ValueError(f"Missing pin.side for {component.id} pin {pin.name}")
 
-_DIRS_6: tuple[tuple[int, int, int], ...] = (
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-)
 
-def _bfs_path_3d(
+# ---------------------------------------------------------------------------
+# Pathfinding
+# ---------------------------------------------------------------------------
+
+def _in_bounds(pos: tuple[int, int, int], bounds: tuple[int, int, int, int, int, int]) -> bool:
+    x, y, z = pos
+    min_x, min_y, min_z, max_x, max_y, max_z = bounds
+    return min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z
+
+
+def _can_be_support(
+    workspace: Region,
+    solid: set[tuple[int, int, int]],
+    pos: tuple[int, int, int],
+    bounds: tuple[int, int, int, int, int, int],
+) -> bool:
+    """Return True if pos is already solid or can have stone placed there."""
+    if not _in_bounds(pos, bounds):
+        return False
+    if pos in solid:
+        return True
+    return _is_air(workspace[pos[0], pos[1], pos[2]])
+
+
+def _wire_walkable(
+    workspace: Region,
+    solid: set[tuple[int, int, int]],
+    dust_owner: dict[tuple[int, int, int], str],
+    pos: tuple[int, int, int],
+    net_id: str,
+    bounds: tuple[int, int, int, int, int, int],
+) -> bool:
+    x, y, z = pos
+    if not _in_bounds(pos, bounds):
+        return False
+    if pos in solid:
+        return False
+    block = workspace[x, y, z]
+    if not _is_air(block):
+        if _is_redstone_wire(block):
+            owner = dust_owner.get(pos)
+            if owner is not None and owner != net_id:
+                return False
+        else:
+            return False
+    # 3-wide foreign redstone: no foreign wire at horizontal cardinal neighbors
+    # at same Y or ±1 Y (covers slope connections in Minecraft).
+    for dx, dz in _HORIZ_DIRS:
+        for dy in (-1, 0, 1):
+            np = (x + dx, y + dy, z + dz)
+            if not _in_bounds(np, bounds):
+                continue
+            nb = workspace[np[0], np[1], np[2]]
+            if _is_redstone_wire(nb):
+                owner = dust_owner.get(np)
+                if owner is not None and owner != net_id:
+                    return False
+    return True
+
+
+def _find_wire_path(
     workspace: Region,
     solid: set[tuple[int, int, int]],
     dust_owner: dict[tuple[int, int, int], str],
@@ -194,66 +256,139 @@ def _bfs_path_3d(
     goal: tuple[int, int, int],
     net_id: str,
     bounds: tuple[int, int, int, int, int, int],
+    max_bridge_y: int,
+    tree_seeds: list[tuple[int, int, int]] | None = None,
+    protected: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
-    min_x, min_y, min_z, max_x, max_y, max_z = bounds
+    """A* pathfinder with Minecraft redstone movement model and bridge support.
+
+    Movement:
+      - Flat: wire at (x,y,z) → (x±1,y,z) or (x,y,z±1); needs solid support below.
+      - Slope-up: wire at (x,y,z) → (nx,y+1,nz) where (nx,y,nz) is/can-be stone ramp;
+        only if y < max_bridge_y.
+      - Slope-down: wire at (x,y,z) → (nx,y-1,nz); (nx,y,nz) must be non-solid so
+        the wire can drape into the lower cell.
+
+    Foreign redstone at a position blocks a 3-wide channel (itself + 1 each side)
+    to prevent unintended Minecraft wire connections.
+
+    `protected` is a hard-block set of cells reserved for other nets' terminals
+    (terminal + 1-cell horizontal buffer). Routing for this net will not enter
+    these cells, keeping approach channels clear for other nets.
+    """
+    min_y = bounds[1]
 
     def walkable(pos: tuple[int, int, int]) -> bool:
-        x, y, z = pos
-        if not (min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z):
-            return False
-        if pos in solid:
-            return False
-        block = workspace[x, y, z]
-        if _is_air(block):
-            return True
-        if _is_redstone_wire(block):
-            owner = dust_owner.get(pos)
-            return owner is None or owner == net_id
-        return False
+        return pos not in protected and _wire_walkable(
+            workspace, solid, dust_owner, pos, net_id, bounds
+        )
 
+    def neighbors(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
+        x, y, z = pos
+        result: list[tuple[tuple[int, int, int], int]] = []
+        for dx, dz in _HORIZ_DIRS:
+            nx, nz = x + dx, z + dz
+
+            # Flat move — needs solid or world-floor support below destination.
+            flat = (nx, y, nz)
+            if walkable(flat):
+                if y <= min_y or _can_be_support(workspace, solid, (nx, y - 1, nz), bounds):
+                    result.append((flat, 1))
+
+            # Slope-up — (nx, y, nz) must be solid or placeable as stone ramp.
+            if y < max_bridge_y:
+                up = (nx, y + 1, nz)
+                if walkable(up):
+                    ramp = (nx, y, nz)
+                    if ramp in solid:
+                        result.append((up, 2))
+                    elif (_in_bounds(ramp, bounds)
+                            and _is_air(workspace[ramp[0], ramp[1], ramp[2]])):
+                        result.append((up, 3))
+
+            # Slope-down — (nx, y, nz) must be non-solid so wire can drape through.
+            if y > min_y:
+                down = (nx, y - 1, nz)
+                above_down = (nx, y, nz)
+                above_clear = (
+                    above_down not in solid
+                    and _in_bounds(above_down, bounds)
+                    and _is_air(workspace[above_down[0], above_down[1], above_down[2]])
+                )
+                if above_clear and walkable(down):
+                    if y - 1 <= min_y or _can_be_support(
+                        workspace, solid, (nx, y - 2, nz), bounds
+                    ):
+                        result.append((down, 2))
+
+        return result
+
+    def heuristic(pos: tuple[int, int, int]) -> int:
+        # Manhattan distance; penalize vertical to prefer flat routes.
+        return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 2
+
+    # Find walkable seeds near start.
     seeds: list[tuple[int, int, int]] = []
     if walkable(start):
         seeds.append(start)
-    else:
-        for dx, dy, dz in _DIRS_6:
-            cand = (start[0] + dx, start[1] + dy, start[2] + dz)
-            if walkable(cand):
-                seeds.append(cand)
+    for dx, dy, dz in _DIRS_6:
+        cand = (start[0] + dx, start[1] + dy, start[2] + dz)
+        if walkable(cand) and cand not in seeds:
+            seeds.append(cand)
+    # Fan-out tree routing: existing own-net wire cells are valid branch seeds.
+    # They bypass the 3-wide check since they're already committed own-net wire.
+    if tree_seeds:
+        seed_set = set(seeds)
+        for pos in tree_seeds:
+            if pos not in seed_set and _in_bounds(pos, bounds) and pos not in solid:
+                seeds.append(pos)
+                seed_set.add(pos)
     if not seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
+    # Find walkable goal cells.
+    goal_set: set[tuple[int, int, int]] = set()
     if walkable(goal):
-        goal_set: set[tuple[int, int, int]] = {goal}
-    else:
-        goal_set = set()
-        for dx, dy, dz in _DIRS_6:
-            cand = (goal[0] + dx, goal[1] + dy, goal[2] + dz)
-            if walkable(cand):
-                goal_set.add(cand)
-        if not goal_set:
-            raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
+        goal_set.add(goal)
+    for dx, dy, dz in _DIRS_6:
+        cand = (goal[0] + dx, goal[1] + dy, goal[2] + dz)
+        if walkable(cand):
+            goal_set.add(cand)
+    if not goal_set:
+        raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
-    queue: deque[tuple[int, int, int]] = deque(seeds)
-    came_from: dict[tuple[int, int, int], tuple[int, int, int] | None] = {
-        s: None for s in seeds
-    }
+    # A* search — heap stores (f, g, tie_break, pos).
+    counter = 0
+    open_heap: list[tuple[int, int, int, tuple[int, int, int]]] = []
+    g_score: dict[tuple[int, int, int], int] = {}
+    came_from: dict[tuple[int, int, int], tuple[int, int, int] | None] = {}
+    for seed in seeds:
+        g_score[seed] = 0
+        came_from[seed] = None
+        heapq.heappush(open_heap, (heuristic(seed), 0, counter, seed))
+        counter += 1
+
     reached: tuple[int, int, int] | None = None
-    while queue:
-        current = queue.popleft()
+    while open_heap:
+        _, g, _, current = heapq.heappop(open_heap)
+        if g > g_score.get(current, 10**9):
+            continue
         if current in goal_set:
             reached = current
             break
-        cx, cy, cz = current
-        for dx, dy, dz in _DIRS_6:
-            npos = (cx + dx, cy + dy, cz + dz)
-            if npos in came_from:
-                continue
-            if not walkable(npos):
-                continue
-            came_from[npos] = current
-            queue.append(npos)
+        for neighbor, cost in neighbors(current):
+            new_g = g + cost
+            if new_g < g_score.get(neighbor, 10**9):
+                g_score[neighbor] = new_g
+                came_from[neighbor] = current
+                heapq.heappush(
+                    open_heap,
+                    (new_g + heuristic(neighbor), new_g, counter, neighbor),
+                )
+                counter += 1
+
     if reached is None:
-        raise ValueError(f"No 3D route for net {net_id} from {start} to {goal}")
+        raise ValueError(f"No route for net {net_id} from {start} to {goal}")
 
     path: list[tuple[int, int, int]] = []
     cur: tuple[int, int, int] | None = reached
@@ -262,6 +397,7 @@ def _bfs_path_3d(
         cur = came_from[cur]
     path.reverse()
     return path
+
 
 def _lay_redstone_path(
     workspace: Region,
@@ -275,18 +411,24 @@ def _lay_redstone_path(
         if _is_redstone_wire(existing):
             owner = dust_owner.get((x, y, z))
             if owner is not None and owner != net_id:
-                raise ValueError(f"Dust collision at {(x, y, z)} for nets {owner} vs {net_id}")
+                raise ValueError(
+                    f"Dust collision at {(x, y, z)} for nets {owner} vs {net_id}"
+                )
         workspace[x, y, z] = REDSTONE
         dust_owner[(x, y, z)] = net_id
-        below = (x, y - 1, z)
-        if y > 0 and _is_air(workspace[below[0], below[1], below[2]]) and below not in solid:
-            workspace[below[0], below[1], below[2]] = STONE
-            solid.add(below)
+        # Place stone support below wire; for slope-up this also serves as the ramp.
+        if y > 0:
+            below = (x, y - 1, z)
+            if below not in solid and _is_air(workspace[x, y - 1, z]):
+                workspace[x, y - 1, z] = STONE
+                solid.add(below)
+
 
 @dataclass
 class _Placed:
     component: Component
     origin: tuple[int, int, int]
+
 
 def _expand_multibit_io(comp: ComponentList) -> ComponentList:
     renames: dict[tuple[str, str], tuple[str, str]] = {}
@@ -336,19 +478,19 @@ def _expand_multibit_io(comp: ComponentList) -> ComponentList:
         nets=new_nets,
     )
 
+
 def _layout_components(
     components: list[Component],
     *,
     gutter: int,
     base_y: int,
-    io_margin: int = 2,
-    routing_gutter: int = 3,
+    io_margin: int = 4,
+    routing_gutter: int = 10,
 ) -> list[_Placed]:
     inputs = [c for c in components if c.type == ComponentType.INPUT_PIN]
     outputs = [c for c in components if c.type == ComponentType.OUTPUT_PIN]
     gates = [
-        c
-        for c in components
+        c for c in components
         if c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
     ]
 
@@ -359,12 +501,13 @@ def _layout_components(
 
     placed: list[_Placed] = []
     for row, row_z in ((inputs, input_row_z), (gates, gate_row_z), (outputs, output_row_z)):
-        cursor_x = 0
+        cursor_x = io_margin
         for component in row:
             origin = (cursor_x, base_y, row_z)
             placed.append(_Placed(component=component, origin=origin))
             cursor_x += component.footprint.width + gutter
     return placed
+
 
 def _compute_workspace_dims(
     placed: list[_Placed],
@@ -387,6 +530,7 @@ def _compute_workspace_dims(
     height = max_y + routing_headroom + io_margin
     return (width, height, depth)
 
+
 def _load_template_region(schematics_dir: Path, prefix: str) -> Region:
     path = schematics_dir / f"{prefix}.litematic"
     if not path.is_file():
@@ -396,21 +540,28 @@ def _load_template_region(schematics_dir: Path, prefix: str) -> Region:
         raise ValueError(f"Schematic has no regions: {path}")
     return next(iter(schematic.regions.values()))
 
+
 def build_litematic_from_component_list(
     comp: ComponentList,
     schematics_dir: Path,
     out_path: Path,
     *,
-    gutter: int = 8,
+    gutter: int = 6,
     workspace_size: tuple[int, int, int] | None = None,
     base_y: int = 0,
     schematic_name: str = "build",
-    io_margin: int = 2,
+    io_margin: int = 4,
+    routing_gutter: int = 10,
     routing_headroom: int = 4,
+    bridge_height: int = 1,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     placed = _layout_components(
-        comp.components, gutter=gutter, base_y=base_y, io_margin=io_margin
+        comp.components,
+        gutter=gutter,
+        base_y=base_y,
+        io_margin=io_margin,
+        routing_gutter=routing_gutter,
     )
     if workspace_size is None:
         width, height, depth = _compute_workspace_dims(
@@ -421,6 +572,7 @@ def build_litematic_from_component_list(
         )
     else:
         width, height, depth = workspace_size
+
     workspace = Region(0, 0, 0, width, height, depth)
     solid: set[tuple[int, int, int]] = set()
     dust_owner: dict[tuple[int, int, int], str] = {}
@@ -435,7 +587,7 @@ def build_litematic_from_component_list(
         if c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM):
             continue
         if c.type not in SCHEMATIC_MAP:
-            raise ValueError(f"No schematic template registered for component type {c.type}")
+            raise ValueError(f"No schematic template for {c.type}")
         info = SCHEMATIC_MAP[c.type]
         template = _load_template_region(schematics_dir, info.file_prefix)
         ref = Schematic.load(str(schematics_dir / f"{info.file_prefix}.litematic"))
@@ -443,6 +595,13 @@ def build_litematic_from_component_list(
         ref_lm_version = int(ref.lm_version)
         ref_lm_sub = int(ref.lm_subversion)
         _paste_template(workspace, template, item.origin, solid)
+
+    # Bridge layer is one fixed level above the highest placed component top.
+    max_comp_top = base_y
+    for item in placed:
+        top = item.origin[1] + item.component.footprint.height - 1
+        max_comp_top = max(max_comp_top, top)
+    max_bridge_y = max_comp_top + bridge_height
 
     pin_world: dict[tuple[str, str], tuple[int, int, int]] = {}
     pin_terminal: dict[tuple[str, str], tuple[int, int, int]] = {}
@@ -481,20 +640,51 @@ def build_litematic_from_component_list(
             solid.add(cell)
             _ensure_support(workspace, solid, cell)
 
-    bounds = ws_bounds
+    # Pre-compute all terminal positions per net for keepout calculation.
+    all_terminals: dict[str, set[tuple[int, int, int]]] = {}
+    for net in comp.nets:
+        t: set[tuple[int, int, int]] = set()
+        t.add(_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name))
+        for sink in net.sinks:
+            t.add(_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name))
+        all_terminals[net.net_id] = t
+
+    def _net_protected(net_id: str) -> frozenset[tuple[int, int, int]]:
+        """Cells (terminal + 1-cell horiz buffer) of every other net — hard-blocked
+        so routing for net_id cannot surround another net's terminal approach."""
+        cells: set[tuple[int, int, int]] = set()
+        for other_id, terminals in all_terminals.items():
+            if other_id == net_id:
+                continue
+            for tx, ty, tz in terminals:
+                cells.add((tx, ty, tz))
+                for dx, dz in _HORIZ_DIRS:
+                    cells.add((tx + dx, ty, tz + dz))
+        return frozenset(cells)
 
     for net in comp.nets:
         src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
+        protected = _net_protected(net.net_id)
         for sink in net.sinks:
-            dst_pin = _pin_for_endpoint(
-                pin_terminal, sink.component_id, sink.pin_name
-            )
-            path = _bfs_path_3d(
-                workspace, solid, dust_owner, src_pin, dst_pin, net.net_id, bounds
+            dst_pin = _pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name)
+            # Tree routing: subsequent sinks branch from the nearest existing wire cell
+            # rather than always re-routing from the source terminal. This prevents the
+            # fan-out path from traversing unrelated regions of the board.
+            tree_seeds = [
+                pos for pos, owner in dust_owner.items() if owner == net.net_id
+            ]
+            path = _find_wire_path(
+                workspace, solid, dust_owner,
+                src_pin, dst_pin, net.net_id,
+                ws_bounds, max_bridge_y,
+                tree_seeds=tree_seeds,
+                protected=protected,
             )
             _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id)
 
-    schematic = workspace.as_schematic(name=schematic_name, author="minecraft-v", description="merged placement")
+    schematic = workspace.as_schematic(
+        name=schematic_name, author="minecraft-v", description="merged placement"
+    )
     schematic.mc_version = ref_mc_version
     schematic.lm_version = ref_lm_version
     schematic.lm_subversion = ref_lm_sub
@@ -502,6 +692,7 @@ def build_litematic_from_component_list(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     schematic.save(str(out_path))
     return out_path
+
 
 def _pin_for_endpoint(
     pin_world: dict[tuple[str, str], tuple[int, int, int]],
