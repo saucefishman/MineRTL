@@ -1,6 +1,7 @@
 import argparse
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
 from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_ir import (
@@ -15,6 +16,7 @@ from minecraft_v.placement_ir import (
     NetEndpoint,
     PinRef,
 )
+from minecraft_v.placement_engine import build_litematic_from_component_list
 
 _CELL_TYPE_MAP = {
     "$_AND_": ComponentType.AND,
@@ -185,11 +187,24 @@ def module_to_component_list(module: Module) -> ComponentList:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--netlist", required=True)
+    parser.add_argument("--out-litematic", type=str, default=None)
+    parser.add_argument("--module", type=str, default="main")
+    parser.add_argument("--schematics-dir", type=str, default="schematics")
     args = parser.parse_args()
 
     with open(args.netlist) as f:
         netlist = Netlist.model_validate_json(f.read())
 
+    if args.out_litematic:
+        module = netlist.modules.get(args.module)
+        if module is None:
+            available = ", ".join(sorted(netlist.modules))
+            raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
+        component_list = module_to_component_list(module)
+        out_path = Path(args.out_litematic)
+        build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir), out_path=out_path, schematic_name=args.module)
+        print(f"Wrote litematic: {out_path.resolve()}")
+        return
 
     for module_name, module in netlist.modules.items():
         print(f"Module: {module_name}")
