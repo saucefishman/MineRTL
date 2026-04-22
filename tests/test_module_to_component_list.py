@@ -132,6 +132,21 @@ class TestCellMapping:
         assert _pin(comp, "C").side == CardinalDirection.EAST
         assert _pin(comp, "Q").side == CardinalDirection.NORTH
 
+    def test_dffe_cell(self):
+        mod = _make_module(cells={
+            "ffe": _make_cell(
+                "$_DFFE_PP_",
+                {"C": "input", "D": "input", "E": "input", "Q": "output"},
+                {"C": [1], "D": [2], "E": [3], "Q": [4]},
+            )
+        })
+        result = module_to_component_list(mod)
+        comp = _comp(result, "ffe")
+        assert comp.type == ComponentType.DFFE
+        assert comp.footprint.width == 7
+        assert comp.footprint.depth == 3
+        assert _pin(comp, "E").side == CardinalDirection.EAST
+
     def test_mux_cell(self):
         mod = _make_module(cells={
             "m": _make_cell(

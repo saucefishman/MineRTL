@@ -3,3 +3,7 @@ __pycache__/
 build/
 *.pyc
 *.egg-info/
+.venv/
+.uv-cache/
+.uv-python/
+.pytest_cache/
