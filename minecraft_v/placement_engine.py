@@ -346,14 +346,16 @@ def _find_wire_path(
     if not seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
-    # Find walkable goal cells.
+    # Find walkable goal cells. Prefer goal itself; fall back to neighbors only
+    # when goal is blocked (e.g. occupied by a component block).
     goal_set: set[tuple[int, int, int]] = set()
     if walkable(goal):
         goal_set.add(goal)
-    for dx, dy, dz in _DIRS_6:
-        cand = (goal[0] + dx, goal[1] + dy, goal[2] + dz)
-        if walkable(cand):
-            goal_set.add(cand)
+    else:
+        for dx, dy, dz in _DIRS_6:
+            cand = (goal[0] + dx, goal[1] + dy, goal[2] + dz)
+            if walkable(cand):
+                goal_set.add(cand)
     if not goal_set:
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
@@ -389,6 +391,8 @@ def _find_wire_path(
 
     if reached is None:
         raise ValueError(f"No route for net {net_id} from {start} to {goal}")
+    if reached != goal:
+        raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {reached}")
 
     path: list[tuple[int, int, int]] = []
     cur: tuple[int, int, int] | None = reached
