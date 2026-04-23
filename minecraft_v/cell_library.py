@@ -30,8 +30,8 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
         file_prefix="and",
         footprint=Footprint(width=3, height=2, depth=3),
         pins=[
-            PinRef(name="A", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
-            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
+            PinRef(name="A", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
+            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
     ),
@@ -40,7 +40,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
         footprint=Footprint(width=3, height=1, depth=3),
         pins=[
             PinRef(name="A", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
-            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 2)),
+            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
     ),
@@ -74,7 +74,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
         file_prefix="dffe",
         footprint=Footprint(width=7, height=1, depth=3),
         pins=[
-            PinRef(name="C", direction=Direction.IN,  side=CardinalDirection.EAST, offset=(0, 0, 0)),
+            PinRef(name="C", direction=Direction.IN,  side=CardinalDirection.EAST, offset=(6, 0, 0)),
             PinRef(name="D", direction=Direction.IN,  side=CardinalDirection.SOUTH,  offset=(0, 0, 0)),
             PinRef(name="E", direction=Direction.IN,  side=CardinalDirection.EAST,  offset=(6, 0, 2)),
             PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH,  offset=(0, 0, 2)),
@@ -85,8 +85,8 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
         footprint=Footprint(width=8, height=4, depth=15),
         pins=[
             PinRef(name="A", direction=Direction.IN,  side=CardinalDirection.SOUTH,  offset=(3, 0, 0)),
-            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH,  offset=(5, 0, 2)),
-            PinRef(name="Cin", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(7, 0, 1)),
+            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH,  offset=(5, 0, 0)),
+            PinRef(name="Cin", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(7, 0, 0)),
             PinRef(name="S", direction=Direction.OUT, side=CardinalDirection.NORTH,  offset=(1, 0, 14)),
             PinRef(name="Cout", direction=Direction.OUT, side=CardinalDirection.NORTH,  offset=(5, 0, 14)),
         ],

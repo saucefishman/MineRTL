@@ -10,6 +10,7 @@ module \$sdffe (CLK, SRST, EN, D, Q);
   output [WIDTH-1:0] Q;
 
   wire srst_active = SRST_POLARITY ? SRST : !SRST;
+  wire en_active = EN_POLARITY ? EN : !EN;
   wire [WIDTH-1:0] D_in;
 
   \$mux #(.WIDTH(WIDTH)) mux (
@@ -19,9 +20,9 @@ module \$sdffe (CLK, SRST, EN, D, Q);
     .Y(D_in)
   );
 
-  \$dffe #(.WIDTH(WIDTH), .CLK_POLARITY(CLK_POLARITY), .EN_POLARITY(EN_POLARITY)) ff (
+  \$dffe #(.WIDTH(WIDTH), .CLK_POLARITY(CLK_POLARITY), .EN_POLARITY(1)) ff (
     .CLK(CLK),
-    .EN(EN),
+    .EN(en_active | srst_active),
     .D(D_in),
     .Q(Q)
   );
