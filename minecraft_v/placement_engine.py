@@ -636,9 +636,9 @@ def build_litematic_from_component_list(
     workspace_size: tuple[int, int, int] | None = None,
     base_y: int = 0,
     schematic_name: str = "build",
-    io_margin: int = 4,
-    routing_gutter: int = 10,
-    routing_headroom: int = 4,
+    io_margin: int = 1,
+    routing_gutter: int = 5,
+    routing_headroom: int = 5,
     bridge_height: int = 1,
 ) -> Path:
     comp = _expand_multibit_io(comp)
