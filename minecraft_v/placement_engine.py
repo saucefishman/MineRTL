@@ -465,15 +465,19 @@ def _place_repeaters_for_net(
     def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
         if j <= 0:
             return False
-        x, _, z = path[j]
-        px, _, pz = path[j - 1]
+        x, y, z = path[j]
+        px, py, pz = path[j - 1]
+        if y != py:
+            return False  # slope
+        if j < len(path):
+            nx, ny, nz = path[j + 1]
+            if ny != y:
+                return False # slope
+            if (x - px, z - pz) != (nx - x, nz - z):
+                return False  # turn after repeater
         dx, dz = x - px, z - pz
         if (dx, dz) not in _DELTA_TO_FACING:
             return False
-        if j >= 2:
-            ppx, _, ppz = path[j - 2]
-            if (px - ppx, pz - ppz) != (dx, dz):
-                return False  # turn — repeater can't receive from behind
         return True
 
     # DFS stack: (pos, path_from_source_to_pos, reset_index_in_path)
