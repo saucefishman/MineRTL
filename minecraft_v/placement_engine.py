@@ -242,7 +242,7 @@ def _wire_walkable(
         else:
             return False
     # 3-wide foreign redstone: no foreign wire at horizontal cardinal neighbors
-    # at same Y or ±1 Y (covers slope connections in Minecraft).
+    # at same Y or +-1 Y (covers slope connections in Minecraft).
     for dx, dz in _HORIZ_DIRS:
         for dy in (-1, 0, 1):
             np = (x + dx, y + dy, z + dz)
@@ -272,14 +272,14 @@ def _find_wire_path(
     """A* pathfinder with Minecraft redstone movement model and bridge support.
 
     Movement:
-      - Flat: wire at (x,y,z) → (x±1,y,z) or (x,y,z±1); needs solid support below.
-      - Slope-up: wire at (x,y,z) → (nx,y+1,nz) where (nx,y,nz) is/can-be stone ramp;
+      - Flat: wire at (x,y,z) -> (x+-1,y,z) or (x,y,z+-1); needs solid support below.
+      - Slope-up: wire at (x,y,z) -> (nx,y+1,nz) where (nx,y,nz) is/can-be stone ramp;
         only if y < max_bridge_y.
-      - Slope-down: wire at (x,y,z) → (nx,y-1,nz); (nx,y,nz) must be non-solid so
+      - Slope-down: wire at (x,y,z) -> (nx,y-1,nz); (nx,y,nz) must be non-solid so
         the wire can drape into the lower cell.
 
     Foreign redstone at a position blocks a 3-wide channel (itself + 1 each side)
-    to prevent unintended Minecraft wire connections.
+    to prevent unintended connections.
 
     `protected` is a hard-block set of cells reserved for other nets' terminals
     (terminal + 1-cell horizontal buffer). Routing for this net will not enter
@@ -298,13 +298,13 @@ def _find_wire_path(
         for dx, dz in _HORIZ_DIRS:
             nx, nz = x + dx, z + dz
 
-            # Flat move — needs solid or world-floor support below destination.
+            # Flat move
             flat = (nx, y, nz)
             if walkable(flat):
                 if y <= min_y or _can_be_support(workspace, solid, (nx, y - 1, nz), bounds):
                     result.append((flat, 1))
 
-            # Slope-up — (nx, y, nz) must be solid or placeable as stone ramp.
+            # Slope-up
             if y < max_bridge_y:
                 up = (nx, y + 1, nz)
                 if walkable(up):
@@ -315,7 +315,7 @@ def _find_wire_path(
                             and _is_air(workspace[ramp[0], ramp[1], ramp[2]])):
                         result.append((up, 3))
 
-            # Slope-down — (nx, y, nz) must be non-solid so wire can drape through.
+            # Slope-down
             if y > min_y:
                 down = (nx, y - 1, nz)
                 above_down = (nx, y, nz)
@@ -333,7 +333,7 @@ def _find_wire_path(
         return result
 
     def heuristic(pos: tuple[int, int, int]) -> int:
-        # Manhattan distance; penalize vertical to prefer flat routes.
+        # penalize vertical to prefer flat routes.
         return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 2
 
     # Find walkable seeds near start. Prefer start itself; fall back to neighbors
@@ -661,7 +661,7 @@ def build_litematic_from_component_list(
 
     workspace = Region(0, 0, 0, width, height, depth)
     solid: set[tuple[int, int, int]] = set()
-    dust_owner: dict[tuple[int, int, int], str] = {}
+    dust_owner: dict[tuple[int, int, int], str] = {} # dust coord to net id
     ws_bounds = (0, 0, 0, width - 1, height - 1, depth - 1)
 
     ref_mc_version = 2975
