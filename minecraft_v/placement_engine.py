@@ -327,14 +327,16 @@ def _find_wire_path(
         # Manhattan distance; penalize vertical to prefer flat routes.
         return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 2
 
-    # Find walkable seeds near start.
+    # Find walkable seeds near start. Prefer start itself; fall back to neighbors
+    # only when start is blocked (e.g. occupied by a component block).
     seeds: list[tuple[int, int, int]] = []
     if walkable(start):
         seeds.append(start)
-    for dx, dy, dz in _DIRS_6:
-        cand = (start[0] + dx, start[1] + dy, start[2] + dz)
-        if walkable(cand) and cand not in seeds:
-            seeds.append(cand)
+    else:
+        for dx, dy, dz in _DIRS_6:
+            cand = (start[0] + dx, start[1] + dy, start[2] + dz)
+            if walkable(cand):
+                seeds.append(cand)
     # Fan-out tree routing: existing own-net wire cells are valid branch seeds.
     # They bypass the 3-wide check since they're already committed own-net wire.
     if tree_seeds:
@@ -400,6 +402,8 @@ def _find_wire_path(
         path.append(cur)
         cur = came_from[cur]
     path.reverse()
+    if not tree_seeds and path[0] != start:
+        raise ValueError(f"Path for net {net_id} does not begin at start {start}; begins at {path[0]}")
     return path
 
 
