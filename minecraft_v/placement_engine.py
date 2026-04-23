@@ -20,7 +20,15 @@ AIR = BlockState("minecraft:air")
 STONE = BlockState("minecraft:stone")
 REDSTONE = BlockState("minecraft:redstone_wire")
 
+_REPEATER_INTERVAL = 15  # redstone signal range; repeater placed every N dust blocks
+
 _HORIZ_DIRS: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_DELTA_TO_FACING: dict[tuple[int, int], str] = {
+    (1, 0): CardinalDirection.EAST.value,
+    (-1, 0): CardinalDirection.WEST.value,
+    (0, 1): CardinalDirection.SOUTH.value,
+    (0, -1): CardinalDirection.NORTH.value,
+}
 _DIRS_6: tuple[tuple[int, int, int], ...] = (
     (1, 0, 0), (-1, 0, 0),
     (0, 1, 0), (0, -1, 0),
@@ -393,7 +401,7 @@ def _find_wire_path(
 
     if reached is None:
         raise ValueError(f"No route for net {net_id} from {start} to {goal}")
-    if reached != goal:
+    if walkable(goal) and reached != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {reached}")
 
     path: list[tuple[int, int, int]] = []
@@ -424,12 +432,77 @@ def _lay_redstone_path(
                 )
         workspace[x, y, z] = REDSTONE
         dust_owner[(x, y, z)] = net_id
-        # Place stone support below wire; for slope-up this also serves as the ramp.
+        # Stone support below; for slope-up this also serves as the ramp.
         if y > 0:
             below = (x, y - 1, z)
             if below not in solid and _is_air(workspace[x, y - 1, z]):
                 workspace[x, y - 1, z] = STONE
                 solid.add(below)
+
+
+def _place_repeaters_for_net(
+    workspace: Region,
+    dust_owner: dict[tuple[int, int, int], str],
+    net_id: str,
+    source: tuple[int, int, int],
+) -> None:
+    """DFS from source through this net's wire tree, placing repeaters as needed.
+
+    Carries (path_from_source, reset_index) per branch so fan-out points correctly
+    inherit their signal distance rather than assuming full strength.
+    """
+    def wire_neighbors(pos: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+        x, y, z = pos
+        result = []
+        for dx, dz in _HORIZ_DIRS:
+            for dy in (0, 1, -1):
+                nb = (x + dx, y + dy, z + dz)
+                if dust_owner.get(nb) == net_id:
+                    result.append(nb)
+        return result
+
+    def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
+        if j <= 0:
+            return False
+        x, _, z = path[j]
+        px, _, pz = path[j - 1]
+        dx, dz = x - px, z - pz
+        if (dx, dz) not in _DELTA_TO_FACING:
+            return False
+        if j >= 2:
+            ppx, _, ppz = path[j - 2]
+            if (px - ppx, pz - ppz) != (dx, dz):
+                return False  # turn — repeater can't receive from behind
+        return True
+
+    # DFS stack: (pos, path_from_source_to_pos, reset_index_in_path)
+    # Full path stored per branch so fan-out branches don't share mutable state.
+    visited: set[tuple[int, int, int]] = {source}
+    stack: list[tuple[tuple[int, int, int], list[tuple[int, int, int]], int]] = [
+        (source, [source], 0)
+    ]
+    while stack:
+        pos, path, reset_idx = stack.pop()
+        depth = len(path) - 1
+        dist = depth - reset_idx
+        new_reset = reset_idx
+        if dist >= _REPEATER_INTERVAL:
+            cap = min(depth - 1, reset_idx + _REPEATER_INTERVAL)
+            for j in range(cap, reset_idx, -1):
+                if is_viable(path, j):
+                    rx, ry, rz = path[j]
+                    px, _, pz = path[j - 1]
+                    facing = _OPPOSITE_SIDE[_DELTA_TO_FACING[(rx - px, rz - pz)]]
+                    dust_owner.pop((rx, ry, rz), None)
+                    workspace[rx, ry, rz] = BlockState(
+                        "minecraft:repeater", facing=facing, delay="1"
+                    )
+                    new_reset = j
+                    break
+        for nb in wire_neighbors(pos):
+            if nb not in visited:
+                visited.add(nb)
+                stack.append((nb, path + [nb], new_reset))
 
 
 @dataclass
@@ -689,6 +762,9 @@ def build_litematic_from_component_list(
                 protected=protected,
             )
             _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id)
+        # All sinks routed — now place repeaters with correct signal accounting
+        # across the full wire tree (fan-out branches inherit distance from source).
+        _place_repeaters_for_net(workspace, dust_owner, net.net_id, src_pin)
 
     schematic = workspace.as_schematic(
         name=schematic_name, author="minecraft-v", description="merged placement"
