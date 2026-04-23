@@ -603,8 +603,8 @@ def build_litematic_from_component_list(
         max_comp_top = max(max_comp_top, top)
     max_bridge_y = max_comp_top + bridge_height
 
-    pin_world: dict[tuple[str, str], tuple[int, int, int]] = {}
-    pin_terminal: dict[tuple[str, str], tuple[int, int, int]] = {}
+    pin_world: dict[tuple[str, str], tuple[int, int, int]] = {}  # exact block coord of pin on component surface
+    pin_terminal: dict[tuple[str, str], tuple[int, int, int]] = {}  # coord where wire connects; sided pins offset one step outward from surface
     for item in placed:
         c = item.component
         origin = item.origin
