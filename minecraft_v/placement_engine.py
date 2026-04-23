@@ -722,7 +722,7 @@ def build_litematic_from_component_list(
     workspace_size: tuple[int, int, int] | None = None,
     base_y: int = 0,
     schematic_name: str = "build",
-    io_margin: int = 1,
+    io_margin: int = 5,
     routing_gutter: int = 5,
     routing_headroom: int = 5,
     bridge_height: int = 1,
