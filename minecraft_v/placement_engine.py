@@ -1,5 +1,6 @@
 from __future__ import annotations
 import heapq
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -565,8 +566,69 @@ def _expand_multibit_io(comp: ComponentList) -> ComponentList:
     )
 
 
+def _build_dependency_layers(
+    gates: list[Component],
+    nets: list[NetConnection],
+) -> dict[str, int]:
+    """Return depth per gate: 0 = driven directly from inputs, N = N hops into graph.
+
+    Cycles are broken by removing back edges detected during DFS.
+    """
+    gate_ids = {c.id for c in gates}
+
+    successors: dict[str, set[str]] = {c.id: set() for c in gates}
+    predecessors: dict[str, set[str]] = {c.id: set() for c in gates}
+    for net in nets:
+        src = net.source.component_id
+        for sink in net.sinks:
+            dst = sink.component_id
+            if src in gate_ids and dst in gate_ids and src != dst:
+                successors[src].add(dst)
+                predecessors[dst].add(src)
+
+    # Iterative DFS — detect back edges (cycle edges) and remove them.
+    visited: set[str] = set()
+    in_stack: set[str] = set()
+    for start in gate_ids:
+        if start in visited:
+            continue
+        stack: list[tuple[str, list[str], int]] = [(start, list(successors[start]), 0)]
+        in_stack.add(start)
+        visited.add(start)
+        while stack:
+            node, nbrs, idx = stack[-1]
+            if idx < len(nbrs):
+                stack[-1] = (node, nbrs, idx + 1)
+                nb = nbrs[idx]
+                if nb not in visited:
+                    visited.add(nb)
+                    in_stack.add(nb)
+                    stack.append((nb, list(successors[nb]), 0))
+                elif nb in in_stack:
+                    # Back edge — remove to break cycle.
+                    successors[node].discard(nb)
+                    predecessors[nb].discard(node)
+            else:
+                in_stack.discard(node)
+                stack.pop()
+
+    # Kahn's BFS: assign depth = longest path from any root.
+    in_deg = {gid: len(predecessors[gid]) for gid in gate_ids}
+    depth: dict[str, int] = {gid: 0 for gid in gate_ids}
+    queue: deque[str] = deque(gid for gid in gate_ids if in_deg[gid] == 0)
+    while queue:
+        node = queue.popleft()
+        for nb in successors[node]:
+            depth[nb] = max(depth[nb], depth[node] + 1)
+            in_deg[nb] -= 1
+            if in_deg[nb] == 0:
+                queue.append(nb)
+    return depth
+
+
 def _layout_components(
     components: list[Component],
+    nets: list[NetConnection],
     *,
     gutter: int,
     base_y: int,
@@ -580,18 +642,42 @@ def _layout_components(
         if c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
     ]
 
+    depths = _build_dependency_layers(gates, nets)
+    max_depth = max(depths.values(), default=0)
+
+    layer_gates: dict[int, list[Component]] = defaultdict(list)
+    for c in gates:
+        layer_gates[depths[c.id]].append(c)
+
+    # Layout along Z: outputs at small Z, inputs at large Z.
+    # Gate layers ordered highest depth (closest to outputs) → lowest depth (closest to inputs).
     output_row_z = io_margin
-    gate_row_z = output_row_z + routing_gutter + 1
-    max_gate_depth = max((c.footprint.depth for c in gates), default=0)
-    input_row_z = gate_row_z + max_gate_depth + routing_gutter
+    z_cursor = output_row_z + routing_gutter
+    layer_z: dict[int, int] = {}
+    for layer_idx in range(max_depth, -1, -1):
+        layer_z[layer_idx] = z_cursor
+        layer_depth = max((c.footprint.depth for c in layer_gates.get(layer_idx, [])), default=0)
+        z_cursor += layer_depth + routing_gutter
+    input_row_z = z_cursor
 
     placed: list[_Placed] = []
-    for row, row_z in ((inputs, input_row_z), (gates, gate_row_z), (outputs, output_row_z)):
+    cursor_x = io_margin
+    for c in outputs:
+        placed.append(_Placed(component=c, origin=(cursor_x, base_y, output_row_z)))
+        cursor_x += c.footprint.width + gutter
+
+    for layer_idx in range(max_depth, -1, -1):
         cursor_x = io_margin
-        for component in row:
-            origin = (cursor_x, base_y, row_z)
-            placed.append(_Placed(component=component, origin=origin))
-            cursor_x += component.footprint.width + gutter
+        z = layer_z[layer_idx]
+        for c in layer_gates.get(layer_idx, []):
+            placed.append(_Placed(component=c, origin=(cursor_x, base_y, z)))
+            cursor_x += c.footprint.width + gutter
+
+    cursor_x = io_margin
+    for c in inputs:
+        placed.append(_Placed(component=c, origin=(cursor_x, base_y, input_row_z)))
+        cursor_x += c.footprint.width + gutter
+
     return placed
 
 
@@ -644,6 +730,7 @@ def build_litematic_from_component_list(
     comp = _expand_multibit_io(comp)
     placed = _layout_components(
         comp.components,
+        comp.nets,
         gutter=gutter,
         base_y=base_y,
         io_margin=io_margin,
