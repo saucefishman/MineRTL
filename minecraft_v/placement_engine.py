@@ -267,6 +267,7 @@ def _find_wire_path(
     max_bridge_y: int,
     tree_seeds: list[tuple[int, int, int]] | None = None,
     protected: frozenset[tuple[int, int, int]] = frozenset(),
+    footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
     """A* pathfinder with Minecraft redstone movement model and bridge support.
 
@@ -287,7 +288,7 @@ def _find_wire_path(
     min_y = bounds[1]
 
     def walkable(pos: tuple[int, int, int]) -> bool:
-        return pos not in protected and _wire_walkable(
+        return pos not in protected and pos not in footprint_blocked and _wire_walkable(
             workspace, solid, dust_owner, pos, net_id, bounds
         )
 
@@ -721,6 +722,32 @@ def build_litematic_from_component_list(
             solid.add(cell)
             _ensure_support(workspace, solid, cell)
 
+    # All cells inside any component footprint, expanded 1 block in all directions.
+    # Wire routing may not enter this zone. Pin terminals are exempted below.
+    _fp_interior: set[tuple[int, int, int]] = {
+        (ox + dx, oy + dy, oz + dz)
+        for item in placed
+        if item.component.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+        for ox, oy, oz in [item.origin]
+        for fp in [item.component.footprint]
+        for dx in range(fp.width)
+        for dy in range(fp.height)
+        for dz in range(fp.depth)
+    }
+    _fp_expanded: set[tuple[int, int, int]] = set(_fp_interior)
+    for cx, cy, cz in _fp_interior:
+        for ddx, ddy, ddz in _DIRS_6:
+            _fp_expanded.add((cx + ddx, cy + ddy, cz + ddz))
+        _fp_expanded.add((cx, cy + 2, cz))  # extra upward block: support placed below wire
+        # Vertical diagonals (1 horiz + 1 vert): redstone signal coupling and
+        # support-block placement can reach the footprint through these cells.
+        for ddx, ddz in _HORIZ_DIRS:
+            _fp_expanded.add((cx + ddx, cy + 1, cz + ddz))
+            _fp_expanded.add((cx + ddx, cy - 1, cz + ddz))
+    # Exempt all pin terminals so routing can start/end at component edges.
+    _fp_expanded -= set(pin_terminal.values())
+    footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(_fp_expanded)
+
     # Pre-compute all terminal positions per net for keepout calculation.
     all_terminals: dict[str, set[tuple[int, int, int]]] = {}
     for net in comp.nets:
@@ -760,6 +787,7 @@ def build_litematic_from_component_list(
                 ws_bounds, max_bridge_y,
                 tree_seeds=tree_seeds,
                 protected=protected,
+                footprint_blocked=footprint_blocked,
             )
             _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id)
         # All sinks routed — now place repeaters with correct signal accounting
