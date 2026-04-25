@@ -150,6 +150,17 @@ def _lay_redstone_path(
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
+            # Alternating down-staircase: (x,y,z)→(x+dx,y-1,z+dz)→(x,y-2,z)
+            # Support at (x,y-1,z) is directly above (x,y-2,z) wire — use glass.
+            if i + 2 < n:
+                ax, ay, az = cell
+                bx, by, bz = cells[i + 1]
+                cx, cy, cz = cells[i + 2]
+                if (by == ay - 1 and abs(bx - ax) + abs(bz - az) == 1
+                        and cx == ax and cy == ay - 2 and cz == az):
+                    support = (ax, ay - 1, az)
+                    if support in solid:
+                        workspace[ax, ay - 1, az] = GLASS
 
 
 def _place_repeaters_for_net(
