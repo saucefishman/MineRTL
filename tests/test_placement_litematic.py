@@ -1,7 +1,9 @@
-from pathlib import Path
 from collections import deque
+from pathlib import Path
+
 import pytest
 from litemapy import Schematic
+
 from minecraft_v.main import module_to_component_list
 from minecraft_v.models import Cell, Module, Port
 from minecraft_v.placement_engine import (
@@ -9,12 +11,14 @@ from minecraft_v.placement_engine import (
     _plan_placement,
     build_litematic_from_component_list,
 )
-from minecraft_v.placement_ir import CardinalDirection, ComponentType, Direction
+from minecraft_v.placement_engine.ir import CardinalDirection, ComponentType, Direction
 
 SCHEMATICS_DIR = Path("schematics")
 
+
 def _make_module(ports=None, cells=None):
     return Module(ports=ports or {}, cells=cells or {})
+
 
 def _make_cell(type_, port_directions, connections, parameters=None):
     return Cell(
@@ -24,6 +28,7 @@ def _make_cell(type_, port_directions, connections, parameters=None):
         port_directions=port_directions,
         connections=connections,
     )
+
 
 def _single_gate_module(type_: str, *, has_b: bool = True, has_s: bool = False) -> Module:
     ports = {
@@ -45,6 +50,7 @@ def _single_gate_module(type_: str, *, has_b: bool = True, has_s: bool = False) 
         cells={"g": _make_cell(type_, pds, conns)},
     )
 
+
 def _inverter_module() -> Module:
     return _make_module(
         ports={
@@ -60,21 +66,25 @@ def _inverter_module() -> Module:
         },
     )
 
+
 def test_io_repeater_facing_rules():
     assert _io_repeater_facing(ComponentType.INPUT_PIN, CardinalDirection.SOUTH) == "north"
     assert _io_repeater_facing(ComponentType.INPUT_PIN, CardinalDirection.NORTH) == "south"
     assert _io_repeater_facing(ComponentType.OUTPUT_PIN, CardinalDirection.NORTH) == "north"
     assert _io_repeater_facing(ComponentType.OUTPUT_PIN, CardinalDirection.SOUTH) == "south"
 
+
 def _plan(module: Module):
     comp = module_to_component_list(module)
     return _plan_placement(comp, schematics_dir=SCHEMATICS_DIR)
+
 
 def _per_net_cells(plan) -> dict[str, set[tuple[int, int, int]]]:
     groups: dict[str, set[tuple[int, int, int]]] = {}
     for cell, nid in plan.dust_owner.items():
         groups.setdefault(nid, set()).add(cell)
     return groups
+
 
 def _assert_net_connected(cells: set[tuple[int, int, int]], net_id: str) -> None:
     assert cells, f"net '{net_id}' has zero routed cells"
@@ -84,9 +94,9 @@ def _assert_net_connected(cells: set[tuple[int, int, int]], net_id: str) -> None
     while queue:
         x, y, z = queue.popleft()
         for dx, dy, dz in (
-            (1, 0, 0), (-1, 0, 0),
-            (0, 1, 0), (0, -1, 0),
-            (0, 0, 1), (0, 0, -1),
+                (1, 0, 0), (-1, 0, 0),
+                (0, 1, 0), (0, -1, 0),
+                (0, 0, 1), (0, 0, -1),
         ):
             npos = (x + dx, y + dy, z + dz)
             if npos in cells and npos not in seen:
@@ -94,6 +104,7 @@ def _assert_net_connected(cells: set[tuple[int, int, int]], net_id: str) -> None
                 queue.append(npos)
     missing = cells - seen
     assert not missing, f"net '{net_id}' disconnected: {len(missing)} stray cells, e.g. {next(iter(missing))}"
+
 
 def _assert_no_cross_net_chebyshev(groups: dict[str, set[tuple[int, int, int]]]) -> None:
     cell_to_net = {cell: nid for nid, cells in groups.items() for cell in cells}
@@ -109,6 +120,7 @@ def _assert_no_cross_net_chebyshev(groups: dict[str, set[tuple[int, int, int]]])
                         f"cross-net adjacency: net '{nid}' at {(x, y, z)} "
                         f"touches net '{other}' at {npos}"
                     )
+
 
 def _pin_reaches_io(plan, io_component_id: str, pin_name: str) -> None:
     io_cell = plan.io_repeater_cell[(io_component_id, pin_name)]
@@ -127,6 +139,7 @@ def _pin_reaches_io(plan, io_component_id: str, pin_name: str) -> None:
         f"IO pin {io_component_id}.{pin_name} repeater at {io_cell} has no "
         f"dust-adjacent cell of its own net '{net_id}'"
     )
+
 
 def test_build_litematic_from_netlist_smoke(tmp_path: Path):
     comp_list = module_to_component_list(_inverter_module())
@@ -149,6 +162,7 @@ def test_build_litematic_from_netlist_smoke(tmp_path: Path):
         "repeater" in str(region[pos]) for pos in region.block_positions()
     )
     assert has_repeater
+
 
 @pytest.mark.parametrize(
     "gate_type, kwargs",
@@ -181,6 +195,7 @@ def test_mux_routes_and_connects():
     for net_id, cells in groups.items():
         _assert_net_connected(cells, net_id)
     _assert_no_cross_net_chebyshev(groups)
+
 
 _TRUTH = {
     ComponentType.AND: lambda v: {"Y": v["A"] & v["B"]},
@@ -248,6 +263,7 @@ def _simulate(plan, inputs: dict[str, int]) -> dict[str, int]:
                     results[comp.id] = net_value[nid]
     return results
 
+
 @pytest.mark.parametrize(
     "gate_type, f",
     [
@@ -267,6 +283,7 @@ def test_two_input_gate_truth_table(gate_type, f):
             got = _simulate(plan, {"a": a, "b": b})
             assert got == {"y": f(a, b)}, f"{gate_type}({a},{b}) -> {got}"
 
+
 def test_not_truth_table():
     plan = _plan(_inverter_module())
     groups = _per_net_cells(plan)
@@ -276,6 +293,7 @@ def test_not_truth_table():
     for a in (0, 1):
         got = _simulate(plan, {"a_in": a})
         assert got == {"y_out": 1 - a}
+
 
 def test_mux_truth_table():
     plan = _plan(_single_gate_module("$_MUX_", has_b=True, has_s=True))

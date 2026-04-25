@@ -1,9 +1,11 @@
-from enum import Enum
 import json
+from enum import Enum
 from pathlib import Path
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CURRENT_SCHEMA_VERSION = "0.1"
+
 
 class ComponentType(str, Enum):
     AND = "AND"
@@ -19,15 +21,18 @@ class ComponentType(str, Enum):
     OUTPUT_PIN = "OUTPUT_PIN"
     CUSTOM = "CUSTOM"
 
+
 class Direction(str, Enum):
     IN = "IN"
     OUT = "OUT"
+
 
 class CardinalDirection(str, Enum):
     NORTH = "north"
     SOUTH = "south"
     EAST = "east"
     WEST = "west"
+
 
 class PinRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -37,12 +42,14 @@ class PinRef(BaseModel):
     offset: tuple[int, int, int] = (0, 0, 0)
     const_value: str | None = None
 
+
 class Footprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
     width: int = 1
     height: int = 1
     depth: int = 1
     layer: str | None = None
+
 
 class PlacementHints(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -51,6 +58,7 @@ class PlacementHints(BaseModel):
     fixed: bool = False
     region: str | None = None
     keepout: int = 0
+
 
 class Component(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -69,16 +77,19 @@ class Component(BaseModel):
             raise ValueError(f"dup pin names in {self.id}")
         return self
 
+
 class NetEndpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
     component_id: str
     pin_name: str
+
 
 class NetConnection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     net_id: str
     source: NetEndpoint
     sinks: list[NetEndpoint]
+
 
 class ComponentList(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -115,7 +126,8 @@ class ComponentList(BaseModel):
                 raise ValueError(f"net {net.net_id} has no sinks")
             source_direction = _resolve_endpoint_direction(pin_index, net.source, net.net_id)
             if source_direction != Direction.OUT:
-                raise ValueError(f"Net '{net.net_id}' source '{net.source.component_id}:{net.source.pin_name}' source not OUT")
+                raise ValueError(
+                    f"Net '{net.net_id}' source '{net.source.component_id}:{net.source.pin_name}' source not OUT")
             for sink in net.sinks:
                 sink_direction = _resolve_endpoint_direction(pin_index, sink, net.net_id)
                 if sink_direction != Direction.IN:
@@ -130,6 +142,7 @@ class ComponentList(BaseModel):
     def from_dict(cls, payload):
         return cls.model_validate(payload)
 
+
 def load_component_list(path_or_dict):
     if isinstance(path_or_dict, dict):
         payload = path_or_dict
@@ -137,6 +150,7 @@ def load_component_list(path_or_dict):
         path = Path(path_or_dict)
         payload = json.loads(path.read_text(encoding="utf-8"))
     return ComponentList.from_dict(payload)
+
 
 def _resolve_endpoint_direction(pin_index, endpoint, net_id):
     component_pins = pin_index.get(endpoint.component_id)

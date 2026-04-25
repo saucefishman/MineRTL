@@ -2,7 +2,7 @@ import pytest
 
 from minecraft_v.main import module_to_component_list
 from minecraft_v.models import Cell, Module, Port
-from minecraft_v.placement_ir import (
+from minecraft_v.placement_engine.ir import (
     CardinalDirection,
     ComponentType,
     Direction,
@@ -28,8 +28,10 @@ def _make_cell(type_, port_directions, connections, parameters=None):
 def _comp(result, id_):
     return next(c for c in result.components if c.id == id_)
 
+
 def _net(result, net_id):
     return next(n for n in result.nets if n.net_id == net_id)
+
 
 def _pin(comp, name):
     return next(p for p in comp.pins if p.name == name)
