@@ -9,13 +9,21 @@ module \$add (A, B, Y);
   input [B_WIDTH-1:0] B;
   output [Y_WIDTH-1:0] Y;
 
-  wire cout;
+  wire [Y_WIDTH:0] carry;
+  assign carry[0] = 1'b0;
 
-  fulladder #(.WIDTH(Y_WIDTH)) fa (
-    .A(A),
-    .B(B),
-    .Cin(1'b0),
-    .S(Y),
-    .Cout(cout)
-  );
+  genvar i;
+  generate
+    for (i = 0; i < Y_WIDTH; i = i + 1) begin : fa_bit
+      wire a_i = (i < A_WIDTH) ? A[i] : 1'b0;
+      wire b_i = (i < B_WIDTH) ? B[i] : 1'b0;
+      fulladder fa_i (
+        .A(a_i),
+        .B(b_i),
+        .Cin(carry[i]),
+        .S(Y[i]),
+        .Cout(carry[i+1])
+      );
+    end
+  endgenerate
 endmodule
