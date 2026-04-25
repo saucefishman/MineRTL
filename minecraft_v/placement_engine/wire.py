@@ -86,7 +86,8 @@ def _lay_tower_move(
     tdx = (bx - x) // 2
     tdz = (bz - z) // 2
 
-    _lay_dust_cell(workspace, solid, dust_owner, net_id, launch, opaque_support_block)
+    if _is_air(workspace[*launch]):
+        _lay_dust_cell(workspace, solid, dust_owner, net_id, launch, opaque_support_block)
 
     rx, ry, rz = x + tdx, y, z + tdz
     facing = _DELTA_TO_FACING[(-tdx, -tdz)]
@@ -138,7 +139,7 @@ def _lay_redstone_path(
             slope2_bottom.add(i)
 
     for i, cell in enumerate(cells):
-        if i in tower_top:
+        if i in tower_top and i not in tower_bottom:
             continue  # stone already placed by _lay_tower_move
 
         if i in slope2_bottom:
