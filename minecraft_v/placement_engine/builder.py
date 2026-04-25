@@ -223,6 +223,8 @@ def _compute_net_protected(
             for dx, dz in _HORIZ_DIRS:
                 for dy in range(3):
                     cells.add((tx + dx, ty + dy, tz + dz))
+            for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+                cells.add((tx + dx, ty, tz + dz))
     return frozenset(cells)
 
 
