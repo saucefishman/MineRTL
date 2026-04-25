@@ -30,8 +30,8 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
         file_prefix="and",
         footprint=Footprint(width=3, height=2, depth=3),
         pins=[
-            PinRef(name="A", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
-            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
+            PinRef(name="A", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
+            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
     ),
@@ -40,7 +40,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
         footprint=Footprint(width=3, height=1, depth=3),
         pins=[
             PinRef(name="A", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
-            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 2)),
+            PinRef(name="B", direction=Direction.IN,  side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
     ),
