@@ -1,9 +1,12 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from litemapy import BlockState, Region, Schematic
-from minecraft_v.placement_ir import CardinalDirection, Component, ComponentType, Footprint, PinRef
-from .constants import _SIDE_NORMAL, _OPPOSITE_SIDE
+
+from minecraft_v.placement_engine.ir import CardinalDirection, Component, ComponentType, Footprint, PinRef
 from .block_utils import _is_air, _needs_support, _ensure_support
+from .constants import _SIDE_NORMAL, _OPPOSITE_SIDE
 
 
 def _non_air_bounds(template: Region) -> tuple[int, int, int, int, int, int]:
@@ -71,9 +74,9 @@ def _inside_footprint(
     ox, oy, oz = origin
     x, y, z = pos
     return (
-        ox <= x < ox + footprint.width
-        and oy <= y < oy + footprint.height
-        and oz <= z < oz + footprint.depth
+            ox <= x < ox + footprint.width
+            and oy <= y < oy + footprint.height
+            and oz <= z < oz + footprint.depth
     )
 
 

@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
-from minecraft_v.placement_ir import ComponentType
+from minecraft_v.placement_engine.ir import ComponentType
 
 ARTIFACTS_DIR = Path("build/artifacts")
 
@@ -21,18 +21,18 @@ LABEL_FONT = 7
 PIN_RADIUS = 3
 
 TYPE_COLOR = {
-    ComponentType.INPUT_PIN:  "#66BB6A",
+    ComponentType.INPUT_PIN: "#66BB6A",
     ComponentType.OUTPUT_PIN: "#42A5F5",
-    ComponentType.AND:        "#FFA726",
-    ComponentType.OR:         "#EF5350",
-    ComponentType.NOT:        "#AB47BC",
-    ComponentType.XOR:        "#EC407A",
-    ComponentType.DFF:        "#26C6DA",
-    ComponentType.DFFE:       "#26A69A",
-    ComponentType.DLATCH:     "#8D6E63",
+    ComponentType.AND: "#FFA726",
+    ComponentType.OR: "#EF5350",
+    ComponentType.NOT: "#AB47BC",
+    ComponentType.XOR: "#EC407A",
+    ComponentType.DFF: "#26C6DA",
+    ComponentType.DFFE: "#26A69A",
+    ComponentType.DLATCH: "#8D6E63",
     ComponentType.FULL_ADDER: "#78909C",
-    ComponentType.MUX:        "#FFCA28",
-    ComponentType.CUSTOM:     "#BDBDBD",
+    ComponentType.MUX: "#FFCA28",
+    ComponentType.CUSTOM: "#BDBDBD",
 }
 
 
@@ -67,13 +67,14 @@ def build_svg(layout: list[dict]) -> ET.Element:
 
     y_levels = sorted(by_y)
 
-    def _fp(entry): return entry["footprint"]
+    def _fp(entry):
+        return entry["footprint"]
 
     # Compute per-layer canvas size (X-Z plane)
     layer_dims: list[tuple[int, int]] = []
     for y in y_levels:
-        max_x = max(e["origin"][0] + _fp(e)["width"]  for e in by_y[y]) + 2
-        max_z = max(e["origin"][2] + _fp(e)["depth"]  for e in by_y[y]) + 2
+        max_x = max(e["origin"][0] + _fp(e)["width"] for e in by_y[y]) + 2
+        max_z = max(e["origin"][2] + _fp(e)["depth"] for e in by_y[y]) + 2
         layer_dims.append((max_x, max_z))
 
     canvas_w = max(w for w, _ in layer_dims) * SCALE + PADDING * 2
@@ -100,9 +101,9 @@ def build_svg(layout: list[dict]) -> ET.Element:
         for gx in range(0, layer_dims[layer_idx][0] + 1):
             for gz in range(0, layer_h + 1):
                 ET.SubElement(svg, "circle",
-                               cx=str(int(PADDING + gx * SCALE)),
-                               cy=str(int(y_offset + gz * SCALE)),
-                               r="1", fill="#ddd")
+                              cx=str(int(PADDING + gx * SCALE)),
+                              cy=str(int(y_offset + gz * SCALE)),
+                              r="1", fill="#ddd")
 
         for entry in by_y[y]:
             cid = entry["id"]
@@ -142,9 +143,9 @@ def build_svg(layout: list[dict]) -> ET.Element:
                 else:
                     pin_color = "#1565c0"
                 ET.SubElement(svg, "circle",
-                               cx=str(int(pcx)), cy=str(int(pcy)),
-                               r=str(PIN_RADIUS), fill=pin_color,
-                               stroke="white", **{"stroke-width": "1"})
+                              cx=str(int(pcx)), cy=str(int(pcy)),
+                              r=str(PIN_RADIUS), fill=pin_color,
+                              stroke="white", **{"stroke-width": "1"})
                 cx_comp = PADDING + (ox + fw / 2) * SCALE
                 cz_comp = y_offset + (oz + fd / 2) * SCALE
                 dx_label = 1 if pcx >= cx_comp else -1

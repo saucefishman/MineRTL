@@ -2,8 +2,11 @@ import argparse
 from collections import defaultdict
 from pathlib import Path
 
+from minecraft_v.build_utils import save_build_artifacts
+from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
-from minecraft_v.placement_ir import (
+from minecraft_v.placement_engine import build_litematic_from_component_list
+from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION,
     Component,
     ComponentList,
@@ -13,9 +16,6 @@ from minecraft_v.placement_ir import (
     NetEndpoint,
     PinRef,
 )
-from minecraft_v.placement_engine import build_litematic_from_component_list
-from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, apply_schematic_pin
-from minecraft_v.build_utils import save_build_artifacts
 
 
 def module_to_component_list(module: Module) -> ComponentList:

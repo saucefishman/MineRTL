@@ -1,27 +1,30 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from litemapy import BlockState, Region, Schematic
+
 from minecraft_v.build_utils import save_artifact
 from minecraft_v.cell_library import SCHEMATIC_MAP
-from minecraft_v.placement_ir import (
+from minecraft_v.placement_engine.ir import (
     ComponentList,
     ComponentType,
     NetConnection,
 )
+from .block_utils import _is_air, _ensure_support
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, WOOLS,
 )
-from .block_utils import _is_air, _ensure_support
-from .template import (
-    _pin_world, _io_repeater_cell, _io_repeater_facing,
-    _default_io_side, _paste_template, _load_template_region,
-)
-from .pathfinding import _find_wire_path
-from .wire import _lay_redstone_path, _place_repeaters_for_net
 from .layout import (
     _Placed, _expand_multibit_io, _assign_component_y_levels,
     _layout_components, _compute_workspace_dims,
 )
+from .pathfinding import _find_wire_path
+from .template import (
+    _pin_world, _io_repeater_cell, _io_repeater_facing,
+    _default_io_side, _paste_template, _load_template_region,
+)
+from .wire import _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
