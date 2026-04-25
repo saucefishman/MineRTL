@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from minecraft_v.placement_ir import ComponentList
+from minecraft_v.placement_engine.ir import ComponentList
 
 DEFAULT_ARTIFACTS_DIR = Path("build/artifacts")
 
@@ -15,8 +15,8 @@ def save_artifact(filename: str, data: Any, artifacts_dir: Path = DEFAULT_ARTIFA
 
 
 def save_build_artifacts(
-    component_list: ComponentList,
-    artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR,
+        component_list: ComponentList,
+        artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR,
 ) -> Path:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     out = artifacts_dir / "component_list.json"
