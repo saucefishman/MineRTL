@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from minecraft_v.placement_ir import (
+
+from minecraft_v.placement_engine.ir import (
     Component,
     ComponentList,
     ComponentType,
@@ -11,7 +13,6 @@ from minecraft_v.placement_ir import (
     NetEndpoint,
     PinRef,
 )
-
 
 _BIT_INDEX_RE = re.compile(r'\[(\d+)\]$')
 _BIT_NAME_RE = re.compile(r'^(.*)\[(\d+)\]$')
@@ -224,7 +225,7 @@ def _assign_component_y_levels(
                 y_level[gate.id] = assigned
                 gate_count_per_y[assigned] += 1
 
-    _run_pass(list(range(max_depth + 1)))   # forward
+    _run_pass(list(range(max_depth + 1)))  # forward
     _run_pass(list(range(max_depth, -1, -1)))  # backward
 
     for c in components:

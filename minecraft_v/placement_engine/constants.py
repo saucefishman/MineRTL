@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 from litemapy import BlockState
-from minecraft_v.placement_ir import CardinalDirection
+
+from minecraft_v.placement_engine.ir import CardinalDirection
 
 AIR = BlockState("minecraft:air")
 STONE = BlockState("minecraft:stone")

@@ -1,4 +1,4 @@
-from .placement_ir import (
+from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION,
     Component,
     ComponentList,
