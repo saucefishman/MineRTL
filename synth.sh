@@ -21,6 +21,8 @@ dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0
 techmap -map techmap/fa_map.v
 techmap
 opt
+dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0
+opt_clean
 write_json build/artifacts/netlist.json
 stat
 "
