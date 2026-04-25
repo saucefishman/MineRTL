@@ -35,6 +35,7 @@ class PinRef(BaseModel):
     direction: Direction
     side: CardinalDirection | None = None
     offset: tuple[int, int, int] = (0, 0, 0)
+    const_value: str | None = None
 
 class Footprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
