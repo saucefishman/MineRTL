@@ -101,7 +101,7 @@ def _lay_tower_move(
     dust_owner[(rx, ry, rz)] = net_id
     placed_support = _place_support(workspace, solid, dust_owner, net_id, (rx, ry, rz), opaque_support_block)
     if not placed_support:
-        raise ValueError("Repeater needs support but cannot place it for tower move at launch cell {launch}")
+        raise ValueError(f"Repeater needs support but cannot place it for tower move at launch cell {launch}")
 
     col = [
         (bx, y,     bz, opaque_support_block),
