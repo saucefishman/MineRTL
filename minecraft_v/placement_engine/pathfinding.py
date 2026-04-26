@@ -274,7 +274,8 @@ def _find_wire_path(
                 continue
             if not _is_air(workspace[rep[0], rep[1], rep[2]]):
                 continue
-            if not _can_be_support(workspace, solid, (x + tdx, y - 1, z + tdz), bounds):
+            rep_support = (x + tdx, y - 1, z + tdz)
+            if rep_support in path_snapshot or not _can_be_support(workspace, solid, rep_support, bounds):
                 continue
             col_clear = True
             for cdy in range(5):
