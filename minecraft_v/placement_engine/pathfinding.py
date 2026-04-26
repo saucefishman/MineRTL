@@ -225,7 +225,7 @@ def _find_wire_path(
             if y - 2 >= min_y:
                 mid_dn = (x + dx, y - 1, z + dz)
                 top_dn = (nx2, y - 2, nz2)
-                exempt_dn = frozenset([(nx2, y, nz2)])
+                exempt_dn = frozenset([(x, y - 2, z)])
                 above_mid = (x + dx, y, z + dz)
                 above_clear = (
                     above_mid not in solid
