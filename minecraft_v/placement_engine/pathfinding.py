@@ -102,6 +102,7 @@ def _find_wire_path(
         protected: frozenset[tuple[int, int, int]] = frozenset(),
         footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
+        terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
     min_y = bounds[1]
     # came_from is write-only during search (set at expansion, not push) and used
@@ -327,9 +328,12 @@ def _find_wire_path(
         for dx, dz in _HORIZ_DIRS:
             nx, nz = x + dx, z + dz
 
-            # Support block at (x,y-1,z): must be placeable as opaque (not glass, not path)
+            # Support block at (x,y-1,z): permanent solid block — must not land in any
+            # footprint or protected zone (goal relief is for wire approach, not solid structures).
             below_launch = (x, y - 1, z)
             if below_launch in path_snapshot:
+                continue
+            if below_launch == goal or below_launch in terminal_positions or below_launch in footprint_blocked or below_launch in protected:
                 continue
             if below_launch in solid:
                 if workspace[below_launch[0], below_launch[1], below_launch[2]] == GLASS:
@@ -337,7 +341,9 @@ def _find_wire_path(
             elif not (_in_bounds(below_launch, bounds) and _is_air(workspace[below_launch[0], below_launch[1], below_launch[2]])):
                 continue
 
-            # All side/clearance cells must be air, unblocked, and unowned by foreign net
+            # All side/clearance cells must be air, unblocked, and unowned by foreign net.
+            # Use full protected (not effective_protected) — goal relief is for wire approach only,
+            # not for permanent solid blocks or torches placed by this move.
             side_cells = [
                 (nx, y - 1, nz),  # first wall torch (inverted)
                 (nx, y - 2, nz),  # inverted dust
@@ -351,9 +357,19 @@ def _find_wire_path(
                 if not _in_bounds(cp, bounds):
                     ok = False
                     break
-                if cp in footprint_blocked or cp in effective_protected or cp in path_snapshot:
+                if cp == goal or cp in terminal_positions or cp in footprint_blocked or cp in protected or cp in path_snapshot:
                     ok = False
                     break
+                for ddx, ddz in _HORIZ_DIRS:
+                    for ddy in (-1, 0, 1):
+                        sp = (cp[0] + ddx, cp[1] + ddy, cp[2] + ddz)
+                        if sp in protected:
+                            ok = False
+                            break
+                        owner = dust_owner.get(sp)
+                        if owner is not None and owner != net_id:
+                            ok = False
+                            break
                 if cp in solid:
                     ok = False
                     break

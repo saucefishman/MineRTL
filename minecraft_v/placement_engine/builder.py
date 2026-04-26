@@ -334,7 +334,7 @@ def _route_all_nets(
     routing_failures: list[tuple[str, Exception]] = []
     inverted_cells: set[tuple[int, int, int]] = set()
     for net_idx, net in enumerate(sorted_nets, 1):
-        print(f"\r[wire] {net_idx}/{total_nets} — {net.net_id:<40}", end="", flush=True)
+        print(f"[wire] {net_idx}/{total_nets} — {net.net_id:<40}", flush=True)
         try:
             src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
             protected = _compute_net_protected(net.net_id, all_terminals)
@@ -346,6 +346,7 @@ def _route_all_nets(
                     if owner == net.net_id
                     and _is_redstone_wire(workspace[pos[0], pos[1], pos[2]])
                 ]
+                all_terminal_positions = frozenset(pin_terminal.values())
                 path = _find_wire_path(
                     workspace, solid, dust_owner,
                     src_pin, dst_pin, net.net_id,
@@ -354,10 +355,13 @@ def _route_all_nets(
                     protected=protected,
                     footprint_blocked=footprint_blocked,
                     inverted_cells=frozenset(inverted_cells),
+                    terminal_positions=all_terminal_positions,
                 )
                 _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
                                    opaque_support_block=WOOLS[net_idx % len(WOOLS)],
-                                   inverted_cells=inverted_cells)
+                                   inverted_cells=inverted_cells,
+                                   goal=dst_pin,
+                                   terminal_positions=all_terminal_positions)
             _place_repeaters_for_net(workspace, dust_owner, torch_cells, net.net_id, src_pin)
         except Exception as e:
             routing_failures.append((net.net_id, e))
