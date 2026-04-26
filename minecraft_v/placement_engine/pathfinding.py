@@ -103,8 +103,14 @@ def _find_wire_path(
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
     min_y = bounds[1]
+    # came_from is write-only during search (set at expansion, not push) and used
+    # only for final path reconstruction. All history-dependent move checks use
+    # path_snapshot carried per heap entry instead, so different paths to the same
+    # cell don't corrupt each other's move conditions.
+    # TODO: if memory or speed becomes an issue, replace per-entry frozenset with
+    #       state augmentation (option 1): encode relevant history as extra state
+    #       bits (e.g. last_move_type) to keep node state small and Markovian.
     came_from: dict[tuple[int, int, int], tuple[int, int, int] | None] = {}
-    current_path: set[tuple[int, int, int]] = set()
 
     # Strip the goal terminal's own keepout zone from protected so the approach
     # path is not blocked by the destination's own neighborhood.
@@ -121,8 +127,8 @@ def _find_wire_path(
     # 1-cell expansion cells immediately adjacent to the goal (including +2Y for
     # the IO repeater top clearance) so slope/flat approaches can reach the terminal.
     goal_fp_relief: set[tuple[int, int, int]] = set()
-    for _ddx, _ddy, _ddz in _DIRS_6:
-        goal_fp_relief.add((gx + _ddx, gy + _ddy, gz + _ddz))
+    for _ddx, _ddz in _HORIZ_DIRS:
+        goal_fp_relief.add((gx + _ddx, gy - 1, gz + _ddz))
     goal_fp_relief.add((gx, gy + 2, gz))
     effective_footprint_blocked = footprint_blocked - goal_fp_relief
 
@@ -136,7 +142,10 @@ def _find_wire_path(
             and _wire_walkable(workspace, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt, inverted_cells=inverted_cells)
         )
 
-    def _horiz_neighbors(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
+    def _horiz_neighbors(
+            pos: tuple[int, int, int],
+            path_snapshot: frozenset[tuple[int, int, int]],
+    ) -> list[tuple[tuple[int, int, int], int]]:
         x, y, z = pos
         result: list[tuple[tuple[int, int, int], int]] = []
         for dx, dz in _HORIZ_DIRS:
@@ -144,9 +153,9 @@ def _find_wire_path(
 
             # Flat move
             flat = (nx, y, nz)
-            if walkable(flat) and (nx, y + 1, nz) not in current_path:
+            if walkable(flat) and (nx, y + 1, nz) not in path_snapshot:
                 if y <= min_y or (
-                    (nx, y - 1, nz) not in current_path
+                    (nx, y - 1, nz) not in path_snapshot
                     and _can_be_support(workspace, solid, (nx, y - 1, nz), bounds)
                 ):
                     result.append((flat, 1))
@@ -156,7 +165,7 @@ def _find_wire_path(
                 up = (nx, y + 1, nz)
                 if walkable(up):
                     ramp = (nx, y, nz)
-                    if ramp not in current_path and (
+                    if ramp not in path_snapshot and (
                         ramp in solid or (_in_bounds(ramp, bounds) and _is_air(workspace[ramp[0], ramp[1], ramp[2]]))
                     ):
                         # TODO: this discourages ramping so we get torch towers for vertical signal extension, but we should guarantee that vertical extension no matter what path is chosen
@@ -168,8 +177,8 @@ def _find_wire_path(
                 above_down = (nx, y, nz)
                 above_clear = (
                     above_down not in solid
-                    and above_down not in current_path
-                    and (nx, y + 1, nz) not in current_path
+                    and above_down not in path_snapshot
+                    and (nx, y + 1, nz) not in path_snapshot
                     and _in_bounds(above_down, bounds)
                     and _is_air(workspace[above_down[0], above_down[1], above_down[2]])
                 )
@@ -182,7 +191,10 @@ def _find_wire_path(
                         result.append((down, 2))
         return result
 
-    def _double_slope_neighbors(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
+    def _double_slope_neighbors(
+            pos: tuple[int, int, int],
+            path_snapshot: frozenset[tuple[int, int, int]],
+    ) -> list[tuple[tuple[int, int, int], int]]:
         x, y, z = pos
         result: list[tuple[tuple[int, int, int], int]] = []
         for dx, dz in _HORIZ_DIRS:
@@ -197,14 +209,14 @@ def _find_wire_path(
                 mid_ok = (
                     mid not in protected
                     and mid not in footprint_blocked
-                    and mid not in current_path
+                    and mid not in path_snapshot
                     and _in_bounds(mid, bounds)
                     and mid not in solid
                     and _is_air(workspace[mid[0], mid[1], mid[2]])
                     and _wire_walkable(workspace, solid, dust_owner, mid, net_id, bounds, exempt_foreign=exempt)
                 )
                 if mid_ok and walkable(top):
-                    if mid_support not in current_path and _can_be_support(workspace, solid, mid_support, bounds):
+                    if mid_support not in path_snapshot and _can_be_support(workspace, solid, mid_support, bounds):
                         result.append((top, 7))
 
             # 2x slope-down
@@ -215,7 +227,7 @@ def _find_wire_path(
                 above_mid = (x + dx, y, z + dz)
                 above_clear = (
                     above_mid not in solid
-                    and above_mid not in current_path
+                    and above_mid not in path_snapshot
                     and _in_bounds(above_mid, bounds)
                     and _is_air(workspace[above_mid[0], above_mid[1], above_mid[2]])
                 )
@@ -223,7 +235,7 @@ def _find_wire_path(
                     above_clear
                     and mid_dn not in protected
                     and mid_dn not in footprint_blocked
-                    and mid_dn not in current_path
+                    and mid_dn not in path_snapshot
                     and _in_bounds(mid_dn, bounds)
                     and mid_dn not in solid
                     and _is_air(workspace[mid_dn[0], mid_dn[1], mid_dn[2]])
@@ -234,12 +246,15 @@ def _find_wire_path(
                         result.append((top_dn, 7))
         return result
 
-    def _tower_neighbors(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
+    def _tower_neighbors(
+            pos: tuple[int, int, int],
+            parent: tuple[int, int, int] | None,
+            path_snapshot: frozenset[tuple[int, int, int]],
+    ) -> list[tuple[tuple[int, int, int], int]]:
         x, y, z = pos
         result: list[tuple[tuple[int, int, int], int]] = []
 
         # +1Y from tower top: only valid when this position was reached via a tower move
-        parent = came_from.get(pos)
         if parent is not None:
             px, py, pz = parent
             if py + 4 == y and (x - px, z - pz) in _TOWER_2BLOCK:
@@ -255,7 +270,7 @@ def _find_wire_path(
             if not walkable(tower_top):
                 continue
             rep = (x + tdx, y, z + tdz)
-            if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected or rep in came_from:
+            if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected or rep in path_snapshot:
                 continue
             if not _is_air(workspace[rep[0], rep[1], rep[2]]):
                 continue
@@ -281,14 +296,18 @@ def _find_wire_path(
             result.append((tower_top, 8))
         return result
 
-    def neighbors(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
-        result = _horiz_neighbors(pos)
-        result.extend(_double_slope_neighbors(pos))
-        result.extend(_tower_neighbors(pos))
+    def neighbors(
+            pos: tuple[int, int, int],
+            parent: tuple[int, int, int] | None,
+            path_snapshot: frozenset[tuple[int, int, int]],
+    ) -> list[tuple[tuple[int, int, int], int]]:
+        result = _horiz_neighbors(pos, path_snapshot)
+        result.extend(_double_slope_neighbors(pos, path_snapshot))
+        result.extend(_tower_neighbors(pos, parent, path_snapshot))
         return result
 
     def heuristic(pos: tuple[int, int, int]) -> int:
-        return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 2
+        return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 3
 
     # Seed cells: prefer start itself; fall back to neighbors when blocked
     seeds: list[tuple[int, int, int]] = []
@@ -314,64 +333,87 @@ def _find_wire_path(
     goal_set: set[tuple[int, int, int]] = set()
     if walkable(goal):
         goal_set.add(goal)
-    else:
-        for ddx, ddy, ddz in _DIRS_6:
-            cand = (goal[0] + ddx, goal[1] + ddy, goal[2] + ddz)
-            if walkable(cand):
-                goal_set.add(cand)
     if not goal_set:
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
+    def _local_snap(
+            pos: tuple[int, int, int],
+            snap: frozenset[tuple[int, int, int]],
+    ) -> frozenset[tuple[int, int, int]]:
+        # Cells in snap that are within ±1 cardinal of pos at Y-1/0/+1 — exactly
+        # the cells checked in neighbor move conditions. Two paths to the same cell
+        # with different local snapshots produce different available moves, so they
+        # are treated as distinct states by the g_score filter.
+        x, y, z = pos
+        relevant = frozenset(
+            (x + dx, y + dy, z + dz)
+            for dx, dz in _HORIZ_DIRS
+            for dy in (-1, 0, 1)
+        )
+        return snap & relevant
+
     # A* search
+    # Heap entry: (f, g, counter, pos, parent, path_snapshot).
+    # counter is unique per push so comparison never falls through to pos/parent/path_snapshot.
+    # g_score keyed on (pos, local_snapshot) so paths with different local histories
+    # coexist — a cheaper path with a restrictive snapshot does not block a more
+    # expensive path whose snapshot enables moves the cheaper one can't make.
     counter = 0
-    open_heap: list[tuple[int, int, int, tuple[int, int, int]]] = []
-    g_score: dict[tuple[int, int, int], int] = {}
+    open_heap: list[tuple[int, int, int, tuple[int, int, int], tuple[int, int, int] | None, frozenset[tuple[int, int, int]]]] = []
+    g_score: dict[tuple[tuple[int, int, int], frozenset[tuple[int, int, int]]], int] = {}
     for seed in seeds:
-        g_score[seed] = 0
-        came_from[seed] = None
-        heapq.heappush(open_heap, (heuristic(seed), 0, counter, seed))
+        snap0: frozenset[tuple[int, int, int]] = frozenset({seed})
+        g_score[(seed, _local_snap(seed, snap0))] = 0
+        heapq.heappush(open_heap, (heuristic(seed), 0, counter, seed, None, snap0))
         counter += 1
 
     reached: tuple[int, int, int] | None = None
     best_node: tuple[int, int, int] = seeds[0]
     best_h: int = min(heuristic(s) for s in seeds)
-    explored = set()
+    explored: set[tuple[int, int, int]] = set()
     stagnation = 0
     early_stop_reason: str | None = None
     while open_heap:
-        _, g, _, current = heapq.heappop(open_heap)
-        if g > g_score.get(current, 10 ** 9):
+        _, g, _, current, parent, path_snapshot = heapq.heappop(open_heap)
+        g_key = (current, _local_snap(current, path_snapshot))
+        if g > g_score.get(g_key, 10 ** 9):
             continue
+        # Record parent for path reconstruction. First expansion wins: subsequent
+        # expansions of the same cell (different local_snap) don't overwrite, so
+        # came_from forms a tree with strictly decreasing g toward the seed — no cycles.
+        if current not in came_from:
+            came_from[current] = parent
         h = heuristic(current)
         if h < best_h:
             best_h = h
             best_node = current
-            stagnation = 0
-        else:
+        # Stagnation = consecutive re-expansions of already-explored positions.
+        # New territory always resets it; detours away from goal don't penalize.
+        # Node cap handles searches that explore forever without reaching goal.
+        if current in explored:
             stagnation += 1
             if stagnation >= _ROUTE_STAGNATION:
-                early_stop_reason = f"stagnated ({stagnation} expansions without progress)"
+                early_stop_reason = f"stagnated ({stagnation} re-expansions without new territory)"
                 break
-        explored.add(current)
+        else:
+            stagnation = 0
+            explored.add(current)
         if len(explored) >= _ROUTE_MAX_NODES:
             early_stop_reason = f"node cap ({_ROUTE_MAX_NODES})"
             break
         if current in goal_set:
             reached = current
             break
-        current_path.clear()
-        node: tuple[int, int, int] | None = current
-        while node is not None:
-            current_path.add(node)
-            node = came_from.get(node)
-        for neighbor, cost in neighbors(current):
+        new_snap = path_snapshot | {current}
+        for neighbor, cost in neighbors(current, parent, path_snapshot):
             new_g = g + cost
-            if new_g < g_score.get(neighbor, 10 ** 9):
-                g_score[neighbor] = new_g
-                came_from[neighbor] = current
+            neighbor_snap = new_snap | {neighbor}
+            nkey = (neighbor, _local_snap(neighbor, neighbor_snap))
+            if new_g < g_score.get(nkey, 10 ** 9):
+                g_score[nkey] = new_g
                 heapq.heappush(
                     open_heap,
-                    (new_g + heuristic(neighbor), new_g, counter, neighbor),
+                    (new_g + heuristic(neighbor), new_g, counter, neighbor, current, neighbor_snap),
                 )
                 counter += 1
 
@@ -393,6 +435,8 @@ def _find_wire_path(
     path: list[tuple[int, int, int]] = []
     cur: tuple[int, int, int] | None = reached
     while cur is not None:
+        if cur in path:
+            raise ValueError("Path tracing resulted in loop")
         path.append(cur)
         cur = came_from[cur]
     path.reverse()
