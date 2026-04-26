@@ -269,8 +269,9 @@ def _route_all_nets(
         try:
             src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
             protected = _compute_net_protected(net.net_id, all_terminals)
-            for sink in net.sinks:
-                dst_pin = _pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name)
+            dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
+            sorted_pins = sorted(dst_pins, key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
+            for dst_pin in sorted_pins:
                 tree_seeds = [
                     pos for pos, owner in dust_owner.items()
                     if owner == net.net_id
