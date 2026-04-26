@@ -194,9 +194,10 @@ def _find_wire_path(
     def _double_slope_neighbors(
             pos: tuple[int, int, int],
             path_snapshot: frozenset[tuple[int, int, int]],
-    ) -> list[tuple[tuple[int, int, int], int]]:
+    ) -> tuple[list[tuple[tuple[int, int, int], int]], list[tuple[int, int, int]]]:
         x, y, z = pos
         result: list[tuple[tuple[int, int, int], int]] = []
+        additional_blocked = []
         for dx, dz in _HORIZ_DIRS:
             nx2, nz2 = x + 2 * dx, z + 2 * dz
             exempt = frozenset([(nx2, y, nz2)])
@@ -218,6 +219,7 @@ def _find_wire_path(
                 if mid_ok and walkable(top):
                     if mid_support not in path_snapshot and _can_be_support(workspace, solid, mid_support, bounds):
                         result.append((top, 7))
+                        additional_blocked.append(mid)
 
             # 2x slope-down
             if y - 2 >= min_y:
@@ -244,7 +246,8 @@ def _find_wire_path(
                 if mid_dn_ok and walkable(top_dn):
                     if y - 2 <= min_y or _can_be_support(workspace, solid, (nx2, y - 3, nz2), bounds):
                         result.append((top_dn, 7))
-        return result
+                        additional_blocked.append(mid_dn)
+        return result, additional_blocked
 
     def _tower_neighbors(
             pos: tuple[int, int, int],
@@ -313,11 +316,12 @@ def _find_wire_path(
             pos: tuple[int, int, int],
             parent: tuple[int, int, int] | None,
             path_snapshot: frozenset[tuple[int, int, int]],
-    ) -> list[tuple[tuple[int, int, int], int]]:
+    ) -> tuple[list[tuple[tuple[int, int, int], int]], list[tuple[int, int, int]]]: # results, additional cells
         result = _horiz_neighbors(pos, path_snapshot)
-        result.extend(_double_slope_neighbors(pos, path_snapshot))
+        dsn, additional_blocked = _double_slope_neighbors(pos, path_snapshot)
+        result.extend(dsn)
         result.extend(_tower_neighbors(pos, parent, path_snapshot))
-        return result
+        return result, additional_blocked
 
     def heuristic(pos: tuple[int, int, int]) -> int:
         return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 3
@@ -421,8 +425,9 @@ def _find_wire_path(
             break
         # Add current to local path context, then restrict to each neighbor's
         # ±1-XZ window. Frozenset stays ≤12 cells regardless of path length.
-        new_snap = path_snapshot | {current}
-        for neighbor, cost in neighbors(current, parent, path_snapshot):
+        neighbor_results, additional_blocked = neighbors(current, parent, path_snapshot)
+        new_snap = path_snapshot | {current} | set(additional_blocked)
+        for neighbor, cost in neighbor_results:
             new_g = g + cost
             neighbor_snap = _local_snap(neighbor, new_snap)
             nkey = (neighbor, neighbor_snap)
