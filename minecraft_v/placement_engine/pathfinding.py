@@ -1,7 +1,7 @@
 from __future__ import annotations
 import heapq
 from litemapy import BlockState, Region
-from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS
+from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
 
 
@@ -334,8 +334,10 @@ def _find_wire_path(
 
     reached: tuple[int, int, int] | None = None
     best_node: tuple[int, int, int] = seeds[0]
-    best_h: int = heuristic(seeds[0])
+    best_h: int = min(heuristic(s) for s in seeds)
     explored = set()
+    stagnation = 0
+    early_stop_reason: str | None = None
     while open_heap:
         _, g, _, current = heapq.heappop(open_heap)
         if g > g_score.get(current, 10 ** 9):
@@ -344,7 +346,16 @@ def _find_wire_path(
         if h < best_h:
             best_h = h
             best_node = current
+            stagnation = 0
+        else:
+            stagnation += 1
+            if stagnation >= _ROUTE_STAGNATION:
+                early_stop_reason = f"stagnated ({stagnation} expansions without progress)"
+                break
         explored.add(current)
+        if len(explored) >= _ROUTE_MAX_NODES:
+            early_stop_reason = f"node cap ({_ROUTE_MAX_NODES})"
+            break
         if current in goal_set:
             reached = current
             break
@@ -374,7 +385,8 @@ def _find_wire_path(
         for coord in sorted(explored, key=heuristic)[:100]:
             if _is_air(workspace[*coord]):
                 workspace[*coord] = GLASS
-        raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node})")
+        reason = f"; {early_stop_reason}" if early_stop_reason else ""
+        raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason})")
     if walkable(goal) and reached != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {reached}")
 
