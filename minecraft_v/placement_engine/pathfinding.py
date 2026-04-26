@@ -340,10 +340,9 @@ def _find_wire_path(
             pos: tuple[int, int, int],
             snap: frozenset[tuple[int, int, int]],
     ) -> frozenset[tuple[int, int, int]]:
-        # Cells in snap that are within ±1 cardinal of pos at Y-1/0/+1 — exactly
-        # the cells checked in neighbor move conditions. Two paths to the same cell
-        # with different local snapshots produce different available moves, so they
-        # are treated as distinct states by the g_score filter.
+        # Cells in snap within ±1 cardinal of pos at Y-1/0/+1 — exactly the cells
+        # checked in neighbor move conditions. Called at push time only; heap entries
+        # store the already-restricted local snap so it never grows beyond 12 cells.
         x, y, z = pos
         relevant = frozenset(
             (x + dx, y + dy, z + dz)
@@ -362,8 +361,9 @@ def _find_wire_path(
     open_heap: list[tuple[int, int, int, tuple[int, int, int], tuple[int, int, int] | None, frozenset[tuple[int, int, int]]]] = []
     g_score: dict[tuple[tuple[int, int, int], frozenset[tuple[int, int, int]]], int] = {}
     for seed in seeds:
-        snap0: frozenset[tuple[int, int, int]] = frozenset({seed})
-        g_score[(seed, _local_snap(seed, snap0))] = 0
+        # Local snap of seed is empty — seed is never in its own ±1-XZ window.
+        snap0: frozenset[tuple[int, int, int]] = frozenset()
+        g_score[(seed, snap0)] = 0
         heapq.heappush(open_heap, (heuristic(seed), 0, counter, seed, None, snap0))
         counter += 1
 
@@ -375,7 +375,9 @@ def _find_wire_path(
     early_stop_reason: str | None = None
     while open_heap:
         _, g, _, current, parent, path_snapshot = heapq.heappop(open_heap)
-        g_key = (current, _local_snap(current, path_snapshot))
+        # path_snapshot stored in heap is already the local snap (≤12 cells);
+        # no need to re-intersect here.
+        g_key = (current, path_snapshot)
         if g > g_score.get(g_key, 10 ** 9):
             continue
         # Record parent for path reconstruction. First expansion wins: subsequent
@@ -404,11 +406,13 @@ def _find_wire_path(
         if current in goal_set:
             reached = current
             break
+        # Add current to local path context, then restrict to each neighbor's
+        # ±1-XZ window. Frozenset stays ≤12 cells regardless of path length.
         new_snap = path_snapshot | {current}
         for neighbor, cost in neighbors(current, parent, path_snapshot):
             new_g = g + cost
-            neighbor_snap = new_snap | {neighbor}
-            nkey = (neighbor, _local_snap(neighbor, neighbor_snap))
+            neighbor_snap = _local_snap(neighbor, new_snap)
+            nkey = (neighbor, neighbor_snap)
             if new_g < g_score.get(nkey, 10 ** 9):
                 g_score[nkey] = new_g
                 heapq.heappush(
