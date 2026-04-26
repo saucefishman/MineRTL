@@ -79,12 +79,13 @@ def _wire_walkable(
         owner = dust_owner.get(vp)
         if owner is not None and owner != net_id:
             return False
-    # Inverted tower cells (torch y+1 and stone y+2) emit wrong-polarity quasi-power
-    # on their 4 horizontal faces. Quasi-power doesn't propagate stairwise so only
-    # check same-Y horizontal neighbors.
+    # Inverted cells (tower torch/stone, powered-minus4 torch/dust) must not be
+    # horizontally adjacent at same Y or ±1 Y — the ±1 check covers slope connections
+    # into inverted redstone dust, which wire can reach slopingly.
     for dx, dz in _HORIZ_DIRS:
-        if (x + dx, y, z + dz) in inverted_cells:
-            return False
+        for dy in (-1, 0, 1):
+            if (x + dx, y + dy, z + dz) in inverted_cells:
+                return False
     return True
 
 
@@ -312,6 +313,75 @@ def _find_wire_path(
             result.append((tower_top, 8))
         return result
 
+    def _powered_minus4_neighbors(
+            pos: tuple[int, int, int],
+            path_snapshot: frozenset[tuple[int, int, int]],
+    ) -> list[tuple[tuple[int, int, int], int]]:
+        x, y, z = pos
+        if y - 4 < min_y:
+            return []
+        dest = (x, y - 4, z)
+        if not walkable(dest):
+            return []
+
+        for dx, dz in _HORIZ_DIRS:
+            nx, nz = x + dx, z + dz
+
+            # Support block at (x,y-1,z): must be placeable as opaque (not glass, not path)
+            below_launch = (x, y - 1, z)
+            if below_launch in path_snapshot:
+                continue
+            if below_launch in solid:
+                if workspace[below_launch[0], below_launch[1], below_launch[2]] == GLASS:
+                    continue
+            elif not (_in_bounds(below_launch, bounds) and _is_air(workspace[below_launch[0], below_launch[1], below_launch[2]])):
+                continue
+
+            # All side/clearance cells must be air, unblocked, and unowned by foreign net
+            side_cells = [
+                (nx, y - 1, nz),  # first wall torch (inverted)
+                (nx, y - 2, nz),  # inverted dust
+                (nx, y - 3, nz),  # second support block
+                (x,  y - 3, z),   # second wall torch (active)
+                (nx, y,     nz),  # clearance above first torch
+                (x,  y - 2, z),   # clearance above second torch
+            ]
+            ok = True
+            for cp in side_cells:
+                if not _in_bounds(cp, bounds):
+                    ok = False
+                    break
+                if cp in footprint_blocked or cp in effective_protected or cp in path_snapshot:
+                    ok = False
+                    break
+                if cp in solid:
+                    ok = False
+                    break
+                if not _is_air(workspace[cp[0], cp[1], cp[2]]):
+                    ok = False
+                    break
+                owner = dust_owner.get(cp)
+                if owner is not None and owner != net_id:
+                    ok = False
+                    break
+            if not ok:
+                continue
+
+            # Inverted dust at (nx,y-2,nz) must have no wire at slope-adjacent positions
+            # (horizontal cardinal ±1 Y) — dust connects slopingly and would pick up wrong signal.
+            for ddx, ddz in _HORIZ_DIRS:
+                for ddy in (-1, 1):
+                    sp = (nx + ddx, y - 2 + ddy, nz + ddz)
+                    if dust_owner.get(sp) is not None:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if ok:
+                return [(dest, 8)]
+
+        return []
+
     def neighbors(
             pos: tuple[int, int, int],
             parent: tuple[int, int, int] | None,
@@ -321,6 +391,7 @@ def _find_wire_path(
         dsn, additional_blocked = _double_slope_neighbors(pos, path_snapshot)
         result.extend(dsn)
         result.extend(_tower_neighbors(pos, parent, path_snapshot))
+        result.extend(_powered_minus4_neighbors(pos, path_snapshot))
         return result, additional_blocked
 
     def heuristic(pos: tuple[int, int, int]) -> int:
