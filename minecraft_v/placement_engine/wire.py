@@ -106,6 +106,8 @@ def _lay_powered_minus4_move(
             (nx_c, y - 2, nz_c),
             (nx_c, y - 3, nz_c),
             (x,    y - 3, z),
+            (nx_c, y,     nz_c),  # clearance above first torch
+            (x,    y - 2, z),     # clearance above second torch
         ]
         if all(
             _is_air(workspace[cx, cy, cz]) and (cx, cy, cz) not in solid
@@ -114,8 +116,10 @@ def _lay_powered_minus4_move(
             and (nx_c, y - 1, nz_c) not in terminal_positions \
             and (nx_c, y - 2, nz_c) not in terminal_positions \
             and (nx_c, y - 3, nz_c) not in terminal_positions \
-            and (x, y - 3, z) not in terminal_positions \
-            and (x, y - 1, z) not in terminal_positions:
+            and (x,    y - 3, z)    not in terminal_positions \
+            and (x,    y - 1, z)    not in terminal_positions \
+            and (nx_c, y,     nz_c) not in terminal_positions \
+            and (x,    y - 2, z)    not in terminal_positions:
             direction = (dx, dz)
             break
     if direction is None:
@@ -245,12 +249,24 @@ def _lay_redstone_path(
             p4_bottom.add(i)
             p4_top.add(i + 1)
 
+    # cells[i] needs glass (not stone) support if cells[j] (j > i) shares the same XZ
+    # and is exactly 2Y lower: stone would sit directly above cells[j], blocking the
+    # slope connection from any intermediate cell at y-1 into cells[j], and would also
+    # conduct the signal from cells[i] down through the support to cells[j].
+    _pos_to_idx: dict[tuple[int, int, int], int] = {c: i for i, c in enumerate(cells)}
+    zigzag_glass: set[int] = set()
+    for i, (ax, ay, az) in enumerate(cells):
+        below2 = (ax, ay - 2, az)
+        j = _pos_to_idx.get(below2, -1)
+        if j > i:
+            zigzag_glass.add(i)
+
     for i, cell in enumerate(cells):
         if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):
             continue  # already placed by their respective move handler
 
         if i in slope2_bottom:
-            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block)
+            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
 
         elif i in tower_bottom:
             _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
@@ -260,6 +276,11 @@ def _lay_redstone_path(
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
+            if i in zigzag_glass:
+                ax, ay, az = cell
+                support = (ax, ay - 1, az)
+                if support in solid and _block_str(workspace[ax, ay - 1, az]) == _block_str(opaque_support_block):
+                    workspace[ax, ay - 1, az] = GLASS
 
 
 def _place_repeaters_for_net(

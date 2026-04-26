@@ -185,6 +185,9 @@ def _route_output_pin_extensions(
         ext_bounds: tuple[int, int, int, int, int, int],
         layer_z: int,
         max_bridge_y: int,
+        footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
+        all_terminals: dict[str, set[tuple[int, int, int]]] | None = None,
+        inverted_cells: set[tuple[int, int, int]] | None = None,
 ) -> None:
     min_x, min_y, min_z, max_x, max_y, max_z = ext_bounds
 
@@ -192,9 +195,11 @@ def _route_output_pin_extensions(
         x, y, z = pos
         return min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z
 
+    # Validate all targets upfront and build target position map for cross-pin protection.
+    ext_target_positions: dict[str, tuple[int, int, int]] = {}
+    repeater_cells_by_pin: dict[str, tuple[int, int, int]] = {}
     for pin_name, (tx, ty) in output_pin_targets.items():
-        lookup = output_repeater_lookup.get(pin_name)
-        if lookup is None:
+        if output_repeater_lookup.get(pin_name) is None:
             known = ", ".join(sorted(output_repeater_lookup))
             raise ValueError(f"Unknown output pin target '{pin_name}'. Known keys: {known}")
         if not (min_x <= tx <= max_x and min_y <= ty <= max_y):
@@ -202,9 +207,31 @@ def _route_output_pin_extensions(
                 f"Output target for '{pin_name}' is out of bounds: ({tx}, {ty}) not in "
                 f"x=[{min_x},{max_x}], y=[{min_y},{max_y}]"
             )
-        if not (min_z <= layer_z <= max_z):
-            raise ValueError(f"Output layer z={layer_z} outside workspace z=[{min_z},{max_z}]")
+        ext_target_positions[pin_name] = (tx, ty, layer_z)
+        repeater_cells_by_pin[pin_name] = output_repeater_lookup[pin_name][0]
+    if not (min_z <= layer_z <= max_z):
+        raise ValueError(f"Output layer z={layer_z} outside workspace z=[{min_z},{max_z}]")
 
+    all_ext_targets = frozenset(ext_target_positions.values())
+
+    def _repeater_protection_zone(rep: tuple[int, int, int]) -> frozenset[tuple[int, int, int]]:
+        """Cardinal+diagonal keepout around a single repeater cell — same geometry as _compute_net_protected."""
+        rx, ry, rz = rep
+        zone: set[tuple[int, int, int]] = {rep, (rx, ry + 1, rz)}
+        for dx, dz in _HORIZ_DIRS:
+            for dy in range(-2, 3):
+                zone.add((rx + dx, ry + dy, rz + dz))
+        for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            zone.add((rx + dx, ry, rz + dz))
+        return frozenset(zone)
+
+    def _ext_route_distance(pn: str) -> int:
+        rep = repeater_cells_by_pin[pn]
+        tgt = ext_target_positions[pn]
+        return abs(rep[0] - tgt[0]) + abs(rep[1] - tgt[1]) + abs(rep[2] - tgt[2])
+
+    for pin_name in sorted(output_pin_targets, key=_ext_route_distance):
+        lookup = output_repeater_lookup[pin_name]
         repeater_cell, side_name, endpoint = lookup
         base_net_id = net_id_by_output_endpoint.get(endpoint)
         if base_net_id is None:
@@ -220,7 +247,17 @@ def _route_output_pin_extensions(
             pos for pos, owner in dust_owner.items()
             if owner == base_net_id and _is_redstone_wire(workspace[pos[0], pos[1], pos[2]])
         ]
-        target = (tx, ty, layer_z)
+        target = ext_target_positions[pin_name]
+        protected = _compute_net_protected(base_net_id, all_terminals) if all_terminals else frozenset()
+        # Other output pin targets and their source repeaters act as foreign terminals.
+        other_zone: frozenset[tuple[int, int, int]] = frozenset()
+        for other_pin, rc in repeater_cells_by_pin.items():
+            if other_pin != pin_name:
+                other_zone = other_zone | _repeater_protection_zone(rc)
+                other_zone = other_zone | _repeater_protection_zone(ext_target_positions[other_pin])
+        protected = protected | other_zone
+        all_terminal_positions = (frozenset(pos for s in all_terminals.values() for pos in s) if all_terminals else frozenset()) | all_ext_targets
+        inv_snap = frozenset(inverted_cells) if inverted_cells is not None else frozenset()
         path = _find_wire_path(
             workspace,
             solid,
@@ -231,8 +268,15 @@ def _route_output_pin_extensions(
             ext_bounds,
             max_bridge_y=max_bridge_y,
             tree_seeds=tree_seeds,
+            protected=protected,
+            footprint_blocked=footprint_blocked,
+            inverted_cells=inv_snap,
+            terminal_positions=all_terminal_positions,
         )
-        _lay_redstone_path(workspace, solid, dust_owner, path, base_net_id)
+        _lay_redstone_path(workspace, solid, dust_owner, path, base_net_id,
+                           inverted_cells=inverted_cells,
+                           goal=target,
+                           terminal_positions=all_terminal_positions)
         _place_repeaters_for_net(workspace, dust_owner, torch_cells, base_net_id, path[0])
 
 
@@ -329,7 +373,7 @@ def _route_all_nets(
         max_bridge_y: int,
         footprint_blocked: frozenset[tuple[int, int, int]],
         all_terminals: dict[str, set[tuple[int, int, int]]],
-) -> list[tuple[str, Exception]]:
+) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
     inverted_cells: set[tuple[int, int, int]] = set()
@@ -367,7 +411,7 @@ def _route_all_nets(
             routing_failures.append((net.net_id, e))
             print(f"\n[error] skipped net {net.net_id}: {e}")
     print(f"\r[wire] done ({total_nets} nets, {len(routing_failures)} failed)        ")
-    return routing_failures
+    return routing_failures, inverted_cells
 
 
 def build_litematic_from_component_list(
@@ -385,7 +429,7 @@ def build_litematic_from_component_list(
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
         output_pin_targets: dict[str, tuple[int, int]] | None = None,
-        pin_targets_space = 5
+        pin_targets_space = 10
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -461,7 +505,7 @@ def build_litematic_from_component_list(
     ])
 
     sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
-    routing_failures = _route_all_nets(
+    routing_failures, inverted_cells = _route_all_nets(
         workspace, solid, dust_owner, torch_cells,
         sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
         footprint_blocked, all_terminals,
@@ -487,6 +531,9 @@ def build_litematic_from_component_list(
                 ext_bounds,
                 output_layer_z,
                 max_bridge_y,
+                footprint_blocked=footprint_blocked,
+                all_terminals=all_terminals,
+                inverted_cells=inverted_cells,
             )
         except Exception as e:
             if allow_routing_failures:
