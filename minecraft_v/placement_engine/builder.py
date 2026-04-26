@@ -229,6 +229,7 @@ def _compute_net_protected(
             continue
         for tx, ty, tz in terminals:
             cells.add((tx, ty, tz))
+            cells.add((tx, ty + 1, tz))
             for dx, dz in _HORIZ_DIRS:
                 for dy in range(-2, 3):
                     cells.add((tx + dx, ty + dy, tz + dz))
