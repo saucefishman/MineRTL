@@ -158,6 +158,62 @@ def _assign_io_x_positions(
     return result
 
 
+def _compute_output_cone_y(
+        gates: list[Component],
+        all_components: list[Component],
+        nets: list[NetConnection],
+        y_stride: int,
+) -> dict[str, int | None]:
+    """
+    For each gate, determine which indexed output-IO cones it belongs to via
+    backward BFS.  Returns the unique Y level if the gate is exclusively in
+    one cone, None if it is shared across multiple cones or unreachable.
+
+    Only OUTPUT_PIN components with a bit index drive the cone analysis; input
+    IOs are ignored here because address/control bits fan forward into shared
+    logic and would pollute the cone labelling.
+    """
+    gate_ids = {c.id for c in gates}
+
+    # comp → nets where it appears as a SINK (receives signal)
+    comp_as_sink: dict[str, list[str]] = defaultdict(list)
+    net_source_comp: dict[str, str] = {}
+    for net in nets:
+        net_source_comp[net.net_id] = net.source.component_id
+        for sink in net.sinks:
+            comp_as_sink[sink.component_id].append(net.net_id)
+
+    indexed_outputs: list[tuple[str, int]] = [
+        (c.id, _io_bit_index(c))
+        for c in all_components
+        if c.type == ComponentType.OUTPUT_PIN and _io_bit_index(c) is not None
+    ]
+
+    if not indexed_outputs:
+        return {c.id: None for c in gates}
+
+    gate_cone_ys: dict[str, set[int]] = {c.id: set() for c in gates}
+
+    for io_id, bit_idx in indexed_outputs:
+        y = bit_idx * y_stride  # type: ignore[operator]
+        visited: set[str] = {io_id}
+        queue: deque[str] = deque([io_id])
+        while queue:
+            comp_id = queue.popleft()
+            if comp_id in gate_ids:
+                gate_cone_ys[comp_id].add(y)
+            for net_id in comp_as_sink.get(comp_id, []):
+                src = net_source_comp.get(net_id)
+                if src is not None and src not in visited:
+                    visited.add(src)
+                    queue.append(src)
+
+    return {
+        c.id: (next(iter(gate_cone_ys[c.id])) if len(gate_cone_ys[c.id]) == 1 else None)
+        for c in gates
+    }
+
+
 def _majority_y(ys: list[int]) -> int:
     """Plurality-vote Y level; tiebreak = max Y."""
     count: dict[int, int] = defaultdict(int)
@@ -237,10 +293,11 @@ def _assign_component_y_levels(
     """Return Y offset per component ID.
 
     Indexed IO (e.g. ``a[2]``) → bit_index * y_stride (fixed).
-    Gates → least-loaded Y among candidate levels drawn from both input
-    sources and output sinks already assigned. Using both directions lets
-    gates near the output boundary (e.g. DFFEs driving indexed outputs)
-    land on the correct bit layer even when their inputs are unconstrained.
+    Gates exclusively in one indexed-output's backward fanin cone → forced to
+    that cone's Y level (avoids the heuristic misassigning independent data
+    paths that happen to share control/address logic).
+    Remaining gates → least-loaded Y among candidates from connected
+    already-assigned components; two passes (forward + backward).
     Non-indexed IO (scalar shared) → majority Y of connected gates.
     """
     y_level: dict[str, int] = {}
@@ -252,6 +309,17 @@ def _assign_component_y_levels(
 
     gates = [c for c in components if c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)]
     gate_ids = {c.id for c in gates}
+
+    # Pre-seed gates that live exclusively in one indexed output's fanin cone.
+    # Gates reachable from multiple cones remain unset and are handled by the
+    # heuristic passes below.
+    cone_y = _compute_output_cone_y(gates, components, nets, y_stride)
+    fixed_y_gates: set[str] = set()
+    for g in gates:
+        cy = cone_y.get(g.id)
+        if cy is not None:
+            y_level[g.id] = cy
+            fixed_y_gates.add(g.id)
 
     net_source_cid: dict[str, str] = {}
     gate_input_nets: dict[str, list[str]] = defaultdict(list)
@@ -272,34 +340,36 @@ def _assign_component_y_levels(
     depths = _build_dependency_layers(gates, io_nets)
     max_depth = max(depths.values(), default=0)
     gates_by_depth: dict[int, list[Component]] = defaultdict(list)
-    for gate in gates:
-        gates_by_depth[depths[gate.id]].append(gate)
+    for g in gates:
+        gates_by_depth[depths[g.id]].append(g)
 
     def _run_pass(depth_order: list[int]) -> None:
         gate_count_per_y: dict[int, int] = defaultdict(int)
         for existing_y in y_level.values():
             gate_count_per_y[existing_y] += 0
-        for gate in gates:
-            if gate.id in y_level:
-                gate_count_per_y[y_level[gate.id]] += 1
+        for g in gates:
+            if g.id in y_level:
+                gate_count_per_y[y_level[g.id]] += 1
         for d in depth_order:
-            for gate in gates_by_depth[d]:
-                if gate.id in y_level:
-                    gate_count_per_y[y_level[gate.id]] -= 1
+            for g in gates_by_depth[d]:
+                if g.id in fixed_y_gates:
+                    continue  # cone-assigned — never reassign
+                if g.id in y_level:
+                    gate_count_per_y[y_level[g.id]] -= 1
                 input_ys = [
                     y_level[net_source_cid[nid]]
-                    for nid in gate_input_nets[gate.id]
+                    for nid in gate_input_nets[g.id]
                     if net_source_cid[nid] in y_level
                 ]
                 output_ys = [
                     y_level[sink_cid]
-                    for nid in gate_output_nets[gate.id]
+                    for nid in gate_output_nets[g.id]
                     for sink_cid in net_sink_cids[nid]
                     if sink_cid in y_level
                 ]
                 candidates = set(input_ys + output_ys)
                 assigned = min(candidates, key=lambda y: gate_count_per_y[y]) if candidates else 0
-                y_level[gate.id] = assigned
+                y_level[g.id] = assigned
                 gate_count_per_y[assigned] += 1
 
     _run_pass(list(range(max_depth + 1)))  # forward
