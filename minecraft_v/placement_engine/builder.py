@@ -305,7 +305,7 @@ def build_litematic_from_component_list(
         *,
         gutter: int = 10,
         workspace_size: tuple[int, int, int] | None = None,
-        base_y: int = 1,
+        base_y: int = 5,
         schematic_name: str = "build",
         io_margin: int = 10,
         routing_gutter: int = 10,
