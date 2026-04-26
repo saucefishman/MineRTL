@@ -30,19 +30,19 @@ class SchematicInfo:
 SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
     ComponentType.AND: SchematicInfo(
         file_prefix="and",
-        footprint=Footprint(width=3, height=2, depth=3),
+        footprint=Footprint(width=4, height=2, depth=3),
         pins=[
             PinRef(name="A", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
-            PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
+            PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(3, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
     ),
     ComponentType.OR: SchematicInfo(
         file_prefix="or",
-        footprint=Footprint(width=3, height=1, depth=3),
+        footprint=Footprint(width=4, height=1, depth=3),
         pins=[
             PinRef(name="A", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
-            PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
+            PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(3, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
     ),
@@ -74,12 +74,12 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
     ),
     ComponentType.DFFE: SchematicInfo(
         file_prefix="dffe",
-        footprint=Footprint(width=7, height=1, depth=3),
+        footprint=Footprint(width=7, height=1, depth=4),
         pins=[
             PinRef(name="C", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 0)),
             PinRef(name="D", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
-            PinRef(name="E", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 2)),
-            PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 2)),
+            PinRef(name="E", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 3)),
+            PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 3)),
         ],
     ),
     ComponentType.FULL_ADDER: SchematicInfo(

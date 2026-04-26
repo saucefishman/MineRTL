@@ -15,13 +15,15 @@ def _place_support(
         net_id: str,
         cell: tuple[int, int, int],
         opaque_support_block: BlockState = STONE,
-) -> None:
+) -> bool: # True if placed support block or there was a solid, false if something got in the way
     x, y, z = cell
     if y <= 0:
-        return
+        return True # assuming placed on ground
     below = (x, y - 1, z)
-    if below in solid or not _is_air(workspace[x, y - 1, z]):
-        return
+    if below in solid:
+        return True
+    elif not _is_air(workspace[x, y - 1, z]):
+        return False
     is_stair = (
         y >= 2
         and _is_redstone_wire(workspace[x, y - 2, z])
@@ -30,6 +32,7 @@ def _place_support(
     )
     workspace[x, y - 1, z] = GLASS if is_stair else opaque_support_block
     solid.add(below)
+    return True
 
 
 def _lay_dust_cell(
@@ -48,6 +51,8 @@ def _lay_dust_cell(
         if owner is not None and owner != net_id:
             raise ValueError(f"Dust collision at {pos} for nets {owner} vs {net_id}")
         return
+    elif not _is_air(existing):
+        raise ValueError(f"Tried to redstone over an existing block ({existing}) at {pos}")
     workspace[x, y, z] = REDSTONE
     dust_owner[pos] = net_id
     _place_support(workspace, solid, dust_owner, net_id, pos, opaque_support_block)
@@ -79,6 +84,7 @@ def _lay_tower_move(
         launch: tuple[int, int, int],
         tower_top: tuple[int, int, int],
         opaque_support_block: BlockState,
+        inverted_cells: set[tuple[int, int, int]] | None = None,
 ) -> None:
     """Lay launch wire, repeater, and stone/torch column for a tower move."""
     x, y, z = launch
@@ -86,13 +92,16 @@ def _lay_tower_move(
     tdx = (bx - x) // 2
     tdz = (bz - z) // 2
 
-    _lay_dust_cell(workspace, solid, dust_owner, net_id, launch, opaque_support_block)
+    if _is_air(workspace[*launch]):
+        _lay_dust_cell(workspace, solid, dust_owner, net_id, launch, opaque_support_block)
 
     rx, ry, rz = x + tdx, y, z + tdz
     facing = _DELTA_TO_FACING[(-tdx, -tdz)]
     workspace[rx, ry, rz] = BlockState("minecraft:repeater", facing=facing, delay="1")
     dust_owner[(rx, ry, rz)] = net_id
-    _place_support(workspace, solid, dust_owner, net_id, (rx, ry, rz), opaque_support_block)
+    placed_support = _place_support(workspace, solid, dust_owner, net_id, (rx, ry, rz), opaque_support_block)
+    if not placed_support:
+        raise ValueError(f"Repeater needs support but cannot place it for tower move at launch cell {launch}")
 
     col = [
         (bx, y,     bz, opaque_support_block),
@@ -111,6 +120,9 @@ def _lay_tower_move(
         if blk is STONE:
             solid.add((cx, cy, cz))
         dust_owner[(cx, cy, cz)] = net_id
+    if inverted_cells is not None:
+        inverted_cells.add((bx, y + 1, bz))
+        inverted_cells.add((bx, y + 2, bz))
 
 
 def _lay_redstone_path(
@@ -120,6 +132,7 @@ def _lay_redstone_path(
         path: Iterable[tuple[int, int, int]],
         net_id: str,
         opaque_support_block: BlockState = STONE,
+        inverted_cells: set[tuple[int, int, int]] | None = None,
 ) -> None:
     cells = list(path)
     n = len(cells)
@@ -138,14 +151,14 @@ def _lay_redstone_path(
             slope2_bottom.add(i)
 
     for i, cell in enumerate(cells):
-        if i in tower_top:
+        if i in tower_top and i not in tower_bottom:
             continue  # stone already placed by _lay_tower_move
 
         if i in slope2_bottom:
             _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block)
 
         elif i in tower_bottom:
-            _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block)
+            _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
@@ -231,6 +244,12 @@ def _place_repeaters_for_net(
                         )
                     new_reset = j
                     break
+            else:
+                raise ValueError(
+                    f"Net {net_id!r}: cannot place repeater to extend signal at path depth {depth} "
+                    f"(signal dist {dist} >= {_REPEATER_INTERVAL}, no viable position in "
+                    f"{path[reset_idx+1:cap+1]})"
+                )
         for nb in wire_neighbors(pos):
             if nb not in visited:
                 visited.add(nb)

@@ -11,7 +11,7 @@ from minecraft_v.placement_engine.ir import (
     ComponentType,
     NetConnection,
 )
-from .block_utils import _is_air, _ensure_support
+from .block_utils import _is_air, _ensure_support, _is_redstone_wire
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, WOOLS,
 )
@@ -28,6 +28,7 @@ from .wire import _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
+BARREL = BlockState("minecraft:barrel")
 
 
 def _pin_for_endpoint(
@@ -79,7 +80,7 @@ def _place_const_sources(
         if c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN):
             continue
         for pin in c.pins:
-            if pin.const_value not in ('0', '1'):
+            if pin.const_value not in ('0', '1', 'x', 'z'):
                 continue
             pw = _pin_world(item.origin, pin, c.footprint)
             side = pin.side
@@ -89,7 +90,12 @@ def _place_const_sources(
             else:
                 bx, by, bz = pw
             if _is_air(workspace[bx, by, bz]):
-                block = REDSTONE_BLOCK if pin.const_value == '1' else IRON_TRAPDOOR
+                if pin.const_value == '1':
+                    block = REDSTONE_BLOCK
+                elif pin.const_value == '0':
+                    block = IRON_TRAPDOOR
+                else:
+                    block = BARREL
                 workspace[bx, by, bz] = block
                 solid.add((bx, by, bz))
                 if pin.const_value == '1':
@@ -223,8 +229,9 @@ def _compute_net_protected(
             continue
         for tx, ty, tz in terminals:
             cells.add((tx, ty, tz))
+            cells.add((tx, ty + 1, tz))
             for dx, dz in _HORIZ_DIRS:
-                for dy in range(3):
+                for dy in range(-2, 3):
                     cells.add((tx + dx, ty + dy, tz + dz))
             for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
                 cells.add((tx + dx, ty, tz + dz))
@@ -257,14 +264,20 @@ def _route_all_nets(
 ) -> list[tuple[str, Exception]]:
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
+    inverted_cells: set[tuple[int, int, int]] = set()
     for net_idx, net in enumerate(sorted_nets, 1):
         print(f"\r[wire] {net_idx}/{total_nets} — {net.net_id:<40}", end="", flush=True)
         try:
             src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
             protected = _compute_net_protected(net.net_id, all_terminals)
-            for sink in net.sinks:
-                dst_pin = _pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name)
-                tree_seeds = [pos for pos, owner in dust_owner.items() if owner == net.net_id]
+            dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
+            sorted_pins = sorted(dst_pins, key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
+            for dst_pin in sorted_pins:
+                tree_seeds = [
+                    pos for pos, owner in dust_owner.items()
+                    if owner == net.net_id
+                    and _is_redstone_wire(workspace[pos[0], pos[1], pos[2]])
+                ]
                 path = _find_wire_path(
                     workspace, solid, dust_owner,
                     src_pin, dst_pin, net.net_id,
@@ -272,9 +285,11 @@ def _route_all_nets(
                     tree_seeds=tree_seeds,
                     protected=protected,
                     footprint_blocked=footprint_blocked,
+                    inverted_cells=frozenset(inverted_cells),
                 )
                 _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
-                                   opaque_support_block=WOOLS[net_idx % len(WOOLS)])
+                                   opaque_support_block=WOOLS[net_idx % len(WOOLS)],
+                                   inverted_cells=inverted_cells)
             _place_repeaters_for_net(workspace, dust_owner, torch_cells, net.net_id, src_pin)
         except Exception as e:
             routing_failures.append((net.net_id, e))
@@ -290,7 +305,7 @@ def build_litematic_from_component_list(
         *,
         gutter: int = 10,
         workspace_size: tuple[int, int, int] | None = None,
-        base_y: int = 1,
+        base_y: int = 5,
         schematic_name: str = "build",
         io_margin: int = 10,
         routing_gutter: int = 10,
