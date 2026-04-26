@@ -232,6 +232,7 @@ def _find_wire_path(
                 above_clear = (
                     above_mid not in solid
                     and above_mid not in path_snapshot
+                    and (above_mid[0], above_mid[1] + 1, above_mid[2]) not in path_snapshot
                     and _in_bounds(above_mid, bounds)
                     and _is_air(workspace[above_mid[0], above_mid[1], above_mid[2]])
                 )
@@ -293,7 +294,7 @@ def _find_wire_path(
                     break
                 for dx, dz in _HORIZ_DIRS:
                     cp_side = (cp[0] + dx, cp[1], cp[2] + dz)
-                    if _in_bounds(cp_side, bounds) and _is_redstone_wire(workspace[*cp_side]):
+                    if _in_bounds(cp_side, bounds) and _is_redstone_wire(workspace[cp_side[0], cp_side[1], cp_side[2]]):
                         if cdy == 1 or cdy == 2: # inverted section
                             col_clear = False
                             break
@@ -357,7 +358,8 @@ def _find_wire_path(
                 if not _in_bounds(cp, bounds):
                     ok = False
                     break
-                if cp == goal or cp in terminal_positions or cp in footprint_blocked or cp in protected or cp in path_snapshot:
+                if cp == goal or cp in terminal_positions or cp in footprint_blocked or cp in protected or cp in path_snapshot \
+                        or (cp[0], cp[1] + 1, cp[2]) in path_snapshot:
                     ok = False
                     break
                 for ddx, ddz in _HORIZ_DIRS:
@@ -534,8 +536,9 @@ def _find_wire_path(
             workspace[cx, cy, cz] = lamp
             cur = came_from.get(cur)
         for coord in sorted(explored, key=heuristic)[:100]:
-            if _is_air(workspace[*coord]):
-                workspace[*coord] = GLASS
+            cx2, cy2, cz2 = coord
+            if _is_air(workspace[cx2, cy2, cz2]):
+                workspace[cx2, cy2, cz2] = GLASS
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
         raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason})")
     if walkable(goal) and reached != goal:
