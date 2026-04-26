@@ -146,9 +146,10 @@ def _place_io_repeaters(
         solid: set[tuple[int, int, int]],
         pin_world_map: dict[tuple[str, str], tuple[int, int, int]],
         ws_bounds: tuple[int, int, int, int, int, int],
-) -> set[tuple[int, int, int]]:
-    """Place I/O repeaters for input/output pins. Returns set of placed repeater cells."""
+) -> tuple[set[tuple[int, int, int]], dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]]]:
+    """Place I/O repeaters and return (all repeater cells, output target lookup)."""
     io_repeater_cells: set[tuple[int, int, int]] = set()
+    output_repeater_lookup: dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]] = {}
     for item in placed:
         c = item.component
         if c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN):
@@ -165,7 +166,74 @@ def _place_io_repeaters(
             solid.add(cell)
             _ensure_support(workspace, solid, cell)
             io_repeater_cells.add(cell)
-    return io_repeater_cells
+            if c.type == ComponentType.OUTPUT_PIN:
+                side_name = side.value
+                endpoint = (c.id, pin.name)
+                for key in (c.id, pin.name, f"{c.id}.{pin.name}"):
+                    output_repeater_lookup[key] = (cell, side_name, endpoint)
+    return io_repeater_cells, output_repeater_lookup
+
+
+def _route_output_pin_extensions(
+        workspace: Region,
+        solid: set[tuple[int, int, int]],
+        dust_owner: dict[tuple[int, int, int], str],
+        torch_cells: set[tuple[int, int, int]],
+        output_pin_targets: dict[str, tuple[int, int]],
+        output_repeater_lookup: dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]],
+        net_id_by_output_endpoint: dict[tuple[str, str], str],
+        ext_bounds: tuple[int, int, int, int, int, int],
+        layer_z: int,
+        max_bridge_y: int,
+) -> None:
+    min_x, min_y, min_z, max_x, max_y, max_z = ext_bounds
+
+    def _in_bounds(pos: tuple[int, int, int]) -> bool:
+        x, y, z = pos
+        return min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z
+
+    for pin_name, (tx, ty) in output_pin_targets.items():
+        lookup = output_repeater_lookup.get(pin_name)
+        if lookup is None:
+            known = ", ".join(sorted(output_repeater_lookup))
+            raise ValueError(f"Unknown output pin target '{pin_name}'. Known keys: {known}")
+        if not (min_x <= tx <= max_x and min_y <= ty <= max_y):
+            raise ValueError(
+                f"Output target for '{pin_name}' is out of bounds: ({tx}, {ty}) not in "
+                f"x=[{min_x},{max_x}], y=[{min_y},{max_y}]"
+            )
+        if not (min_z <= layer_z <= max_z):
+            raise ValueError(f"Output layer z={layer_z} outside workspace z=[{min_z},{max_z}]")
+
+        repeater_cell, side_name, endpoint = lookup
+        base_net_id = net_id_by_output_endpoint.get(endpoint)
+        if base_net_id is None:
+            raise ValueError(f"Output target '{pin_name}' has no mapped net")
+        nx, ny, nz = _SIDE_NORMAL[side_name]
+        launch = (repeater_cell[0] + nx, repeater_cell[1] + ny, repeater_cell[2] + nz)
+        if not _in_bounds(launch):
+            # Output repeaters can sit on workspace boundary; route from the in-bounds side in that case.
+            launch = (repeater_cell[0] - nx, repeater_cell[1] - ny, repeater_cell[2] - nz)
+        if not _in_bounds(launch):
+            raise ValueError(f"No in-bounds launch cell for output target '{pin_name}'")
+        tree_seeds = [
+            pos for pos, owner in dust_owner.items()
+            if owner == base_net_id and _is_redstone_wire(workspace[pos[0], pos[1], pos[2]])
+        ]
+        target = (tx, ty, layer_z)
+        path = _find_wire_path(
+            workspace,
+            solid,
+            dust_owner,
+            launch,
+            target,
+            base_net_id,
+            ext_bounds,
+            max_bridge_y=max_bridge_y,
+            tree_seeds=tree_seeds,
+        )
+        _lay_redstone_path(workspace, solid, dust_owner, path, base_net_id)
+        _place_repeaters_for_net(workspace, dust_owner, torch_cells, base_net_id, path[0])
 
 
 def _build_footprint_blocked(
@@ -312,6 +380,8 @@ def build_litematic_from_component_list(
         routing_headroom: int = 5,
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
+        output_pin_targets: dict[str, tuple[int, int]] | None = None,
+        pin_targets_space = 5
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -322,6 +392,12 @@ def build_litematic_from_component_list(
         gutter=gutter, base_y=base_y, y_level=y_level,
         io_margin=io_margin, routing_gutter=routing_gutter,
     )
+    if output_pin_targets:
+        # Reserve z=0 for output extensions by shifting the existing build one layer forward.
+        placed = [
+            _Placed(component=p.component, origin=(p.origin[0], p.origin[1], p.origin[2] + pin_targets_space))
+            for p in placed
+        ]
     work_nets = comp.nets
 
     if workspace_size is None:
@@ -331,11 +407,18 @@ def build_litematic_from_component_list(
     else:
         width, height, depth = workspace_size
 
-    workspace = Region(0, 0, 0, width, height, depth)
+    output_layer_z = 0
+    workspace_depth = depth
+
+    workspace = Region(0, 0, 0, width, height, workspace_depth)
     solid: set[tuple[int, int, int]] = set()
     dust_owner: dict[tuple[int, int, int], str] = {}
     torch_cells: set[tuple[int, int, int]] = set()
-    ws_bounds = (0, 0, 0, width - 1, height - 1, depth - 1)
+    # Keep core net routing out of the reserved extension layer at z=0.
+    ws_min_z = pin_targets_space if output_pin_targets else 0
+    ws_bounds = (0, 0, ws_min_z, width - 1, height - 1, depth - 1)
+    io_bounds = ws_bounds
+    ext_bounds = (0, 0, 0, width - 1, height - 1, workspace_depth - 1)
 
     ref_mc_version, ref_lm_version, ref_lm_sub = _place_gate_templates(
         workspace, placed, solid, schematics_dir,
@@ -343,7 +426,14 @@ def build_litematic_from_component_list(
     const_positions = _place_const_sources(workspace, placed, solid)
     max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
     pin_world_map, pin_terminal = _compute_pin_maps(placed)
-    io_repeater_cells = _place_io_repeaters(workspace, placed, solid, pin_world_map, ws_bounds)
+    io_repeater_cells, output_repeater_lookup = _place_io_repeaters(workspace, placed, solid, pin_world_map, io_bounds)
+    output_component_ids = {c.id for c in comp.components if c.type == ComponentType.OUTPUT_PIN}
+    net_id_by_output_endpoint: dict[tuple[str, str], str] = {
+        (sink.component_id, sink.pin_name): net.net_id
+        for net in work_nets
+        for sink in net.sinks
+        if sink.component_id in output_component_ids
+    }
     footprint_blocked = _build_footprint_blocked(placed, pin_terminal, io_repeater_cells, const_positions)
     all_terminals = _build_terminal_map(work_nets, pin_terminal)
 
@@ -379,6 +469,26 @@ def build_litematic_from_component_list(
             print(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
+
+    if output_pin_targets:
+        try:
+            _route_output_pin_extensions(
+                workspace,
+                solid,
+                dust_owner,
+                torch_cells,
+                output_pin_targets,
+                output_repeater_lookup,
+                net_id_by_output_endpoint,
+                ext_bounds,
+                output_layer_z,
+                max_bridge_y,
+            )
+        except Exception as e:
+            if allow_routing_failures:
+                print(f"IGNORING - Pin target routing failed: {e}")
+            else:
+                raise RuntimeError(f"Pin target routing failed: {e}")
 
     schematic = workspace.as_schematic(
         name=schematic_name, author="minecraft-v", description="merged placement"
