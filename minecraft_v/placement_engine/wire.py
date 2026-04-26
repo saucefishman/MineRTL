@@ -15,13 +15,15 @@ def _place_support(
         net_id: str,
         cell: tuple[int, int, int],
         opaque_support_block: BlockState = STONE,
-) -> None:
+) -> bool: # True if placed support block or there was a solid, false if something got in the way
     x, y, z = cell
     if y <= 0:
-        return
+        return True # assuming placed on ground
     below = (x, y - 1, z)
-    if below in solid or not _is_air(workspace[x, y - 1, z]):
-        return
+    if below in solid:
+        return True
+    elif not _is_air(workspace[x, y - 1, z]):
+        return False
     is_stair = (
         y >= 2
         and _is_redstone_wire(workspace[x, y - 2, z])
@@ -30,6 +32,7 @@ def _place_support(
     )
     workspace[x, y - 1, z] = GLASS if is_stair else opaque_support_block
     solid.add(below)
+    return True
 
 
 def _lay_dust_cell(
@@ -48,6 +51,8 @@ def _lay_dust_cell(
         if owner is not None and owner != net_id:
             raise ValueError(f"Dust collision at {pos} for nets {owner} vs {net_id}")
         return
+    elif not _is_air(existing):
+        raise ValueError(f"Tried to redstone over an existing block ({existing}) at {pos}")
     workspace[x, y, z] = REDSTONE
     dust_owner[pos] = net_id
     _place_support(workspace, solid, dust_owner, net_id, pos, opaque_support_block)
@@ -94,7 +99,9 @@ def _lay_tower_move(
     facing = _DELTA_TO_FACING[(-tdx, -tdz)]
     workspace[rx, ry, rz] = BlockState("minecraft:repeater", facing=facing, delay="1")
     dust_owner[(rx, ry, rz)] = net_id
-    _place_support(workspace, solid, dust_owner, net_id, (rx, ry, rz), opaque_support_block)
+    placed_support = _place_support(workspace, solid, dust_owner, net_id, (rx, ry, rz), opaque_support_block)
+    if not placed_support:
+        raise ValueError("Repeater needs support but cannot place it for tower move at launch cell {launch}")
 
     col = [
         (bx, y,     bz, opaque_support_block),
