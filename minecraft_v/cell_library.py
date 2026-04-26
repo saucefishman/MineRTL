@@ -74,12 +74,12 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
     ),
     ComponentType.DFFE: SchematicInfo(
         file_prefix="dffe",
-        footprint=Footprint(width=7, height=1, depth=3),
+        footprint=Footprint(width=7, height=1, depth=4),
         pins=[
             PinRef(name="C", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 0)),
             PinRef(name="D", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
-            PinRef(name="E", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 2)),
-            PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 2)),
+            PinRef(name="E", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 3)),
+            PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 3)),
         ],
     ),
     ComponentType.FULL_ADDER: SchematicInfo(
