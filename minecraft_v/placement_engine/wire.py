@@ -85,6 +85,8 @@ def _lay_powered_minus4_move(
         dest: tuple[int, int, int],
         opaque_support_block: BlockState,
         inverted_cells: set[tuple[int, int, int]] | None = None,
+        goal: tuple[int, int, int] | None = None,
+        terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> None:
     """Lay a powered -4 move via two wall torch inversions.
 
@@ -108,7 +110,12 @@ def _lay_powered_minus4_move(
         if all(
             _is_air(workspace[cx, cy, cz]) and (cx, cy, cz) not in solid
             for cx, cy, cz in side_cells
-        ):
+        ) and (goal is None or (nx_c, y - 1, nz_c) != goal) \
+            and (nx_c, y - 1, nz_c) not in terminal_positions \
+            and (nx_c, y - 2, nz_c) not in terminal_positions \
+            and (nx_c, y - 3, nz_c) not in terminal_positions \
+            and (x, y - 3, z) not in terminal_positions \
+            and (x, y - 1, z) not in terminal_positions:
             direction = (dx, dz)
             break
     if direction is None:
@@ -214,6 +221,8 @@ def _lay_redstone_path(
         net_id: str,
         opaque_support_block: BlockState = STONE,
         inverted_cells: set[tuple[int, int, int]] | None = None,
+        goal: tuple[int, int, int] | None = None,
+        terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> None:
     cells = list(path)
     n = len(cells)
@@ -247,7 +256,7 @@ def _lay_redstone_path(
             _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
 
         elif i in p4_bottom:
-            _lay_powered_minus4_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
+            _lay_powered_minus4_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells, goal, terminal_positions)
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
