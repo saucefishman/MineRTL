@@ -81,6 +81,83 @@ def _io_bit_index(c: Component) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _io_base_name(comp_id: str) -> str:
+    """Strip bit-index suffix: 'a[2]' → 'a', 'reset' → 'reset'."""
+    m = _BIT_NAME_RE.match(comp_id)
+    return m.group(1) if m else comp_id
+
+
+def _assign_io_x_positions(
+        io_components: list[Component],
+        gates_placed: list[_Placed],
+        nets: list[NetConnection],
+        io_margin: int,
+        gutter: int,
+) -> dict[str, int]:
+    """
+    Assign X positions to IO components to minimise total net distance.
+
+    Multi-bit groups (same base name, e.g. 'a[0]'/'a[1]') share one X column
+    so their bits are vertically aligned.  Groups are ordered by the median
+    world-X of the gate pins they connect to.
+    """
+    if not io_components:
+        return {}
+
+    io_ids = {c.id for c in io_components}
+
+    # (component_id, pin_name) → world-X for every placed gate pin
+    gate_pin_x: dict[tuple[str, str], float] = {}
+    for item in gates_placed:
+        ox = item.origin[0]
+        for pin in item.component.pins:
+            gate_pin_x[(item.component.id, pin.name)] = float(ox + pin.offset[0])
+
+    # Collect gate-pin X coords reachable from each IO component via nets
+    gate_xs_for: dict[str, list[float]] = {c.id: [] for c in io_components}
+    for net in nets:
+        endpoints = [(net.source.component_id, net.source.pin_name)] + [
+            (s.component_id, s.pin_name) for s in net.sinks
+        ]
+        gate_xs: list[float] = []
+        io_on_net: list[str] = []
+        for cid, pname in endpoints:
+            px = gate_pin_x.get((cid, pname))
+            if px is not None:
+                gate_xs.append(px)
+            elif cid in io_ids:
+                io_on_net.append(cid)
+        for io_id in io_on_net:
+            gate_xs_for[io_id].extend(gate_xs)
+
+    def _median(xs: list[float]) -> float:
+        if not xs:
+            return 0.0
+        s = sorted(xs)
+        return s[len(s) // 2]
+
+    individual_x: dict[str, float] = {c.id: _median(gate_xs_for[c.id]) for c in io_components}
+
+    # Group bits by base name; group desired X = median over member desired Xs
+    groups: dict[str, list[str]] = defaultdict(list)
+    for c in io_components:
+        groups[_io_base_name(c.id)].append(c.id)
+
+    sorted_groups = sorted(
+        (_median([individual_x[cid] for cid in ids]), base)
+        for base, ids in groups.items()
+    )
+
+    result: dict[str, int] = {}
+    x = io_margin
+    for _, base in sorted_groups:
+        for cid in groups[base]:
+            result[cid] = x
+        x += 1 + gutter  # expanded IO footprint is always 1 wide
+
+    return result
+
+
 def _majority_y(ys: list[int]) -> int:
     """Plurality-vote Y level; tiebreak = max Y."""
     count: dict[int, int] = defaultdict(int)
@@ -303,13 +380,7 @@ def _layout_components(
     placed: list[_Placed] = []
     x_cursors: dict[tuple[int, int], int] = {}
 
-    for c in outputs:
-        y = comp_y(c)
-        key = (max_depth + 1, y)
-        cursor_x = x_cursors.get(key, io_margin)
-        placed.append(_Placed(component=c, origin=(cursor_x, y, output_row_z)))
-        x_cursors[key] = cursor_x + c.footprint.width + gutter
-
+    # Place gates first so their X positions are known for IO optimisation.
     for layer_idx in range(max_depth, -1, -1):
         z = layer_z[layer_idx]
         for c in layer_gates.get(layer_idx, []):
@@ -319,12 +390,17 @@ def _layout_components(
             placed.append(_Placed(component=c, origin=(cursor_x, y, z)))
             x_cursors[key] = cursor_x + c.footprint.width + gutter
 
+    # Assign IO X positions: minimise net distance, same X per multi-bit group.
+    input_xs = _assign_io_x_positions(inputs, placed, nets, io_margin, gutter)
+    output_xs = _assign_io_x_positions(outputs, placed, nets, io_margin, gutter)
+
+    for c in outputs:
+        y = comp_y(c)
+        placed.append(_Placed(component=c, origin=(output_xs[c.id], y, output_row_z)))
+
     for c in inputs:
         y = comp_y(c)
-        key = (-1, y)
-        cursor_x = x_cursors.get(key, io_margin)
-        placed.append(_Placed(component=c, origin=(cursor_x, y, input_row_z)))
-        x_cursors[key] = cursor_x + c.footprint.width + gutter
+        placed.append(_Placed(component=c, origin=(input_xs[c.id], y, input_row_z)))
 
     return placed
 
