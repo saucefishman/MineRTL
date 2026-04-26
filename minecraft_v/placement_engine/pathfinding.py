@@ -1,7 +1,7 @@
 from __future__ import annotations
 import heapq
-from litemapy import Region
-from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK
+from litemapy import BlockState, Region
+from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
 
 
@@ -32,6 +32,7 @@ def _wire_walkable(
         net_id: str,
         bounds: tuple[int, int, int, int, int, int],
         exempt_foreign: frozenset[tuple[int, int, int]] = frozenset(),
+        inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> bool:
     x, y, z = pos
     if not _in_bounds(pos, bounds):
@@ -78,6 +79,12 @@ def _wire_walkable(
         owner = dust_owner.get(vp)
         if owner is not None and owner != net_id:
             return False
+    # Inverted tower cells (torch y+1 and stone y+2) emit wrong-polarity quasi-power
+    # on their 4 horizontal faces. Quasi-power doesn't propagate stairwise so only
+    # check same-Y horizontal neighbors.
+    for dx, dz in _HORIZ_DIRS:
+        if (x + dx, y, z + dz) in inverted_cells:
+            return False
     return True
 
 
@@ -93,18 +100,40 @@ def _find_wire_path(
         tree_seeds: list[tuple[int, int, int]] | None = None,
         protected: frozenset[tuple[int, int, int]] = frozenset(),
         footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
+        inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
     min_y = bounds[1]
     came_from: dict[tuple[int, int, int], tuple[int, int, int] | None] = {}
+    current_path: set[tuple[int, int, int]] = set()
+
+    # Strip the goal terminal's own keepout zone from protected so the approach
+    # path is not blocked by the destination's own neighborhood.
+    gx, gy, gz = goal
+    goal_exclusion: set[tuple[int, int, int]] = {(gx, gy, gz)}
+    for _dx, _dz in _HORIZ_DIRS:
+        for _dy in range(-2, 3):
+            goal_exclusion.add((gx + _dx, gy + _dy, gz + _dz))
+    for _dx, _dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+        goal_exclusion.add((gx + _dx, gy, gz + _dz))
+    effective_protected = protected - goal_exclusion
+
+    # Shrink footprint blocking on the side the goal terminal is on: remove the
+    # 1-cell expansion cells immediately adjacent to the goal (including +2Y for
+    # the IO repeater top clearance) so slope/flat approaches can reach the terminal.
+    goal_fp_relief: set[tuple[int, int, int]] = set()
+    for _ddx, _ddy, _ddz in _DIRS_6:
+        goal_fp_relief.add((gx + _ddx, gy + _ddy, gz + _ddz))
+    goal_fp_relief.add((gx, gy + 2, gz))
+    effective_footprint_blocked = footprint_blocked - goal_fp_relief
 
     def walkable(
             pos: tuple[int, int, int],
             exempt: frozenset[tuple[int, int, int]] = frozenset(),
     ) -> bool:
         return (
-            pos not in protected
-            and pos not in footprint_blocked
-            and _wire_walkable(workspace, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt)
+            pos not in effective_protected
+            and pos not in effective_footprint_blocked
+            and _wire_walkable(workspace, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt, inverted_cells=inverted_cells)
         )
 
     def _horiz_neighbors(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
@@ -115,8 +144,11 @@ def _find_wire_path(
 
             # Flat move
             flat = (nx, y, nz)
-            if walkable(flat):
-                if y <= min_y or _can_be_support(workspace, solid, (nx, y - 1, nz), bounds):
+            if walkable(flat) and (nx, y + 1, nz) not in current_path:
+                if y <= min_y or (
+                    (nx, y - 1, nz) not in current_path
+                    and _can_be_support(workspace, solid, (nx, y - 1, nz), bounds)
+                ):
                     result.append((flat, 1))
 
             # Slope-up
@@ -124,7 +156,9 @@ def _find_wire_path(
                 up = (nx, y + 1, nz)
                 if walkable(up):
                     ramp = (nx, y, nz)
-                    if ramp in solid or (_in_bounds(ramp, bounds) and _is_air(workspace[ramp[0], ramp[1], ramp[2]])):
+                    if ramp not in current_path and (
+                        ramp in solid or (_in_bounds(ramp, bounds) and _is_air(workspace[ramp[0], ramp[1], ramp[2]]))
+                    ):
                         # TODO: this discourages ramping so we get torch towers for vertical signal extension, but we should guarantee that vertical extension no matter what path is chosen
                         result.append((up, 3))
 
@@ -134,6 +168,8 @@ def _find_wire_path(
                 above_down = (nx, y, nz)
                 above_clear = (
                     above_down not in solid
+                    and above_down not in current_path
+                    and (nx, y + 1, nz) not in current_path
                     and _in_bounds(above_down, bounds)
                     and _is_air(workspace[above_down[0], above_down[1], above_down[2]])
                 )
@@ -157,16 +193,18 @@ def _find_wire_path(
             if y + 2 <= max_bridge_y:
                 mid = (x + dx, y + 1, z + dz)
                 top = (nx2, y + 2, nz2)
+                mid_support = (x + dx, y, z + dz)
                 mid_ok = (
                     mid not in protected
                     and mid not in footprint_blocked
+                    and mid not in current_path
                     and _in_bounds(mid, bounds)
                     and mid not in solid
                     and _is_air(workspace[mid[0], mid[1], mid[2]])
                     and _wire_walkable(workspace, solid, dust_owner, mid, net_id, bounds, exempt_foreign=exempt)
                 )
                 if mid_ok and walkable(top):
-                    if _can_be_support(workspace, solid, (x + dx, y, z + dz), bounds):
+                    if mid_support not in current_path and _can_be_support(workspace, solid, mid_support, bounds):
                         result.append((top, 7))
 
             # 2x slope-down
@@ -177,6 +215,7 @@ def _find_wire_path(
                 above_mid = (x + dx, y, z + dz)
                 above_clear = (
                     above_mid not in solid
+                    and above_mid not in current_path
                     and _in_bounds(above_mid, bounds)
                     and _is_air(workspace[above_mid[0], above_mid[1], above_mid[2]])
                 )
@@ -184,6 +223,7 @@ def _find_wire_path(
                     above_clear
                     and mid_dn not in protected
                     and mid_dn not in footprint_blocked
+                    and mid_dn not in current_path
                     and _in_bounds(mid_dn, bounds)
                     and mid_dn not in solid
                     and _is_air(workspace[mid_dn[0], mid_dn[1], mid_dn[2]])
@@ -269,7 +309,8 @@ def _find_wire_path(
     if not seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
-    # Goal cells: prefer goal itself; fall back to neighbors when blocked
+    # Goal cells: goal exclusion already removed from effective_protected above,
+    # so walkable() correctly admits the goal and its approach cells.
     goal_set: set[tuple[int, int, int]] = set()
     if walkable(goal):
         goal_set.add(goal)
@@ -292,13 +333,26 @@ def _find_wire_path(
         counter += 1
 
     reached: tuple[int, int, int] | None = None
+    best_node: tuple[int, int, int] = seeds[0]
+    best_h: int = heuristic(seeds[0])
+    explored = set()
     while open_heap:
         _, g, _, current = heapq.heappop(open_heap)
         if g > g_score.get(current, 10 ** 9):
             continue
+        h = heuristic(current)
+        if h < best_h:
+            best_h = h
+            best_node = current
+        explored.add(current)
         if current in goal_set:
             reached = current
             break
+        current_path.clear()
+        node: tuple[int, int, int] | None = current
+        while node is not None:
+            current_path.add(node)
+            node = came_from.get(node)
         for neighbor, cost in neighbors(current):
             new_g = g + cost
             if new_g < g_score.get(neighbor, 10 ** 9):
@@ -311,7 +365,16 @@ def _find_wire_path(
                 counter += 1
 
     if reached is None:
-        raise ValueError(f"No route for net {net_id} from {start} to {goal}")
+        lamp = BlockState("minecraft:redstone_lamp")
+        cur: tuple[int, int, int] | None = best_node
+        while cur is not None:
+            cx, cy, cz = cur
+            workspace[cx, cy, cz] = lamp
+            cur = came_from.get(cur)
+        for coord in sorted(explored, key=heuristic)[:100]:
+            if _is_air(workspace[*coord]):
+                workspace[*coord] = GLASS
+        raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node})")
     if walkable(goal) and reached != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {reached}")
 

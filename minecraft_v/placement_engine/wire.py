@@ -79,6 +79,7 @@ def _lay_tower_move(
         launch: tuple[int, int, int],
         tower_top: tuple[int, int, int],
         opaque_support_block: BlockState,
+        inverted_cells: set[tuple[int, int, int]] | None = None,
 ) -> None:
     """Lay launch wire, repeater, and stone/torch column for a tower move."""
     x, y, z = launch
@@ -112,6 +113,9 @@ def _lay_tower_move(
         if blk is STONE:
             solid.add((cx, cy, cz))
         dust_owner[(cx, cy, cz)] = net_id
+    if inverted_cells is not None:
+        inverted_cells.add((bx, y + 1, bz))
+        inverted_cells.add((bx, y + 2, bz))
 
 
 def _lay_redstone_path(
@@ -121,6 +125,7 @@ def _lay_redstone_path(
         path: Iterable[tuple[int, int, int]],
         net_id: str,
         opaque_support_block: BlockState = STONE,
+        inverted_cells: set[tuple[int, int, int]] | None = None,
 ) -> None:
     cells = list(path)
     n = len(cells)
@@ -146,21 +151,10 @@ def _lay_redstone_path(
             _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block)
 
         elif i in tower_bottom:
-            _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block)
+            _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
-            # Alternating down-staircase: (x,y,z)→(x+dx,y-1,z+dz)→(x,y-2,z)
-            # Support at (x,y-1,z) is directly above (x,y-2,z) wire — use glass.
-            if i + 2 < n:
-                ax, ay, az = cell
-                bx, by, bz = cells[i + 1]
-                cx, cy, cz = cells[i + 2]
-                if (by == ay - 1 and abs(bx - ax) + abs(bz - az) == 1
-                        and cx == ax and cy == ay - 2 and cz == az):
-                    support = (ax, ay - 1, az)
-                    if support in solid:
-                        workspace[ax, ay - 1, az] = GLASS
 
 
 def _place_repeaters_for_net(
