@@ -286,6 +286,18 @@ def _find_wire_path(
                 if not _is_air(workspace[cp[0], cp[1], cp[2]]):
                     col_clear = False
                     break
+                for dx, dz in _HORIZ_DIRS:
+                    cp_side = (cp[0] + dx, cp[1], cp[2] + dz)
+                    if _in_bounds(cp_side, bounds) and _is_redstone_wire(workspace[*cp_side]):
+                        if cdy == 1 or cdy == 2: # inverted section
+                            col_clear = False
+                            break
+                        side_owner = dust_owner.get(cp_side)
+                        if side_owner is not None and side_owner != net_id:
+                            col_clear = False
+                            break
+
+
             if not col_clear:
                 continue
             # Tower base will be powered — check cell below base has no foreign wire
