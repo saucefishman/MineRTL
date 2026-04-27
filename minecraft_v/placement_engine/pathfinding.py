@@ -112,8 +112,6 @@ def _find_wire_path(
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
         terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
-    if net_id == 'net_16':
-        print(goal)
     min_y = bounds[1]
     # came_from is write-only during search (set at expansion, not push) and used
     # only for final path reconstruction. All history-dependent move checks use
