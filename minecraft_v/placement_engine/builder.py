@@ -223,8 +223,9 @@ def _route_output_pin_extensions(
         rx, ry, rz = rep
         zone: set[tuple[int, int, int]] = {rep, (rx, ry + 1, rz)}
         for dx, dz in _HORIZ_DIRS:
-            for dy in range(-2, 3):
-                zone.add((rx + dx, ry + dy, rz + dz))
+            for m in range(1, 3):
+                for dy in range(-2, 3):
+                    zone.add((rx + dx * m, ry + dy, rz + dz * m))
         for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
             zone.add((rx + dx, ry, rz + dz))
         return frozenset(zone)
@@ -573,7 +574,8 @@ def build_litematic_from_component_list(
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
         output_pin_targets: dict[str, tuple[int, int]] | None = None,
-        pin_targets_space=10
+        pin_targets_space=15,
+        clock_pin: str = 'clk'
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -690,7 +692,7 @@ def build_litematic_from_component_list(
     regions = {'main': workspace}
 
     for p in placed:
-        if p.component.id == 'clk':
+        if p.component.id == clock_pin:
             print(f'Automatically creating clock for input {p.component.id}')
             target = (p.origin[0], p.origin[1], p.origin[2] + 2)
             clock_region = _construct_clock_region(target, critical_path_ticks)

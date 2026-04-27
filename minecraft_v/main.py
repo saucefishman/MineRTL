@@ -121,8 +121,9 @@ def main():
     parser.add_argument("--module", type=str, default="main")
     parser.add_argument("--schematics-dir", type=str, default="schematics")
     parser.add_argument("--schematic-name", type=str, default=None)
-    parser.add_argument('--allow-routing-failures', type=bool, default=False)
+    parser.add_argument("--allow-routing-failures", type=bool, default=False)
     parser.add_argument("--output-pin-targets-json", type=str, default=None)
+    parser.add_argument("--generate-clock", type=str, default='clk')
     args = parser.parse_args()
     print(args)
 
@@ -153,10 +154,16 @@ def main():
         if args.output_pin_targets_json
         else None
     )
+    generate_clock_pin = args.generate_clock
+    if generate_clock_pin not in (c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN):
+        raise SystemExit(f"Input pin '{generate_clock_pin}' for clock generation does not exist. Available pins: "
+                         f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")
+
     build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir),
                                         out_path=out_litematic, schematic_name=schematic_name,
                                         allow_routing_failures=allow_routing_failures,
-                                        output_pin_targets=output_pin_targets)
+                                        output_pin_targets=output_pin_targets,
+                                        clock_pin=generate_clock_pin)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 
