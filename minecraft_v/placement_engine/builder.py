@@ -192,6 +192,8 @@ def _route_output_pin_extensions(
 ) -> None:
     min_x, min_y, min_z, max_x, max_y, max_z = ext_bounds
 
+    pin_target_x_offset = (max_x - min_x) // 2
+
     def _in_bounds(pos: tuple[int, int, int]) -> bool:
         x, y, z = pos
         return min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z
@@ -208,7 +210,7 @@ def _route_output_pin_extensions(
                 f"Output target for '{pin_name}' is out of bounds: ({tx}, {ty}) not in "
                 f"x=[{min_x},{max_x}], y=[{min_y},{max_y}]"
             )
-        ext_target_positions[pin_name] = (tx, ty, layer_z)
+        ext_target_positions[pin_name] = (tx + pin_target_x_offset, ty, layer_z)
         repeater_cells_by_pin[pin_name] = output_repeater_lookup[pin_name][0]
     if not (min_z <= layer_z <= max_z):
         raise ValueError(f"Output layer z={layer_z} outside workspace z=[{min_z},{max_z}]")
