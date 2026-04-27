@@ -229,7 +229,7 @@ def _lay_tower_move(
         if existing_owner == net_id:
             continue
         workspace[cx, cy, cz] = blk
-        if blk is STONE:
+        if blk == opaque_support_block:
             solid.add((cx, cy, cz))
         dust_owner[(cx, cy, cz)] = net_id
     if inverted_cells is not None:

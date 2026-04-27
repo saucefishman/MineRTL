@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import ceil
 from pathlib import Path
 
 from litemapy import BlockState, Region, Schematic
@@ -7,13 +8,14 @@ from litemapy import BlockState, Region, Schematic
 from minecraft_v.build_utils import save_artifact
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from minecraft_v.placement_engine.ir import (
+    Component,
     ComponentList,
     ComponentType,
     NetConnection,
 )
-from .block_utils import _is_air, _ensure_support, _is_redstone_wire
+from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch
 from .constants import (
-    _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, WOOLS,
+    _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, WOOLS, REDSTONE, _REPEATER_MAX_DELAY
 )
 from .layout import (
     _Placed, _expand_multibit_io, _assign_component_y_levels,
@@ -191,6 +193,8 @@ def _route_output_pin_extensions(
 ) -> None:
     min_x, min_y, min_z, max_x, max_y, max_z = ext_bounds
 
+    pin_target_x_offset = (max_x - min_x) // 2
+
     def _in_bounds(pos: tuple[int, int, int]) -> bool:
         x, y, z = pos
         return min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z
@@ -207,7 +211,7 @@ def _route_output_pin_extensions(
                 f"Output target for '{pin_name}' is out of bounds: ({tx}, {ty}) not in "
                 f"x=[{min_x},{max_x}], y=[{min_y},{max_y}]"
             )
-        ext_target_positions[pin_name] = (tx, ty, layer_z)
+        ext_target_positions[pin_name] = (tx + pin_target_x_offset, ty, layer_z)
         repeater_cells_by_pin[pin_name] = output_repeater_lookup[pin_name][0]
     if not (min_z <= layer_z <= max_z):
         raise ValueError(f"Output layer z={layer_z} outside workspace z=[{min_z},{max_z}]")
@@ -256,7 +260,8 @@ def _route_output_pin_extensions(
                 other_zone = other_zone | _repeater_protection_zone(rc)
                 other_zone = other_zone | _repeater_protection_zone(ext_target_positions[other_pin])
         protected = protected | other_zone
-        all_terminal_positions = (frozenset(pos for s in all_terminals.values() for pos in s) if all_terminals else frozenset()) | all_ext_targets
+        all_terminal_positions = (frozenset(
+            pos for s in all_terminals.values() for pos in s) if all_terminals else frozenset()) | all_ext_targets
         inv_snap = frozenset(inverted_cells) if inverted_cells is not None else frozenset()
         path = _find_wire_path(
             workspace,
@@ -346,7 +351,8 @@ def _compute_net_protected(
                 for dy in range(-2, 3):
                     cells.add((tx + dx, ty + dy, tz + dz))
             for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-                cells.add((tx + dx, ty, tz + dz))
+                for dy in range(-1, 2):
+                    cells.add((tx + dx, ty, tz + dz))
     return frozenset(cells)
 
 
@@ -383,12 +389,13 @@ def _route_all_nets(
             src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
             protected = _compute_net_protected(net.net_id, all_terminals)
             dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
-            sorted_pins = sorted(dst_pins, key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
+            sorted_pins = sorted(dst_pins,
+                                 key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
             for dst_pin in sorted_pins:
                 tree_seeds = [
                     pos for pos, owner in dust_owner.items()
                     if owner == net.net_id
-                    and _is_redstone_wire(workspace[pos[0], pos[1], pos[2]])
+                       and _is_redstone_wire(workspace[pos[0], pos[1], pos[2]])
                 ]
                 all_terminal_positions = frozenset(pin_terminal.values())
                 path = _find_wire_path(
@@ -401,8 +408,13 @@ def _route_all_nets(
                     inverted_cells=frozenset(inverted_cells),
                     terminal_positions=all_terminal_positions,
                 )
+                support_block = WOOLS[net_idx % len(WOOLS)]
+                if net.net_id == 'net_55':
+                    if dst_pin == sorted_pins[0]:
+                        support_block = BlockState("minecraft:barrel")
+
                 _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
-                                   opaque_support_block=WOOLS[net_idx % len(WOOLS)],
+                                   opaque_support_block=support_block,
                                    inverted_cells=inverted_cells,
                                    goal=dst_pin,
                                    terminal_positions=all_terminal_positions)
@@ -414,6 +426,142 @@ def _route_all_nets(
     return routing_failures, inverted_cells
 
 
+def _compute_critical_path(
+        comp: ComponentList,
+        dust_owner: dict[tuple[int, int, int], str],
+        workspace: Region,
+) -> int:
+    """Count repeaters/torches per net, topo-sort DP, print critical path in ticks."""
+    from collections import deque
+
+    # Wire ticks per net: repeaters and torches placed in dust_owner
+    net_ticks: dict[str, int] = {n.net_id: 0 for n in comp.nets}
+    for pos, nid in dust_owner.items():
+        if nid not in net_ticks:
+            continue
+        blk = workspace[pos[0], pos[1], pos[2]]
+        if _is_repeater(blk) or _is_torch(blk):
+            net_ticks[nid] += 1
+
+    # IO repeater on nets driven by INPUT_PINs (+1 per such net)
+    comp_by_id: dict[str, Component] = {c.id: c for c in comp.components}
+    for n in comp.nets:
+        if comp_by_id[n.source.component_id].type == ComponentType.INPUT_PIN:
+            net_ticks[n.net_id] += 1
+
+    _SEQUENTIAL = frozenset({ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH})
+
+    # Sequential components are split into two virtual graph nodes to break cycles:
+    #   "{id}\x00q" — virtual Q-output source: in_degree=0, out_time=0 (registered output)
+    #   "{id}"      — real D/C/E-input sink: receives edges from combinational logic, no
+    #                 outgoing edges; arrival tracks setup-time constraint
+    def _q_node(cid: str) -> str:
+        return cid + "\x00q"
+
+    seq_ids = {c.id for c in comp.components if c.type in _SEQUENTIAL}
+    all_nodes: set[str] = {c.id for c in comp.components} | {_q_node(cid) for cid in seq_ids}
+
+    edges: dict[str, list[tuple[str, str]]] = {n: [] for n in all_nodes}
+    in_degree: dict[str, int] = {n: 0 for n in all_nodes}
+
+    for n in comp.nets:
+        src = n.source.component_id
+        src_node = _q_node(src) if src in seq_ids else src
+        for sink in n.sinks:
+            sid = sink.component_id
+            edges[src_node].append((n.net_id, sid))
+            in_degree[sid] += 1
+
+    arrival: dict[str, int] = {n: 0 for n in all_nodes}
+    best_pred: dict[str, tuple[str, str] | None] = {n: None for n in all_nodes}
+
+    queue: deque[str] = deque(n for n, d in in_degree.items() if d == 0)
+    processed = 0
+    while queue:
+        nid = queue.popleft()
+        processed += 1
+        if nid.endswith("\x00q"):
+            out_t = 0  # registered Q: always t=0
+        else:
+            c = comp_by_id[nid]
+            delay = SCHEMATIC_MAP[c.type].propagation_delay_ticks if c.type in SCHEMATIC_MAP else 0
+            out_t = arrival[nid] + delay
+        for net_id, sink_id in edges[nid]:
+            t = out_t + net_ticks[net_id]
+            if t > arrival[sink_id]:
+                arrival[sink_id] = t
+                best_pred[sink_id] = (net_id, nid)
+            in_degree[sink_id] -= 1
+            if in_degree[sink_id] == 0:
+                queue.append(sink_id)
+
+    if processed < len(all_nodes):
+        print("[timing] WARNING: cycle detected in component graph — path may be incomplete")
+
+    # Critical endpoints: OUTPUT_PINs and DFF/DFFE/DLATCH real nodes (setup-time sinks).
+    # Fall back to all real component nodes if none exist.
+    endpoint_ids = [
+                       c.id for c in comp.components
+                       if c.type == ComponentType.OUTPUT_PIN or c.type in _SEQUENTIAL
+                   ] or [c.id for c in comp.components]
+
+    max_id = max(endpoint_ids, key=lambda n: arrival[n])
+    max_t = arrival[max_id]
+
+    # Trace critical path backwards; Q-source virtual nodes display as "{comp}.Q"
+    def _display(nid: str) -> str:
+        return nid[:-2] + ".Q" if nid.endswith("\x00q") else nid
+
+    trace: list[str] = []
+    cur: str | None = max_id
+    while cur is not None:
+        trace.append(_display(cur))
+        pred = best_pred.get(cur)
+        if pred is None:
+            break
+        net_id, prev_id = pred
+        trace.append(f"[net {net_id}: {net_ticks[net_id]}t]")
+        cur = prev_id
+    trace.reverse()
+
+    print(f"[timing] Critical path: {max_t} ticks")
+    print(f"[timing] Path: {' → '.join(trace)}")
+    return max_t
+
+
+def _construct_clock_region(
+        output_target: tuple[int, int, int],
+        critical_path_ticks: int,
+        arm_wire_length: int = 4
+) -> Region:
+    num_repeaters = ceil(critical_path_ticks // _REPEATER_MAX_DELAY / 2) * 2
+    region_depth = num_repeaters + arm_wire_length + 2  # repeaters split across sides, 2 blocks for each repeater for connecting
+    region_width = 4
+    region_height = 2
+    ws = Region(output_target[0], output_target[1] - 1, output_target[2], region_width, region_height, region_depth)
+    for z in range(region_depth):
+        ws[0, 1, z] = REDSTONE
+        for x in range(region_width):
+            ws[x, 0, z] = BlockState("minecraft:sandstone")
+
+    for x in range(2, 4):
+        ws[x, 1, arm_wire_length - 1] = BlockState("minecraft:redstone_wire", power='15')
+
+    for idx in range(num_repeaters // 2):
+        z = arm_wire_length + idx * 2
+        ws[1, 1, z] = BlockState("minecraft:repeater", facing='east', delay='1')
+        ws[2, 1, z] = REDSTONE
+        ws[3, 1, z] = BlockState("minecraft:repeater", facing='north', delay=str(_REPEATER_MAX_DELAY))
+        ws[2, 1, z + 1] = BlockState("minecraft:repeater", facing='south', delay=str(_REPEATER_MAX_DELAY))
+        ws[3, 1, z + 1] = REDSTONE
+        if (idx + 3) % 8 == 0:
+            ws[0, 1, z + 1] = BlockState('minecraft:repeater', facing='south', delay='1')
+    for x in range(2, 4):
+        ws[x, 1, arm_wire_length + num_repeaters] = REDSTONE
+
+    return ws
+
+
 def build_litematic_from_component_list(
         comp: ComponentList,
         schematics_dir: Path,
@@ -423,22 +571,23 @@ def build_litematic_from_component_list(
         workspace_size: tuple[int, int, int] | None = None,
         base_y: int = 5,
         schematic_name: str = "build",
-        io_margin: int = 10,
-        routing_gutter: int = 10,
+        component_width_spacing: int = 7,
+        component_depth_spacing: int = 6,
+        additional_component_height_spacing: int = 4,
         routing_headroom: int = 5,
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
         output_pin_targets: dict[str, tuple[int, int]] | None = None,
-        pin_targets_space = 10
+        pin_targets_space=10
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
-    y_stride = max_comp_height + 5
+    y_stride = max_comp_height + additional_component_height_spacing
     y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride)
     placed = _layout_components(
         comp.components, comp.nets,
         gutter=gutter, base_y=base_y, y_level=y_level,
-        io_margin=io_margin, routing_gutter=routing_gutter,
+        io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
     )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
@@ -450,7 +599,7 @@ def build_litematic_from_component_list(
 
     if workspace_size is None:
         width, height, depth = _compute_workspace_dims(
-            placed, base_y=base_y, io_margin=io_margin, routing_headroom=routing_headroom,
+            placed, base_y=base_y, io_margin=component_width_spacing, routing_headroom=routing_headroom,
         )
     else:
         width, height, depth = workspace_size
@@ -541,9 +690,27 @@ def build_litematic_from_component_list(
             else:
                 raise RuntimeError(f"Pin target routing failed: {e}")
 
-    schematic = workspace.as_schematic(
-        name=schematic_name, author="minecraft-v", description="merged placement"
+    critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace)
+
+    regions = {'main': workspace}
+
+    for p in placed:
+        if p.component.id == 'clk':
+            print(f'Automatically creating clock for input {p.component.id}')
+            target = (p.origin[0], p.origin[1], p.origin[2] + 2)
+            clock_region = _construct_clock_region(target, critical_path_ticks)
+            regions['clock'] = clock_region
+            break
+
+    schematic = Schematic(
+        name=schematic_name,
+        author="MineRTL",
+        regions=regions
     )
+    # schematic = workspace.as_schematic(
+    #     name=schematic_name, author="minecraft-v", description="merged placement"
+    # )
+    #
     schematic.mc_version = ref_mc_version
     schematic.lm_version = ref_lm_version
     schematic.lm_subversion = ref_lm_sub

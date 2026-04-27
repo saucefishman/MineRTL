@@ -93,6 +93,7 @@ def _assign_io_x_positions(
         nets: list[NetConnection],
         io_margin: int,
         gutter: int,
+        ws_width: int
 ) -> dict[str, int]:
     """
     Assign X positions to IO components to minimise total net distance.
@@ -148,8 +149,10 @@ def _assign_io_x_positions(
         for base, ids in groups.items()
     )
 
+    io_layer_width = (1 + gutter) * len(sorted_groups)
+
     result: dict[str, int] = {}
-    x = io_margin
+    x = io_margin + (ws_width - io_layer_width) // 2
     for _, base in sorted_groups:
         for cid in groups[base]:
             result[cid] = x
@@ -441,28 +444,37 @@ def _layout_components(
     output_row_z = 1
     z_cursor = output_row_z + routing_gutter
     layer_z: dict[int, int] = {}
+    layer_widths = {}
     for layer_idx in range(max_depth, -1, -1):
         layer_z[layer_idx] = z_cursor
         layer_depth = max((c.footprint.depth for c in layer_gates.get(layer_idx, [])), default=0)
         z_cursor += layer_depth + routing_gutter
+
+        for c in layer_gates.get(layer_idx, []):
+            key = (layer_idx, comp_y(c))
+            if key not in layer_widths:
+                layer_widths[key] = 0
+            layer_widths[key] += c.footprint.width + gutter
     input_row_z = z_cursor
 
     placed: list[_Placed] = []
     x_cursors: dict[tuple[int, int], int] = {}
+    max_layer_width = max(layer_widths.values())
 
     # Place gates first so their X positions are known for IO optimisation.
     for layer_idx in range(max_depth, -1, -1):
         z = layer_z[layer_idx]
+
         for c in layer_gates.get(layer_idx, []):
             y = comp_y(c)
             key = (layer_idx, y)
-            cursor_x = x_cursors.get(key, io_margin)
+            cursor_x = x_cursors.get(key, io_margin + (max_layer_width - layer_widths[key]) // 2)
             placed.append(_Placed(component=c, origin=(cursor_x, y, z)))
             x_cursors[key] = cursor_x + c.footprint.width + gutter
 
     # Assign IO X positions: minimise net distance, same X per multi-bit group.
-    input_xs = _assign_io_x_positions(inputs, placed, nets, io_margin, gutter)
-    output_xs = _assign_io_x_positions(outputs, placed, nets, io_margin, gutter)
+    input_xs = _assign_io_x_positions(inputs, placed, nets, io_margin, gutter, max_layer_width)
+    output_xs = _assign_io_x_positions(outputs, placed, nets, io_margin, gutter, max_layer_width)
 
     for c in outputs:
         y = comp_y(c)
