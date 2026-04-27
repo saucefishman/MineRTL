@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import heapq
+
 from litemapy import BlockState, Region
-from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION
+
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
+from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _DELTA_TO_FACING
 
 
 def _in_bounds(pos: tuple[int, int, int], bounds: tuple[int, int, int, int, int, int]) -> bool:
@@ -109,6 +112,8 @@ def _find_wire_path(
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
         terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
+    if net_id == 'net_16':
+        print(goal)
     min_y = bounds[1]
     # came_from is write-only during search (set at expansion, not push) and used
     # only for final path reconstruction. All history-dependent move checks use
@@ -153,6 +158,21 @@ def _find_wire_path(
             and _wire_walkable(workspace, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt, inverted_cells=inverted_cells, footprint_blocked=effective_footprint_blocked)
         )
 
+    def _is_powered_block(pos: tuple[int, int, int]):
+        if not _in_bounds(pos, bounds):
+            return False
+        has_input_repeater = False
+        for dx, dz in _HORIZ_DIRS:
+            b = (pos[0] + dx, pos[1], pos[2] + dz)
+            if not _in_bounds(b, bounds):
+                continue
+            block = workspace[*b]
+            if _is_repeater(block) and block['facing'] == _DELTA_TO_FACING[(dx, dz)]:
+                has_input_repeater = True
+                break
+
+        return pos in solid and has_input_repeater
+
     def _horiz_neighbors(
             pos: tuple[int, int, int],
             path_snapshot: frozenset[tuple[int, int, int]],
@@ -164,7 +184,8 @@ def _find_wire_path(
 
             # Flat move
             flat = (nx, y, nz)
-            if walkable(flat) and (nx, y + 1, nz) not in path_snapshot and came_from.get(pos) != (nx, y + 1, nz):
+            if walkable(flat) and (nx, y + 1, nz) not in path_snapshot and came_from.get(pos) != (nx, y + 1, nz) and \
+                    not _is_powered_block((nx, y + 1, nz)):
                 if y <= min_y or (
                     (nx, y - 1, nz) not in path_snapshot
                     and came_from.get(pos) != (nx, y - 1, nz)
@@ -175,7 +196,7 @@ def _find_wire_path(
             # Slope-up
             if y < max_bridge_y:
                 up = (nx, y + 1, nz)
-                if _is_air(workspace[x, y + 1, z]) and walkable(up): # ensure no block will cut off slope connection and up pos is valid
+                if _is_air(workspace[x, y + 1, z]) and walkable(up) and not _is_powered_block((nx, y + 2, nz)): # ensure no block will cut off slope connection and up pos is valid
                     ramp = (nx, y, nz)
                     if ramp not in path_snapshot and came_from.get(pos) != ramp and (
                         ramp in solid or (_in_bounds(ramp, bounds) and _is_air(workspace[ramp[0], ramp[1], ramp[2]]))
@@ -200,6 +221,7 @@ def _find_wire_path(
                     and came_from.get(pos) not in ((nx, y + 1, nz), (nx, y, nz))
                     and _in_bounds(above_down, bounds)
                     and _is_air(workspace[above_down[0], above_down[1], above_down[2]])
+                    and not _is_powered_block(above_down)
                 )
                 exempt: set[tuple[int, int, int]] = set()
                 # current dust might generate support, which would cut off connections to foreign dust below
@@ -330,7 +352,6 @@ def _find_wire_path(
                         col_clear = False
                         break
 
-
             if not col_clear:
                 continue
             # Tower base will be powered — check cell below base has no foreign wire
@@ -338,6 +359,9 @@ def _find_wire_path(
             if _in_bounds(below_base, bounds):
                 below_owner = dust_owner.get(below_base)
                 if below_owner is not None and below_owner != net_id:
+                    continue
+                # If it's our own connection, we create a loop, if its others', we're interfering
+                if _is_redstone_wire(workspace[*below_base]) or below_base in path_snapshot:
                     continue
             result.append((tower_top, 8))
         return result
