@@ -24,6 +24,9 @@ def _is_torch(block: BlockState) -> bool:
     s = _block_str(block)
     return "minecraft:redstone_torch" in s or "minecraft:redstone_wall_torch" in s
 
+def _is_glass(block: BlockState) -> bool:
+    return "minecraft:glass" in _block_str(block)
+
 
 def _needs_support(block: BlockState) -> bool:
     name = _block_str(block)
