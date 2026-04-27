@@ -175,9 +175,18 @@ def _find_wire_path(
 
         return pos in solid and has_input_repeater
 
+    def _torch_below(support_pos: tuple[int, int, int]) -> bool:
+        """True if a torch at support_pos-1Y would power the support block → unintended signal."""
+        bx, by, bz = support_pos
+        below = (bx, by - 1, bz)
+        if not _in_bounds(below, bounds):
+            return False
+        return _is_torch(workspace[below[0], below[1], below[2]])
+
     def _horiz_neighbors(
             pos: tuple[int, int, int],
             path_snapshot: frozenset[tuple[int, int, int]],
+            came_from_tower: bool = False,
     ) -> list[tuple[tuple[int, int, int], int]]:
         x, y, z = pos
         result: list[tuple[tuple[int, int, int], int]] = []
@@ -192,17 +201,19 @@ def _find_wire_path(
                     (nx, y - 1, nz) not in path_snapshot
                     and came_from.get(pos) != (nx, y - 1, nz)
                     and _can_be_support(workspace, solid, (nx, y - 1, nz), bounds)
+                    and not _torch_below((nx, y - 1, nz))
                 ):
                     result.append((flat, 1))
 
-            # Slope-up
-            if y < max_bridge_y:
+            # Slope-up (disallowed immediately after a tower move — tower top already
+            # has a dedicated +1Y move in _tower_neighbors)
+            if y < max_bridge_y and not came_from_tower:
                 up = (nx, y + 1, nz)
                 if _is_air(workspace[x, y + 1, z]) and walkable(up) and not _is_powered_block((nx, y + 2, nz)): # ensure no block will cut off slope connection and up pos is valid
                     ramp = (nx, y, nz)
                     if ramp not in path_snapshot and came_from.get(pos) != ramp and (
                         ramp in solid or (_in_bounds(ramp, bounds) and _is_air(workspace[ramp[0], ramp[1], ramp[2]]))
-                    ):
+                    ) and not _torch_below(ramp):
                         # TODO: this discourages ramping so we get torch towers for vertical signal extension, but we should guarantee that vertical extension no matter what path is chosen
                         result.append((up, 3))
 
@@ -230,7 +241,10 @@ def _find_wire_path(
                 if _can_be_support(workspace, solid, (x, y - 1, z), bounds):
                     exempt.add((x, y - 2, z))
                 if above_clear and walkable(down, frozenset(exempt)):
-                    if y - 1 <= min_y or _can_be_support(workspace, solid, (nx, y - 2, nz), bounds):
+                    if y - 1 <= min_y or (
+                        _can_be_support(workspace, solid, (nx, y - 2, nz), bounds)
+                        and not _torch_below((nx, y - 2, nz))
+                    ):
                         below_owner = dust_owner.get((nx, y - 3, nz))
                         breaks_slope = (
                             below_owner is not None
@@ -247,6 +261,7 @@ def _find_wire_path(
     def _double_slope_neighbors(
             pos: tuple[int, int, int],
             path_snapshot: frozenset[tuple[int, int, int]],
+            came_from_tower: bool = False,
     ) -> tuple[list[tuple[tuple[int, int, int], int]], list[tuple[int, int, int]]]:
         x, y, z = pos
         result: list[tuple[tuple[int, int, int], int]] = []
@@ -255,8 +270,8 @@ def _find_wire_path(
             nx2, nz2 = x + 2 * dx, z + 2 * dz
             exempt = frozenset([(nx2, y, nz2)])
 
-            # 2x slope-up
-            if y + 2 <= max_bridge_y:
+            # 2x slope-up (disallowed immediately after tower move)
+            if y + 2 <= max_bridge_y and not came_from_tower:
                 mid = (x + dx, y + 1, z + dz)
                 above_mid = (x + dx, y + 2, z + dz)
                 top = (nx2, y + 2, nz2)
@@ -274,7 +289,7 @@ def _find_wire_path(
                     and _wire_walkable(workspace, solid, dust_owner, mid, net_id, bounds, exempt_foreign=exempt)
                 )
                 if mid_ok and walkable(top):
-                    if mid_support not in path_snapshot and came_from.get(pos) != mid_support and _can_be_support(workspace, solid, mid_support, bounds):
+                    if mid_support not in path_snapshot and came_from.get(pos) != mid_support and _can_be_support(workspace, solid, mid_support, bounds) and not _torch_below(mid_support):
                         result.append((top, 7))
                         additional_blocked.append(mid)
 
@@ -304,7 +319,10 @@ def _find_wire_path(
                     and _wire_walkable(workspace, solid, dust_owner, mid_dn, net_id, bounds, exempt_foreign=exempt_dn)
                 )
                 if mid_dn_ok and walkable(top_dn):
-                    if y - 2 <= min_y or _can_be_support(workspace, solid, (nx2, y - 3, nz2), bounds):
+                    if y - 2 <= min_y or (
+                        _can_be_support(workspace, solid, (nx2, y - 3, nz2), bounds)
+                        and not _torch_below((nx2, y - 3, nz2))
+                    ):
                         result.append((top_dn, 7))
                         additional_blocked.append(mid_dn)
         return result, additional_blocked
@@ -462,8 +480,13 @@ def _find_wire_path(
     ) -> tuple[list[tuple[tuple[int, int, int], int]], list[tuple[int, int, int]]]: # results, additional cells
         if pos in inverted_cells:
             return [], []
-        result = _horiz_neighbors(pos, path_snapshot)
-        dsn, additional_blocked = _double_slope_neighbors(pos, path_snapshot)
+        came_from_tower = (
+            parent is not None
+            and parent[1] + 4 == pos[1]
+            and (pos[0] - parent[0], pos[2] - parent[2]) in _TOWER_2BLOCK
+        )
+        result = _horiz_neighbors(pos, path_snapshot, came_from_tower)
+        dsn, additional_blocked = _double_slope_neighbors(pos, path_snapshot, came_from_tower)
         result.extend(dsn)
         result.extend(_tower_neighbors(pos, parent, path_snapshot))
         result.extend(_powered_minus4_neighbors(pos, path_snapshot))
