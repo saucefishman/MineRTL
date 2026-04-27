@@ -414,9 +414,6 @@ def _route_all_nets(
                     terminal_positions=all_terminal_positions,
                 )
                 support_block = WOOLS[net_idx % len(WOOLS)]
-                if net.net_id == 'net_55':
-                    if dst_pin == sorted_pins[0]:
-                        support_block = BlockState("minecraft:barrel")
 
                 _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
                                    opaque_support_block=support_block,
