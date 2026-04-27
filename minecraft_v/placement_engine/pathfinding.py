@@ -155,7 +155,7 @@ def _find_wire_path(
 
             # Flat move
             flat = (nx, y, nz)
-            if walkable(flat) and (nx, y + 1, nz) not in path_snapshot:
+            if walkable(flat) and (nx, y + 1, nz) not in path_snapshot and came_from.get(pos) != (nx, y + 1, nz):
                 if y <= min_y or (
                     (nx, y - 1, nz) not in path_snapshot
                     and _can_be_support(workspace, solid, (nx, y - 1, nz), bounds)
@@ -177,10 +177,17 @@ def _find_wire_path(
             if y > min_y:
                 down = (nx, y - 1, nz)
                 above_down = (nx, y, nz)
+                # (nx, y+1, nz) is the ancestor wire that would place a support at above_down,
+                # blocking the slope. Check path_snapshot (local ±1-XZ) AND came_from[pos]
+                # (canonical first-expansion parent): a cheaper A-path may expand pos first,
+                # set came_from[pos]=A, and block the slope; a later cheaper non-A-path
+                # expansion of pos would have A absent from its path_snapshot, so we also
+                # check came_from to catch that second-expansion case.
                 above_clear = (
                     above_down not in solid
                     and above_down not in path_snapshot
                     and (nx, y + 1, nz) not in path_snapshot
+                    and came_from.get(pos) not in ((nx, y + 1, nz), (nx, y, nz))
                     and _in_bounds(above_down, bounds)
                     and _is_air(workspace[above_down[0], above_down[1], above_down[2]])
                 )
@@ -233,6 +240,7 @@ def _find_wire_path(
                     above_mid not in solid
                     and above_mid not in path_snapshot
                     and (above_mid[0], above_mid[1] + 1, above_mid[2]) not in path_snapshot
+                    and came_from.get(pos) != above_mid
                     and _in_bounds(above_mid, bounds)
                     and _is_air(workspace[above_mid[0], above_mid[1], above_mid[2]])
                 )
@@ -295,13 +303,16 @@ def _find_wire_path(
                 for dx, dz in _HORIZ_DIRS:
                     cp_side = (cp[0] + dx, cp[1], cp[2] + dz)
                     if _in_bounds(cp_side, bounds) and _is_redstone_wire(workspace[cp_side[0], cp_side[1], cp_side[2]]):
-                        if cdy == 1 or cdy == 2: # inverted section
-                            col_clear = False
-                            break
-                        side_owner = dust_owner.get(cp_side)
-                        if side_owner is not None and side_owner != net_id:
-                            col_clear = False
-                            break
+                        # if cdy == 1 or cdy == 2: # inverted section
+                        #     col_clear = False
+                        #     break
+                        # side_owner = dust_owner.get(cp_side)
+                        # if side_owner is not None and side_owner != net_id:
+                        #     col_clear = False
+                        #     break
+                        # If it's our own connection, we create a loop, if its others', we're interfering
+                        col_clear = False
+                        break
 
 
             if not col_clear:
