@@ -130,7 +130,8 @@ def _find_wire_path(
         for _dy in range(-2, 3):
             goal_exclusion.add((gx + _dx, gy + _dy, gz + _dz))
     for _dx, _dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-        goal_exclusion.add((gx + _dx, gy, gz + _dz))
+        for _dy in range(-1, 2):
+            goal_exclusion.add((gx + _dx, gy + _dy, gz + _dz))
     effective_protected = protected - goal_exclusion
 
     sx, sy, sz = start
@@ -140,9 +141,12 @@ def _find_wire_path(
     # the IO repeater top clearance) so slope/flat approaches can reach the terminal.
     fp_relief: set[tuple[int, int, int]] = set()
     for _ddx, _ddz in _HORIZ_DIRS:
-        fp_relief.add((gx + _ddx, gy - 1, gz + _ddz))
-    for _ddx in (-1, 1): # TODO this assumes the repeater faces north, sides might be elsewhere if this was ever changed
-        fp_relief.add((sx + _ddx, sy, sz))
+        for _ddy in (-1, 1):
+            fp_relief.add((gx + _ddx, gy + _ddy, gz + _ddz))
+    for _ddx in range(1, 3):
+        for _ddy in range(-1, 2):
+            fp_relief.add((sx + _ddx, sy + _ddy, sz))
+            fp_relief.add((sx - _ddx, sy + _ddy, sz))
     fp_relief.add((gx, gy + 2, gz))
     effective_footprint_blocked = footprint_blocked - fp_relief
 
@@ -254,6 +258,7 @@ def _find_wire_path(
             # 2x slope-up
             if y + 2 <= max_bridge_y:
                 mid = (x + dx, y + 1, z + dz)
+                above_mid = (x + dx, y + 2, z + dz)
                 top = (nx2, y + 2, nz2)
                 mid_support = (x + dx, y, z + dz)
                 mid_ok = (
@@ -263,6 +268,7 @@ def _find_wire_path(
                     and mid not in path_snapshot
                     and came_from.get(pos) != mid
                     and _in_bounds(mid, bounds)
+                    and above_mid not in solid
                     and mid not in solid
                     and _is_air(workspace[mid[0], mid[1], mid[2]])
                     and _wire_walkable(workspace, solid, dust_owner, mid, net_id, bounds, exempt_foreign=exempt)
@@ -454,6 +460,8 @@ def _find_wire_path(
             parent: tuple[int, int, int] | None,
             path_snapshot: frozenset[tuple[int, int, int]],
     ) -> tuple[list[tuple[tuple[int, int, int], int]], list[tuple[int, int, int]]]: # results, additional cells
+        if pos in inverted_cells:
+            return [], []
         result = _horiz_neighbors(pos, path_snapshot)
         dsn, additional_blocked = _double_slope_neighbors(pos, path_snapshot)
         result.extend(dsn)
@@ -462,7 +470,7 @@ def _find_wire_path(
         return result, additional_blocked
 
     def heuristic(pos: tuple[int, int, int]) -> int:
-        return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 3
+        return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 4
 
     # Seed cells: prefer start itself; fall back to neighbors when blocked
     seeds: list[tuple[int, int, int]] = []
@@ -585,6 +593,9 @@ def _find_wire_path(
             workspace[cx, cy, cz] = lamp
             cur = came_from.get(cur)
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
+        for prot in sorted(effective_footprint_blocked | effective_protected, key=heuristic)[:100]:
+            if _is_air(workspace[*prot]):
+                workspace[*prot] = GLASS
         raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason})")
     if walkable(goal) and reached != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {reached}")

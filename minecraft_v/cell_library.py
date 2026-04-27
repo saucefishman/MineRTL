@@ -106,7 +106,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
         footprint=Footprint(width=6, height=3, depth=6),
         pins=[
             PinRef(name="A", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
-            PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(4, 0, 0)),
+            PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(5, 0, 0)),
             PinRef(name="S", direction=Direction.IN, side=CardinalDirection.WEST, offset=(0, 0, 3)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(3, 0, 5)),
         ],

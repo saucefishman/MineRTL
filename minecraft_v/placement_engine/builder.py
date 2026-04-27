@@ -351,7 +351,8 @@ def _compute_net_protected(
                 for dy in range(-2, 3):
                     cells.add((tx + dx, ty + dy, tz + dz))
             for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-                cells.add((tx + dx, ty, tz + dz))
+                for dy in range(-1, 2):
+                    cells.add((tx + dx, ty, tz + dz))
     return frozenset(cells)
 
 
@@ -407,8 +408,13 @@ def _route_all_nets(
                     inverted_cells=frozenset(inverted_cells),
                     terminal_positions=all_terminal_positions,
                 )
+                support_block = WOOLS[net_idx % len(WOOLS)]
+                if net.net_id == 'net_55':
+                    if dst_pin == sorted_pins[0]:
+                        support_block = BlockState("minecraft:barrel")
+
                 _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
-                                   opaque_support_block=WOOLS[net_idx % len(WOOLS)],
+                                   opaque_support_block=support_block,
                                    inverted_cells=inverted_cells,
                                    goal=dst_pin,
                                    terminal_positions=all_terminal_positions)
