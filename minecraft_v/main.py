@@ -1,4 +1,5 @@
 import argparse
+import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -16,6 +17,30 @@ from minecraft_v.placement_engine.ir import (
     NetEndpoint,
     PinRef,
 )
+
+
+def _load_output_pin_targets(path: str) -> dict[str, tuple[int, int]]:
+    payload = json.loads(Path(path).read_text())
+    if not isinstance(payload, dict):
+        raise SystemExit("--output-pin-targets-json must contain a JSON object")
+
+    normalized: dict[str, tuple[int, int]] = {}
+    for pin_name, coord in payload.items():
+        if not isinstance(pin_name, str) or not pin_name:
+            raise SystemExit("output pin target keys must be non-empty strings")
+        if isinstance(coord, dict):
+            x = coord.get("x")
+            y = coord.get("y")
+        elif isinstance(coord, (list, tuple)) and len(coord) == 3:
+            x, y, _z_ignored = coord
+        else:
+            raise SystemExit(
+                f"Invalid coord for '{pin_name}'. Use [x, y, z] or {{\"x\":...,\"y\":...,\"z\":...}}"
+            )
+        if not isinstance(x, int) or not isinstance(y, int):
+            raise SystemExit(f"Invalid coord for '{pin_name}': x and y must be integers")
+        normalized[pin_name] = (x, y)
+    return normalized
 
 
 def module_to_component_list(module: Module) -> ComponentList:
@@ -97,7 +122,9 @@ def main():
     parser.add_argument("--schematics-dir", type=str, default="schematics")
     parser.add_argument("--schematic-name", type=str, default=None)
     parser.add_argument('--allow-routing-failures', type=bool, default=False)
+    parser.add_argument("--output-pin-targets-json", type=str, default=None)
     args = parser.parse_args()
+    print(args)
 
     out_litematic = Path(args.out_litematic)
     if out_litematic.suffix != ".litematic":
@@ -121,9 +148,15 @@ def main():
     print(f"Wrote component list: {component_list_path.resolve()}")
 
     allow_routing_failures = args.allow_routing_failures
+    output_pin_targets = (
+        _load_output_pin_targets(args.output_pin_targets_json)
+        if args.output_pin_targets_json
+        else None
+    )
     build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir),
                                         out_path=out_litematic, schematic_name=schematic_name,
-                                        allow_routing_failures=allow_routing_failures)
+                                        allow_routing_failures=allow_routing_failures,
+                                        output_pin_targets=output_pin_targets)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 

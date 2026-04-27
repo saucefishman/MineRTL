@@ -164,6 +164,23 @@ def test_build_litematic_from_netlist_smoke(tmp_path: Path):
     assert has_repeater
 
 
+def test_output_pin_target_layer_wiring(tmp_path: Path):
+    comp_list = module_to_component_list(_inverter_module())
+    out = tmp_path / "out_targets.litematic"
+    target = (2, 5)
+    build_litematic_from_component_list(
+        comp_list,
+        schematics_dir=SCHEMATICS_DIR,
+        out_path=out,
+        schematic_name="test_inv_targets",
+        output_pin_targets={"y_out": target},
+    )
+    loaded = Schematic.load(str(out))
+    region = next(iter(loaded.regions.values()))
+    tx, ty = target
+    assert "redstone_wire" in str(region[tx, ty, region.min_z()])
+
+
 @pytest.mark.parametrize(
     "gate_type, kwargs",
     [
