@@ -130,14 +130,18 @@ def _find_wire_path(
         goal_exclusion.add((gx + _dx, gy, gz + _dz))
     effective_protected = protected - goal_exclusion
 
+    sx, sy, sz = start
+
     # Shrink footprint blocking on the side the goal terminal is on: remove the
     # 1-cell expansion cells immediately adjacent to the goal (including +2Y for
     # the IO repeater top clearance) so slope/flat approaches can reach the terminal.
-    goal_fp_relief: set[tuple[int, int, int]] = set()
+    fp_relief: set[tuple[int, int, int]] = set()
     for _ddx, _ddz in _HORIZ_DIRS:
-        goal_fp_relief.add((gx + _ddx, gy - 1, gz + _ddz))
-    goal_fp_relief.add((gx, gy + 2, gz))
-    effective_footprint_blocked = footprint_blocked - goal_fp_relief
+        fp_relief.add((gx + _ddx, gy - 1, gz + _ddz))
+    for _ddx in (-1, 1): # TODO this assumes the repeater faces north, sides might be elsewhere if this was ever changed
+        fp_relief.add((sx + _ddx, sy, sz))
+    fp_relief.add((gx, gy + 2, gz))
+    effective_footprint_blocked = footprint_blocked - fp_relief
 
     def walkable(
             pos: tuple[int, int, int],
