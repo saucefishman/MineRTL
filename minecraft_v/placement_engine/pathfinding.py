@@ -140,7 +140,7 @@ def _find_wire_path(
     # 1-cell expansion cells immediately adjacent to the goal (including +2Y for
     # the IO repeater top clearance) so slope/flat approaches can reach the terminal.
     fp_relief: set[tuple[int, int, int]] = set()
-    for _ddx, _ddz in _HORIZ_DIRS:
+    for _ddx, _ddz in ((1, 0), (-1, 0), (0, 1)):
         for _ddy in (-1, 1):
             fp_relief.add((gx + _ddx, gy + _ddy, gz + _ddz))
     for _ddx in range(1, 3):
