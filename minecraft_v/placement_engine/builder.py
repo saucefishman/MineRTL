@@ -229,12 +229,7 @@ def _route_output_pin_extensions(
             zone.add((rx + dx, ry, rz + dz))
         return frozenset(zone)
 
-    def _ext_route_distance(pn: str) -> int:
-        rep = repeater_cells_by_pin[pn]
-        tgt = ext_target_positions[pn]
-        return abs(rep[0] - tgt[0]) + abs(rep[1] - tgt[1]) + abs(rep[2] - tgt[2])
-
-    for pin_name in sorted(output_pin_targets, key=_ext_route_distance):
+    for pin_name in sorted(output_pin_targets, key=lambda pn: ext_target_positions[pn][1]):
         lookup = output_repeater_lookup[pin_name]
         repeater_cell, side_name, endpoint = lookup
         base_net_id = net_id_by_output_endpoint.get(endpoint)
