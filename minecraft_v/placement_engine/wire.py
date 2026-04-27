@@ -249,18 +249,6 @@ def _lay_redstone_path(
             p4_bottom.add(i)
             p4_top.add(i + 1)
 
-    # cells[i] needs glass (not stone) support if cells[j] (j > i) shares the same XZ
-    # and is exactly 2Y lower: stone would sit directly above cells[j], blocking the
-    # slope connection from any intermediate cell at y-1 into cells[j], and would also
-    # conduct the signal from cells[i] down through the support to cells[j].
-    _pos_to_idx: dict[tuple[int, int, int], int] = {c: i for i, c in enumerate(cells)}
-    zigzag_glass: set[int] = set()
-    for i, (ax, ay, az) in enumerate(cells):
-        below2 = (ax, ay - 2, az)
-        j = _pos_to_idx.get(below2, -1)
-        if j > i:
-            zigzag_glass.add(i)
-
     for i, cell in enumerate(cells):
         if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):
             continue  # already placed by their respective move handler
@@ -276,11 +264,6 @@ def _lay_redstone_path(
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
-            if i in zigzag_glass:
-                ax, ay, az = cell
-                support = (ax, ay - 1, az)
-                if support in solid and _block_str(workspace[ax, ay - 1, az]) == _block_str(opaque_support_block):
-                    workspace[ax, ay - 1, az] = GLASS
 
 
 def _place_repeaters_for_net(
