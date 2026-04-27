@@ -5,7 +5,7 @@ from .constants import (
     GLASS, STONE, REDSTONE, REDSTONE_TORCH,
     _HORIZ_DIRS, _DELTA_TO_FACING, _OPPOSITE_SIDE, _REPEATER_INTERVAL, _TOWER_2BLOCK,
 )
-from .block_utils import _is_air, _is_redstone_wire, _is_torch, _is_repeater
+from .block_utils import _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
 
 
 def _place_support(
@@ -76,6 +76,118 @@ def _lay_slope2_move(
     _lay_dust_cell(workspace, solid, dust_owner, net_id, mid, opaque_support_block)
 
 
+def _lay_powered_minus4_move(
+        workspace: Region,
+        solid: set[tuple[int, int, int]],
+        dust_owner: dict[tuple[int, int, int], str],
+        net_id: str,
+        launch: tuple[int, int, int],
+        dest: tuple[int, int, int],
+        opaque_support_block: BlockState,
+        inverted_cells: set[tuple[int, int, int]] | None = None,
+        goal: tuple[int, int, int] | None = None,
+        terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
+) -> None:
+    """Lay a powered -4 move via two wall torch inversions.
+
+    Signal: wire→block(y-1)→inverted torch(nx,y-1)→inverted dust(nx,y-2)
+            →unpowered block(nx,y-3)→active torch(x,y-3)→output dust(x,y-4).
+    Cells (nx,y-1,nz) and (nx,y-2,nz) carry opposite-polarity signal and are
+    added to inverted_cells so future routing avoids them.
+    """
+    x, y, z = launch  # dest == (x, y-4, z)
+
+    # Find the valid side direction (verified clear during A*, should still be free)
+    direction: tuple[int, int] | None = None
+    for dx, dz in _HORIZ_DIRS:
+        nx_c, nz_c = x + dx, z + dz
+        side_cells = [
+            (nx_c, y - 1, nz_c),
+            (nx_c, y - 2, nz_c),
+            (nx_c, y - 3, nz_c),
+            (x,    y - 3, z),
+            (nx_c, y,     nz_c),  # clearance above first torch
+            (x,    y - 2, z),     # clearance above second torch
+        ]
+        if not all(
+            _is_air(workspace[cx, cy, cz]) and (cx, cy, cz) not in solid
+            for cx, cy, cz in side_cells
+        ):
+            continue
+        if (goal is not None and (nx_c, y - 1, nz_c) == goal) \
+                or (nx_c, y - 1, nz_c) in terminal_positions \
+                or (nx_c, y - 2, nz_c) in terminal_positions \
+                or (nx_c, y - 3, nz_c) in terminal_positions \
+                or (x,    y - 3, z)    in terminal_positions \
+                or (x,    y - 1, z)    in terminal_positions \
+                or (nx_c, y,     nz_c) in terminal_positions \
+                or (x,    y - 2, z)    in terminal_positions:
+            continue
+        # Mirror A* adjacency check: no foreign-owned wire at ±1 XZ ±1 Y of any
+        # side cell — matches _powered_minus4_neighbors lines 378-387.
+        adj_ok = True
+        for cx, cy, cz in side_cells:
+            for adx, adz in _HORIZ_DIRS:
+                for ady in (-1, 0, 1):
+                    sp = (cx + adx, cy + ady, cz + adz)
+                    owner = dust_owner.get(sp)
+                    if owner is not None and owner != net_id:
+                        adj_ok = False
+                        break
+                if not adj_ok:
+                    break
+            if not adj_ok:
+                break
+        if not adj_ok:
+            continue
+        direction = (dx, dz)
+        break
+    if direction is None:
+        raise ValueError(f"No valid direction for powered_minus4 at {launch}")
+    tdx, tdz = direction
+    nx, nz = x + tdx, z + tdz
+
+    # Ensure opaque support at (x, y-1, z) — glass cannot conduct signal to torch
+    below_launch = (x, y - 1, z)
+    if below_launch not in solid:
+        workspace[x, y - 1, z] = opaque_support_block
+        solid.add(below_launch)
+    elif _block_str(workspace[x, y - 1, z]) == "minecraft:glass":
+        workspace[x, y - 1, z] = opaque_support_block
+    dust_owner[below_launch] = net_id
+
+    # Launch wire
+    if _is_air(workspace[x, y, z]):
+        workspace[x, y, z] = REDSTONE
+        dust_owner[(x, y, z)] = net_id
+
+    # Wall torch at (nx, y-1, nz) — inverted; attached to block at (x, y-1, z)
+    facing1 = _DELTA_TO_FACING[(tdx, tdz)]
+    workspace[nx, y - 1, nz] = BlockState("minecraft:redstone_wall_torch", facing=facing1)
+    dust_owner[(nx, y - 1, nz)] = net_id
+    if inverted_cells is not None:
+        inverted_cells.add((nx, y - 1, nz))
+
+    # Inverted dust at (nx, y-2, nz)
+    workspace[nx, y - 2, nz] = REDSTONE
+    dust_owner[(nx, y - 2, nz)] = net_id
+    if inverted_cells is not None:
+        inverted_cells.add((nx, y - 2, nz))
+
+    # Support block at (nx, y-3, nz) — wall anchor for second torch; also supports dust above
+    workspace[nx, y - 3, nz] = opaque_support_block
+    solid.add((nx, y - 3, nz))
+    dust_owner[(nx, y - 3, nz)] = net_id
+
+    # Wall torch at (x, y-3, z) — active output; attached to block at (nx, y-3, nz)
+    facing2 = _DELTA_TO_FACING[(-tdx, -tdz)]
+    workspace[x, y - 3, z] = BlockState("minecraft:redstone_wall_torch", facing=facing2)
+    dust_owner[(x, y - 3, z)] = net_id
+
+    # Output dust at dest = (x, y-4, z)
+    _lay_dust_cell(workspace, solid, dust_owner, net_id, dest, opaque_support_block)
+
+
 def _lay_tower_move(
         workspace: Region,
         solid: set[tuple[int, int, int]],
@@ -133,6 +245,8 @@ def _lay_redstone_path(
         net_id: str,
         opaque_support_block: BlockState = STONE,
         inverted_cells: set[tuple[int, int, int]] | None = None,
+        goal: tuple[int, int, int] | None = None,
+        terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> None:
     cells = list(path)
     n = len(cells)
@@ -140,6 +254,8 @@ def _lay_redstone_path(
     tower_bottom: set[int] = set()
     tower_top: set[int] = set()
     slope2_bottom: set[int] = set()
+    p4_bottom: set[int] = set()
+    p4_top: set[int] = set()
     for i in range(n - 1):
         ax, ay, az = cells[i]
         bx, by, bz = cells[i + 1]
@@ -149,16 +265,22 @@ def _lay_redstone_path(
             tower_top.add(i + 1)
         elif abs(by - ay) == 2 and delta in _TOWER_2BLOCK:
             slope2_bottom.add(i)
+        elif by == ay - 4 and bx == ax and bz == az:
+            p4_bottom.add(i)
+            p4_top.add(i + 1)
 
     for i, cell in enumerate(cells):
-        if i in tower_top and i not in tower_bottom:
-            continue  # stone already placed by _lay_tower_move
+        if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):
+            continue  # already placed by their respective move handler
 
         if i in slope2_bottom:
-            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block)
+            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
 
         elif i in tower_bottom:
             _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
+
+        elif i in p4_bottom:
+            _lay_powered_minus4_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells, goal, terminal_positions)
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)

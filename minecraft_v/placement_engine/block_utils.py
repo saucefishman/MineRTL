@@ -21,7 +21,8 @@ def _is_repeater(block: BlockState) -> bool:
 
 
 def _is_torch(block: BlockState) -> bool:
-    return "minecraft:redstone_torch" in _block_str(block)
+    s = _block_str(block)
+    return "minecraft:redstone_torch" in s or "minecraft:redstone_wall_torch" in s
 
 
 def _needs_support(block: BlockState) -> bool:

@@ -9,6 +9,22 @@ if [[ $# -lt 1 ]]; then
 fi
 
 dir="$1"
+shift
+
+has_output_pin_targets_flag=false
+for arg in "$@"; do
+    case "$arg" in
+        --output-pin-targets-json|--output-pin-targets-json=*)
+            has_output_pin_targets_flag=true
+            break
+            ;;
+    esac
+done
+
+default_pin_targets_json="${dir%/}/pin_targets.json"
+if [[ -f "$default_pin_targets_json" && "$has_output_pin_targets_flag" == false ]]; then
+    set -- "$@" --output-pin-targets-json "$default_pin_targets_json"
+fi
 
 yosys -p "
 read_verilog -sv ${dir}/*.v
@@ -27,4 +43,4 @@ write_json build/artifacts/netlist.json
 stat
 "
 
-uv run python -m minecraft_v --netlist build/artifacts/netlist.json "${@:2}"
+uv run python -m minecraft_v --netlist build/artifacts/netlist.json "$@"
