@@ -203,7 +203,17 @@ def _find_wire_path(
                     exempt.add((x, y - 2, z))
                 if above_clear and walkable(down, frozenset(exempt)):
                     if y - 1 <= min_y or _can_be_support(workspace, solid, (nx, y - 2, nz), bounds):
-                        result.append((down, 2))
+                        below_owner = dust_owner.get((nx, y - 3, nz))
+                        breaks_slope = (
+                            below_owner is not None
+                            and below_owner != net_id
+                            and any(
+                                dust_owner.get((nx + sdx, y - 2, nz + sdz)) == below_owner
+                                for sdx, sdz in _HORIZ_DIRS
+                            )
+                        )
+                        if not breaks_slope:
+                            result.append((down, 2))
         return result
 
     def _double_slope_neighbors(
