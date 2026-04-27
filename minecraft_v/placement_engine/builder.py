@@ -7,11 +7,12 @@ from litemapy import BlockState, Region, Schematic
 from minecraft_v.build_utils import save_artifact
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from minecraft_v.placement_engine.ir import (
+    Component,
     ComponentList,
     ComponentType,
     NetConnection,
 )
-from .block_utils import _is_air, _ensure_support, _is_redstone_wire
+from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, WOOLS,
 )
@@ -414,6 +415,108 @@ def _route_all_nets(
     return routing_failures, inverted_cells
 
 
+def _compute_critical_path(
+        comp: ComponentList,
+        dust_owner: dict[tuple[int, int, int], str],
+        workspace: Region,
+) -> None:
+    """Count repeaters/torches per net, topo-sort DP, print critical path in ticks."""
+    from collections import deque
+
+    # Wire ticks per net: repeaters and torches placed in dust_owner
+    net_ticks: dict[str, int] = {n.net_id: 0 for n in comp.nets}
+    for pos, nid in dust_owner.items():
+        if nid not in net_ticks:
+            continue
+        blk = workspace[pos[0], pos[1], pos[2]]
+        if _is_repeater(blk) or _is_torch(blk):
+            net_ticks[nid] += 1
+
+    # IO repeater on nets driven by INPUT_PINs (+1 per such net)
+    comp_by_id: dict[str, Component] = {c.id: c for c in comp.components}
+    for n in comp.nets:
+        if comp_by_id[n.source.component_id].type == ComponentType.INPUT_PIN:
+            net_ticks[n.net_id] += 1
+
+    _SEQUENTIAL = frozenset({ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH})
+
+    # Sequential components are split into two virtual graph nodes to break cycles:
+    #   "{id}\x00q" — virtual Q-output source: in_degree=0, out_time=0 (registered output)
+    #   "{id}"      — real D/C/E-input sink: receives edges from combinational logic, no
+    #                 outgoing edges; arrival tracks setup-time constraint
+    def _q_node(cid: str) -> str:
+        return cid + "\x00q"
+
+    seq_ids = {c.id for c in comp.components if c.type in _SEQUENTIAL}
+    all_nodes: set[str] = {c.id for c in comp.components} | {_q_node(cid) for cid in seq_ids}
+
+    edges: dict[str, list[tuple[str, str]]] = {n: [] for n in all_nodes}
+    in_degree: dict[str, int] = {n: 0 for n in all_nodes}
+
+    for n in comp.nets:
+        src = n.source.component_id
+        src_node = _q_node(src) if src in seq_ids else src
+        for sink in n.sinks:
+            sid = sink.component_id
+            edges[src_node].append((n.net_id, sid))
+            in_degree[sid] += 1
+
+    arrival: dict[str, int] = {n: 0 for n in all_nodes}
+    best_pred: dict[str, tuple[str, str] | None] = {n: None for n in all_nodes}
+
+    queue: deque[str] = deque(n for n, d in in_degree.items() if d == 0)
+    processed = 0
+    while queue:
+        nid = queue.popleft()
+        processed += 1
+        if nid.endswith("\x00q"):
+            out_t = 0  # registered Q: always t=0
+        else:
+            c = comp_by_id[nid]
+            delay = SCHEMATIC_MAP[c.type].propagation_delay_ticks if c.type in SCHEMATIC_MAP else 0
+            out_t = arrival[nid] + delay
+        for net_id, sink_id in edges[nid]:
+            t = out_t + net_ticks[net_id]
+            if t > arrival[sink_id]:
+                arrival[sink_id] = t
+                best_pred[sink_id] = (net_id, nid)
+            in_degree[sink_id] -= 1
+            if in_degree[sink_id] == 0:
+                queue.append(sink_id)
+
+    if processed < len(all_nodes):
+        print("[timing] WARNING: cycle detected in component graph — path may be incomplete")
+
+    # Critical endpoints: OUTPUT_PINs and DFF/DFFE/DLATCH real nodes (setup-time sinks).
+    # Fall back to all real component nodes if none exist.
+    endpoint_ids = [
+        c.id for c in comp.components
+        if c.type == ComponentType.OUTPUT_PIN or c.type in _SEQUENTIAL
+    ] or [c.id for c in comp.components]
+
+    max_id = max(endpoint_ids, key=lambda n: arrival[n])
+    max_t = arrival[max_id]
+
+    # Trace critical path backwards; Q-source virtual nodes display as "{comp}.Q"
+    def _display(nid: str) -> str:
+        return nid[:-2] + ".Q" if nid.endswith("\x00q") else nid
+
+    trace: list[str] = []
+    cur: str | None = max_id
+    while cur is not None:
+        trace.append(_display(cur))
+        pred = best_pred.get(cur)
+        if pred is None:
+            break
+        net_id, prev_id = pred
+        trace.append(f"[net {net_id}: {net_ticks[net_id]}t]")
+        cur = prev_id
+    trace.reverse()
+
+    print(f"[timing] Critical path: {max_t} ticks")
+    print(f"[timing] Path: {' → '.join(trace)}")
+
+
 def build_litematic_from_component_list(
         comp: ComponentList,
         schematics_dir: Path,
@@ -540,6 +643,8 @@ def build_litematic_from_component_list(
                 print(f"IGNORING - Pin target routing failed: {e}")
             else:
                 raise RuntimeError(f"Pin target routing failed: {e}")
+
+    _compute_critical_path(comp, dust_owner, workspace)
 
     schematic = workspace.as_schematic(
         name=schematic_name, author="minecraft-v", description="merged placement"

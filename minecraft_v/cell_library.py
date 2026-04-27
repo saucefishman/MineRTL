@@ -25,6 +25,7 @@ class SchematicInfo:
     file_prefix: str
     footprint: Footprint
     pins: list[PinRef]
+    propagation_delay_ticks: int = 0
 
 
 SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
@@ -36,6 +37,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(3, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
+        propagation_delay_ticks=3
     ),
     ComponentType.OR: SchematicInfo(
         file_prefix="or",
@@ -45,6 +47,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(3, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 2)),
         ],
+        propagation_delay_ticks=2
     ),
     ComponentType.NOT: SchematicInfo(
         file_prefix="not",
@@ -53,6 +56,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="A", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 2)),
         ],
+        propagation_delay_ticks=1
     ),
     ComponentType.XOR: SchematicInfo(
         file_prefix="xor",
@@ -62,6 +66,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="B", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(2, 0, 0)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 6)),
         ],
+        propagation_delay_ticks=5
     ),
     ComponentType.DFF: SchematicInfo(
         file_prefix="dff",
@@ -71,6 +76,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="D", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
             PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 1)),
         ],
+        propagation_delay_ticks=2
     ),
     ComponentType.DFFE: SchematicInfo(
         file_prefix="dffe",
@@ -81,6 +87,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="E", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 3)),
             PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 3)),
         ],
+        propagation_delay_ticks=2
     ),
     ComponentType.FULL_ADDER: SchematicInfo(
         file_prefix="fulladder",
@@ -92,6 +99,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="S", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 14)),
             PinRef(name="Cout", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(5, 0, 14)),
         ],
+        propagation_delay_ticks=10
     ),
     ComponentType.MUX: SchematicInfo(
         file_prefix="mux",
@@ -102,6 +110,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="S", direction=Direction.IN, side=CardinalDirection.WEST, offset=(0, 0, 3)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(3, 0, 5)),
         ],
+        propagation_delay_ticks=3
     ),
 }
 
