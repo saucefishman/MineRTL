@@ -59,3 +59,5 @@ _OPPOSITE_SIDE: dict[str, str] = {
 
 # XZ offsets that constitute a 2-block horizontal step (used by tower and 2x-slope moves)
 _TOWER_2BLOCK: frozenset[tuple[int, int]] = frozenset([(2, 0), (-2, 0), (0, 2), (0, -2)])
+
+_REPEATER_MAX_DELAY = 4
