@@ -526,8 +526,9 @@ def build_litematic_from_component_list(
         workspace_size: tuple[int, int, int] | None = None,
         base_y: int = 5,
         schematic_name: str = "build",
-        io_margin: int = 10,
-        routing_gutter: int = 10,
+        component_width_spacing: int = 7,
+        component_depth_spacing: int = 6,
+        additional_component_height_spacing: int = 4,
         routing_headroom: int = 5,
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
@@ -536,12 +537,12 @@ def build_litematic_from_component_list(
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
-    y_stride = max_comp_height + 5
+    y_stride = max_comp_height + additional_component_height_spacing
     y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride)
     placed = _layout_components(
         comp.components, comp.nets,
         gutter=gutter, base_y=base_y, y_level=y_level,
-        io_margin=io_margin, routing_gutter=routing_gutter,
+        io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
     )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
@@ -553,7 +554,7 @@ def build_litematic_from_component_list(
 
     if workspace_size is None:
         width, height, depth = _compute_workspace_dims(
-            placed, base_y=base_y, io_margin=io_margin, routing_headroom=routing_headroom,
+            placed, base_y=base_y, io_margin=component_width_spacing, routing_headroom=routing_headroom,
         )
     else:
         width, height, depth = workspace_size
