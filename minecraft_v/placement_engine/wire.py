@@ -109,19 +109,39 @@ def _lay_powered_minus4_move(
             (nx_c, y,     nz_c),  # clearance above first torch
             (x,    y - 2, z),     # clearance above second torch
         ]
-        if all(
+        if not all(
             _is_air(workspace[cx, cy, cz]) and (cx, cy, cz) not in solid
             for cx, cy, cz in side_cells
-        ) and (goal is None or (nx_c, y - 1, nz_c) != goal) \
-            and (nx_c, y - 1, nz_c) not in terminal_positions \
-            and (nx_c, y - 2, nz_c) not in terminal_positions \
-            and (nx_c, y - 3, nz_c) not in terminal_positions \
-            and (x,    y - 3, z)    not in terminal_positions \
-            and (x,    y - 1, z)    not in terminal_positions \
-            and (nx_c, y,     nz_c) not in terminal_positions \
-            and (x,    y - 2, z)    not in terminal_positions:
-            direction = (dx, dz)
-            break
+        ):
+            continue
+        if (goal is not None and (nx_c, y - 1, nz_c) == goal) \
+                or (nx_c, y - 1, nz_c) in terminal_positions \
+                or (nx_c, y - 2, nz_c) in terminal_positions \
+                or (nx_c, y - 3, nz_c) in terminal_positions \
+                or (x,    y - 3, z)    in terminal_positions \
+                or (x,    y - 1, z)    in terminal_positions \
+                or (nx_c, y,     nz_c) in terminal_positions \
+                or (x,    y - 2, z)    in terminal_positions:
+            continue
+        # Mirror A* adjacency check: no foreign-owned wire at ±1 XZ ±1 Y of any
+        # side cell — matches _powered_minus4_neighbors lines 378-387.
+        adj_ok = True
+        for cx, cy, cz in side_cells:
+            for adx, adz in _HORIZ_DIRS:
+                for ady in (-1, 0, 1):
+                    sp = (cx + adx, cy + ady, cz + adz)
+                    owner = dust_owner.get(sp)
+                    if owner is not None and owner != net_id:
+                        adj_ok = False
+                        break
+                if not adj_ok:
+                    break
+            if not adj_ok:
+                break
+        if not adj_ok:
+            continue
+        direction = (dx, dz)
+        break
     if direction is None:
         raise ValueError(f"No valid direction for powered_minus4 at {launch}")
     tdx, tdz = direction
