@@ -558,10 +558,6 @@ def _find_wire_path(
             cx, cy, cz = cur
             workspace[cx, cy, cz] = lamp
             cur = came_from.get(cur)
-        for coord in sorted(explored, key=heuristic)[:100]:
-            cx2, cy2, cz2 = coord
-            if _is_air(workspace[cx2, cy2, cz2]):
-                workspace[cx2, cy2, cz2] = GLASS
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
         raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason})")
     if walkable(goal) and reached != goal:
