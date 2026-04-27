@@ -99,7 +99,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="S", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, 0, 14)),
             PinRef(name="Cout", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(5, 0, 14)),
         ],
-        propagation_delay_ticks=10
+        propagation_delay_ticks=7
     ),
     ComponentType.MUX: SchematicInfo(
         file_prefix="mux",
