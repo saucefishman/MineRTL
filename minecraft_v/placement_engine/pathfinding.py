@@ -33,6 +33,7 @@ def _wire_walkable(
         bounds: tuple[int, int, int, int, int, int],
         exempt_foreign: frozenset[tuple[int, int, int]] = frozenset(),
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
+        footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> bool:
     x, y, z = pos
     if not _in_bounds(pos, bounds):
@@ -59,6 +60,10 @@ def _wire_walkable(
             owner = dust_owner.get(np)
             if owner is not None and owner != net_id:
                 return False
+            if owner is None and np not in footprint_blocked:
+                block_np = workspace[np[0], np[1], np[2]]
+                if _is_torch(block_np) or _is_redstone_wire(block_np):
+                    return False
     # Vertical same-XZ: powered blocks distribute signal on all 6 faces including
     # top and bottom, so wire directly above or below a foreign-owned block is unsafe.
     for vdy in (1, -1):
@@ -141,7 +146,7 @@ def _find_wire_path(
         return (
             pos not in effective_protected
             and pos not in effective_footprint_blocked
-            and _wire_walkable(workspace, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt, inverted_cells=inverted_cells)
+            and _wire_walkable(workspace, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt, inverted_cells=inverted_cells, footprint_blocked=effective_footprint_blocked)
         )
 
     def _horiz_neighbors(
@@ -158,6 +163,7 @@ def _find_wire_path(
             if walkable(flat) and (nx, y + 1, nz) not in path_snapshot and came_from.get(pos) != (nx, y + 1, nz):
                 if y <= min_y or (
                     (nx, y - 1, nz) not in path_snapshot
+                    and came_from.get(pos) != (nx, y - 1, nz)
                     and _can_be_support(workspace, solid, (nx, y - 1, nz), bounds)
                 ):
                     result.append((flat, 1))
@@ -165,9 +171,9 @@ def _find_wire_path(
             # Slope-up
             if y < max_bridge_y:
                 up = (nx, y + 1, nz)
-                if walkable(up):
+                if _is_air(workspace[x, y + 1, z]) and walkable(up): # ensure no block will cut off slope connection and up pos is valid
                     ramp = (nx, y, nz)
-                    if ramp not in path_snapshot and (
+                    if ramp not in path_snapshot and came_from.get(pos) != ramp and (
                         ramp in solid or (_in_bounds(ramp, bounds) and _is_air(workspace[ramp[0], ramp[1], ramp[2]]))
                     ):
                         # TODO: this discourages ramping so we get torch towers for vertical signal extension, but we should guarantee that vertical extension no matter what path is chosen
@@ -217,16 +223,18 @@ def _find_wire_path(
                 top = (nx2, y + 2, nz2)
                 mid_support = (x + dx, y, z + dz)
                 mid_ok = (
-                    mid not in protected
+                    _is_air(workspace[x, y + 1, z])
+                    and mid not in protected
                     and mid not in footprint_blocked
                     and mid not in path_snapshot
+                    and came_from.get(pos) != mid
                     and _in_bounds(mid, bounds)
                     and mid not in solid
                     and _is_air(workspace[mid[0], mid[1], mid[2]])
                     and _wire_walkable(workspace, solid, dust_owner, mid, net_id, bounds, exempt_foreign=exempt)
                 )
                 if mid_ok and walkable(top):
-                    if mid_support not in path_snapshot and _can_be_support(workspace, solid, mid_support, bounds):
+                    if mid_support not in path_snapshot and came_from.get(pos) != mid_support and _can_be_support(workspace, solid, mid_support, bounds):
                         result.append((top, 7))
                         additional_blocked.append(mid)
 
@@ -240,7 +248,7 @@ def _find_wire_path(
                     above_mid not in solid
                     and above_mid not in path_snapshot
                     and (above_mid[0], above_mid[1] + 1, above_mid[2]) not in path_snapshot
-                    and came_from.get(pos) != above_mid
+                    and came_from.get(pos) not in (above_mid, (above_mid[0], above_mid[1] + 1, above_mid[2]))
                     and _in_bounds(above_mid, bounds)
                     and _is_air(workspace[above_mid[0], above_mid[1], above_mid[2]])
                 )
@@ -249,6 +257,7 @@ def _find_wire_path(
                     and mid_dn not in protected
                     and mid_dn not in footprint_blocked
                     and mid_dn not in path_snapshot
+                    and came_from.get(pos) != mid_dn
                     and _in_bounds(mid_dn, bounds)
                     and mid_dn not in solid
                     and _is_air(workspace[mid_dn[0], mid_dn[1], mid_dn[2]])
@@ -284,12 +293,12 @@ def _find_wire_path(
             if not walkable(tower_top):
                 continue
             rep = (x + tdx, y, z + tdz)
-            if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected or rep in path_snapshot:
+            if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected or rep in path_snapshot or came_from.get(pos) == rep:
                 continue
             if not _is_air(workspace[rep[0], rep[1], rep[2]]):
                 continue
             rep_support = (x + tdx, y - 1, z + tdz)
-            if rep_support in path_snapshot or not _can_be_support(workspace, solid, rep_support, bounds):
+            if rep_support in path_snapshot or came_from.get(pos) == rep_support or not _can_be_support(workspace, solid, rep_support, bounds):
                 continue
             col_clear = True
             for cdy in range(5):
@@ -303,13 +312,6 @@ def _find_wire_path(
                 for dx, dz in _HORIZ_DIRS:
                     cp_side = (cp[0] + dx, cp[1], cp[2] + dz)
                     if _in_bounds(cp_side, bounds) and _is_redstone_wire(workspace[cp_side[0], cp_side[1], cp_side[2]]):
-                        # if cdy == 1 or cdy == 2: # inverted section
-                        #     col_clear = False
-                        #     break
-                        # side_owner = dust_owner.get(cp_side)
-                        # if side_owner is not None and side_owner != net_id:
-                        #     col_clear = False
-                        #     break
                         # If it's our own connection, we create a loop, if its others', we're interfering
                         col_clear = False
                         break
