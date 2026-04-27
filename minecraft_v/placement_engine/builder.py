@@ -13,9 +13,9 @@ from minecraft_v.placement_engine.ir import (
     ComponentType,
     NetConnection,
 )
-from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch
+from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
-    _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, WOOLS, REDSTONE, _REPEATER_MAX_DELAY
+    _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, _REPEATER_MAX_DELAY
 )
 from .layout import (
     _Placed, _expand_multibit_io, _assign_component_y_levels,
@@ -49,6 +49,7 @@ def _place_gate_templates(
         placed: list[_Placed],
         solid: set[tuple[int, int, int]],
         schematics_dir: Path,
+        dust_owner: dict[tuple[int, int, int], str],
 ) -> tuple[int, int, int]:
     """Paste component schematics into workspace. Returns (mc_version, lm_version, lm_subversion)."""
     ref_mc_version = 2975
@@ -66,7 +67,15 @@ def _place_gate_templates(
         ref_mc_version = int(ref.mc_version)
         ref_lm_version = int(ref.lm_version)
         ref_lm_sub = int(ref.lm_subversion)
-        _paste_template(workspace, template, item.origin, solid)
+        ox, oy, oz = item.origin
+        pin_positions = frozenset(
+            (ox + p.offset[0],
+             oy + p.offset[1],
+             oz + (c.footprint.depth - 1 - p.offset[2]))
+            for p in c.pins
+        )
+        _paste_template(workspace, template, item.origin, solid,
+                        dust_owner, f"__schematic__{c.id}", pin_positions)
     return (ref_mc_version, ref_lm_version, ref_lm_sub)
 
 
@@ -615,7 +624,7 @@ def build_litematic_from_component_list(
     ext_bounds = (0, 0, 0, width - 1, height - 1, workspace_depth - 1)
 
     ref_mc_version, ref_lm_version, ref_lm_sub = _place_gate_templates(
-        workspace, placed, solid, schematics_dir,
+        workspace, placed, solid, schematics_dir, dust_owner,
     )
     const_positions = _place_const_sources(workspace, placed, solid)
     max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)

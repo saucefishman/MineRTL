@@ -5,7 +5,7 @@ from pathlib import Path
 from litemapy import BlockState, Region, Schematic
 
 from minecraft_v.placement_engine.ir import CardinalDirection, Component, ComponentType, Footprint, PinRef
-from .block_utils import _is_air, _needs_support, _ensure_support
+from .block_utils import _is_air, _needs_support, _ensure_support, _is_redstone_wire, _is_torch
 from .constants import _SIDE_NORMAL, _OPPOSITE_SIDE
 
 
@@ -32,6 +32,9 @@ def _paste_template(
         template: Region,
         dest_origin: tuple[int, int, int],
         solid: set[tuple[int, int, int]],
+        dust_owner: dict[tuple[int, int, int], str] | None = None,
+        schematic_net_id: str | None = None,
+        pin_positions: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> None:
     tmin_x, tmin_y, tmin_z, _, _, _ = _non_air_bounds(template)
     dx, dy, dz = dest_origin
@@ -45,6 +48,10 @@ def _paste_template(
         workspace[wx, wy, wz] = block
         solid.add((wx, wy, wz))
         placed.append(((wx, wy, wz), block))
+        if (dust_owner is not None and schematic_net_id is not None
+                and (wx, wy, wz) not in pin_positions
+                and (_is_redstone_wire(block) or _is_torch(block))):
+            dust_owner[(wx, wy, wz)] = schematic_net_id
     for cell, block in placed:
         if _needs_support(block):
             _ensure_support(workspace, solid, cell)
