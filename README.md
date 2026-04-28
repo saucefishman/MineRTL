@@ -41,6 +41,7 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
    - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).
    - `--allow-routing-failures True`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
    - `--output-pin-targets-json <file.json>`: Path to a JSON file explicitly dictating output coordinates. Note: `synth.sh` will _automatically_ use `pin_targets.json` if it finds it in your specific project directory.
+   - `--generate-clock`: Select the pin to be the clock pin and automatically generate a redstone clock for it. (Default: `clk`)
 
    Example usage:
 
