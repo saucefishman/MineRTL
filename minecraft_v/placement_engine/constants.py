@@ -30,7 +30,7 @@ WOOLS = list(BlockState(f"minecraft:{color}_wool") for color in (
 
 _REPEATER_INTERVAL = 15  # redstone signal range; repeater placed every N dust blocks
 _ROUTE_MAX_NODES = 100_000   # hard cap on A* expansions before declaring failure
-_ROUTE_STAGNATION = 3_000    # expansions without best_h improvement → early cut
+_ROUTE_STAGNATION = 6_000    # expansions without best_h improvement → early cut
 
 _HORIZ_DIRS: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 _DELTA_TO_FACING: dict[tuple[int, int], str] = {
