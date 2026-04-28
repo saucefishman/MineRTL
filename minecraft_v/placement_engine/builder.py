@@ -215,12 +215,13 @@ def _route_output_pin_extensions(
         if output_repeater_lookup.get(pin_name) is None:
             known = ", ".join(sorted(output_repeater_lookup))
             raise ValueError(f"Unknown output pin target '{pin_name}'. Known keys: {known}")
-        if not (min_x <= tx <= max_x and min_y <= ty <= max_y):
+        etx = tx + pin_target_x_offset
+        if not (min_x <= etx <= max_x and min_y <= ty <= max_y):
             raise ValueError(
-                f"Output target for '{pin_name}' is out of bounds: ({tx}, {ty}) not in "
+                f"Output target for '{pin_name}' is out of bounds: ({etx}, {ty}) not in "
                 f"x=[{min_x},{max_x}], y=[{min_y},{max_y}]"
             )
-        ext_target_positions[pin_name] = (tx + pin_target_x_offset, ty, layer_z)
+        ext_target_positions[pin_name] = (etx, ty, layer_z)
         repeater_cells_by_pin[pin_name] = output_repeater_lookup[pin_name][0]
     if not (min_z <= layer_z <= max_z):
         raise ValueError(f"Output layer z={layer_z} outside workspace z=[{min_z},{max_z}]")
