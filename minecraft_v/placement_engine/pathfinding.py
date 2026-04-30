@@ -130,8 +130,9 @@ def _find_wire_path(
         for _dy in range(-2, 3):
             goal_exclusion.add((gx + _dx, gy + _dy, gz + _dz))
     for _dx, _dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-        for _dy in range(-1, 2):
+        for _dy in range(-2, 2):
             goal_exclusion.add((gx + _dx, gy + _dy, gz + _dz))
+    goal_exclusion.add((gx, gy - 1, gz))
     effective_protected = protected - goal_exclusion
 
     sx, sy, sz = start
@@ -148,6 +149,7 @@ def _find_wire_path(
             fp_relief.add((sx + _ddx, sy + _ddy, sz))
             fp_relief.add((sx - _ddx, sy + _ddy, sz))
     fp_relief.add((gx, gy + 2, gz))
+    fp_relief.add((gx, gy - 1, gz))
     effective_footprint_blocked = footprint_blocked - fp_relief
 
     def walkable(
