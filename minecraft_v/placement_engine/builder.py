@@ -398,9 +398,7 @@ def _route_all_nets(
                                  key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
             for dst_pin in sorted_pins:
                 tree_seeds = [
-                    pos for pos, owner in dust_owner.items()
-                    if owner == net.net_id
-                       and _is_redstone_wire(workspace[pos[0], pos[1], pos[2]])
+                    pos for _path in net_ordered_paths for pos in _path
                 ]
                 all_terminal_positions = frozenset(pin_terminal.values())
                 path = _find_wire_path(
