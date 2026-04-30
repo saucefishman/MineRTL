@@ -189,7 +189,6 @@ def _route_output_pin_extensions(
         workspace: Region,
         solid: set[tuple[int, int, int]],
         dust_owner: dict[tuple[int, int, int], str],
-        torch_cells: set[tuple[int, int, int]],
         output_pin_targets: dict[str, tuple[int, int]],
         output_repeater_lookup: dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]],
         net_id_by_output_endpoint: dict[tuple[str, str], str],
@@ -288,7 +287,7 @@ def _route_output_pin_extensions(
                            inverted_cells=inverted_cells,
                            goal=target,
                            terminal_positions=all_terminal_positions)
-        _place_repeaters_for_net(workspace, dust_owner, torch_cells, base_net_id, path[0])
+        _place_repeaters_for_net(workspace, dust_owner, base_net_id, [path])
 
 
 def _build_footprint_blocked(
@@ -378,7 +377,6 @@ def _route_all_nets(
         workspace: Region,
         solid: set[tuple[int, int, int]],
         dust_owner: dict[tuple[int, int, int], str],
-        torch_cells: set[tuple[int, int, int]],
         sorted_nets: list[NetConnection],
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         ws_bounds: tuple[int, int, int, int, int, int],
@@ -394,6 +392,7 @@ def _route_all_nets(
         try:
             src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
             protected = _compute_net_protected(net.net_id, all_terminals)
+            net_ordered_paths: list[list[tuple[int, int, int]]] = []
             dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
             sorted_pins = sorted(dst_pins,
                                  key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
@@ -421,7 +420,8 @@ def _route_all_nets(
                                    inverted_cells=inverted_cells,
                                    goal=dst_pin,
                                    terminal_positions=all_terminal_positions)
-            _place_repeaters_for_net(workspace, dust_owner, torch_cells, net.net_id, src_pin)
+                net_ordered_paths.append(path)
+            _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
         except Exception as e:
             routing_failures.append((net.net_id, e))
             print(f"\n[error] skipped net {net.net_id}: {e}")
@@ -614,7 +614,6 @@ def build_litematic_from_component_list(
     workspace = Region(0, 0, 0, width, height, workspace_depth)
     solid: set[tuple[int, int, int]] = set()
     dust_owner: dict[tuple[int, int, int], str] = {}
-    torch_cells: set[tuple[int, int, int]] = set()
     # Keep core net routing out of the reserved extension layer at z=0.
     ws_min_z = pin_targets_space if output_pin_targets else 0
     ws_bounds = (0, 0, ws_min_z, width - 1, height - 1, depth - 1)
@@ -659,7 +658,7 @@ def build_litematic_from_component_list(
 
     sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
     routing_failures, inverted_cells = _route_all_nets(
-        workspace, solid, dust_owner, torch_cells,
+        workspace, solid, dust_owner,
         sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
         footprint_blocked, all_terminals,
     )
@@ -677,7 +676,6 @@ def build_litematic_from_component_list(
                 workspace,
                 solid,
                 dust_owner,
-                torch_cells,
                 output_pin_targets,
                 output_repeater_lookup,
                 net_id_by_output_endpoint,

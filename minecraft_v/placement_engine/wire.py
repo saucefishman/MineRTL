@@ -289,90 +289,107 @@ def _lay_redstone_path(
 def _place_repeaters_for_net(
         workspace: Region,
         dust_owner: dict[tuple[int, int, int], str],
-        torch_cells: set[tuple[int, int, int]],
         net_id: str,
-        source: tuple[int, int, int],
+        ordered_paths: list[list[tuple[int, int, int]]],
 ) -> None:
-    """DFS from source through this net's wire tree, placing repeaters as needed.
+    """Walk each routed A* path linearly, placing repeaters as needed.
 
-    Carries (path_from_source, reset_index) per branch so fan-out points correctly
-    inherit their signal distance rather than assuming full strength.
-
-    Torches and existing repeaters are treated as full-power resets (signal = 15).
-    Tower blocks (stone cells in dust_owner) are traversed via pure-vertical neighbors.
+    Uses the ordered paths directly so wrap-around detours are measured at
+    their true signal length, not the shorter adjacency-graph shortcut.
+    Torches and existing repeaters reset the signal counter.
+    Shared prefixes are re-walked per path; repeaters placed on path N are
+    detected via _is_repeater on path N+1, resetting the counter correctly.
     """
-
-    def wire_neighbors(pos: tuple[int, int, int]) -> list[tuple[int, int, int]]:
-        x, y, z = pos
-        result = []
-        for dx, dz in _HORIZ_DIRS:
-            for dy in (0, 1, -1):
-                nb = (x + dx, y + dy, z + dz)
-                if dust_owner.get(nb) == net_id:
-                    result.append(nb)
-        for dy in (1, -1, 2, -2):
-            nb = (x, y + dy, z)
-            if dust_owner.get(nb) == net_id:
-                result.append(nb)
-        return result
+    # Cells with >1 distinct successor across all paths are branch points;
+    # a repeater there can only drive one direction so it is never viable.
+    successors: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+    for path in ordered_paths:
+        for i in range(len(path) - 1):
+            cell = path[i]
+            if cell not in successors:
+                successors[cell] = set()
+            successors[cell].add(path[i + 1])
+    branch_points: set[tuple[int, int, int]] = {
+        cell for cell, succs in successors.items() if len(succs) > 1
+    }
 
     def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
-        if j <= 0:
+        if j <= 0 or j >= len(path) - 1:
             return False
         x, y, z = path[j]
         px, py, pz = path[j - 1]
+        nx, ny, nz = path[j + 1]
         if y != py:
-            return False  # slope or tower — not a viable repeater position
+            return False  # on slope or tower segment
         dx, dz = x - px, z - pz
         if (dx, dz) not in _DELTA_TO_FACING:
             return False
-        # Check ALL forward wire neighbors (not just current DFS branch's next cell).
-        # A repeater has one output direction — branch points are not viable.
-        fwd = [nb for nb in wire_neighbors((x, y, z)) if nb != (px, py, pz)]
-        if len(fwd) > 1:
-            return False  # branch point
-        if len(fwd) == 1:
-            nx, ny, nz = fwd[0]
-            if ny != y:
-                return False  # slope or tower after repeater
-            if (nx - x, nz - z) != (dx, dz):
-                return False  # turn after repeater
+        if ny != y:
+            return False  # next cell is slope or tower
+        if (nx - x, nz - z) != (dx, dz):
+            return False  # turn after repeater
+        if path[j] in branch_points:
+            return False  # branch point — repeater drives only one output
         return True
 
-    visited: set[tuple[int, int, int]] = {source}
-    stack: list[tuple[tuple[int, int, int], list[tuple[int, int, int]], int]] = [
-        (source, [source], 0)
-    ]
-    while stack:
-        pos, path, reset_idx = stack.pop()
-        px_, py_, pz_ = pos
-        cell_block = workspace[px_, py_, pz_]
-        if pos in torch_cells or _is_repeater(cell_block) or _is_torch(cell_block):
-            reset_idx = len(path) - 1
-        depth = len(path) - 1
-        dist = depth - reset_idx
-        new_reset = reset_idx
-        if dist >= _REPEATER_INTERVAL:
-            cap = min(depth - 1, reset_idx + _REPEATER_INTERVAL)
-            for j in range(cap, reset_idx, -1):
-                if is_viable(path, j):
-                    rx, ry, rz = path[j]
-                    rpx, _, rpz = path[j - 1]
-                    facing = _OPPOSITE_SIDE[_DELTA_TO_FACING[(rx - rpx, rz - rpz)]]
-                    if not _is_repeater(workspace[rx, ry, rz]):
-                        dust_owner.pop((rx, ry, rz), None)
-                        workspace[rx, ry, rz] = BlockState(
-                            "minecraft:repeater", facing=facing, delay="1"
-                        )
-                    new_reset = j
-                    break
-            else:
-                raise ValueError(
-                    f"Net {net_id!r}: cannot place repeater to extend signal at path depth {depth} "
-                    f"(signal dist {dist} >= {_REPEATER_INTERVAL}, no viable position in "
-                    f"{path[reset_idx+1:cap+1]})"
+    # upstream_seg[pos] = path segment [last_reset_cell, ..., pos] from the most recent
+    # reset point to pos. Prepended to tree-seed paths so the backward cap search can
+    # reach viable repeater positions in the already-laid upstream wire.
+    upstream_seg: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
+
+    for orig_path in ordered_paths:
+        path: list[tuple[int, int, int]] = list(orig_path)
+        start = path[0]
+        # Prepend upstream segment so the cap search can look back into prior wire.
+        if start in upstream_seg and len(upstream_seg[start]) > 1:
+            path = upstream_seg[start][:-1] + path  # upstream[:-1] avoids duplicating start
+        reset_depth = 0 # path will always start at reset location
+        reset_idx = 0
+        depth = 0
+        depths = []
+        for pos_idx, pos in enumerate(path):
+            px_, py_, pz_ = pos
+            cell_block = workspace[px_, py_, pz_]
+            if pos_idx > 0:
+                prev = path[pos_idx - 1]
+                depth += abs(pos[0] - prev[0]) + abs(pos[2] - prev[2]) # dy does not decrease power
+                dy = pos[1] - prev[1]
+                dxz = (pos[0] - prev[0], pos[2] - prev[2])
+                # Tower top: repeater in column outputs full signal.
+                # Powered-minus-4 dest: second wall torch outputs full signal.
+                is_special_reset = (
+                    (dy == 4 and dxz in _TOWER_2BLOCK)
+                    or (dy == -4 and dxz == (0, 0))
                 )
-        for nb in wire_neighbors(pos):
-            if nb not in visited:
-                visited.add(nb)
-                stack.append((nb, path + [nb], new_reset))
+                if is_special_reset or _is_repeater(cell_block) or _is_torch(cell_block):
+                    reset_depth = depth - 1
+                    reset_idx = pos_idx
+
+            depths.append(depth)
+            dist = depth - reset_depth
+            upstream_seg[pos] = path[reset_idx:pos_idx + 1]
+            if dist >= _REPEATER_INTERVAL:
+                # Scan backward in signal-depth units, not path-index units.
+                # cap = highest j where the repeater can actually receive signal.
+                cap = pos_idx - 1
+                while cap > reset_idx and depths[cap] - reset_depth >= _REPEATER_INTERVAL:
+                    cap -= 1
+                for j in range(cap, reset_idx, -1):
+                    if is_viable(path, j):
+                        rx, ry, rz = path[j]
+                        rpx, _, rpz = path[j - 1]
+                        facing = _OPPOSITE_SIDE[_DELTA_TO_FACING[(rx - rpx, rz - rpz)]]
+                        if not _is_repeater(workspace[rx, ry, rz]):
+                            dust_owner.pop((rx, ry, rz), None)
+                            workspace[rx, ry, rz] = BlockState(
+                                "minecraft:repeater", facing=facing, delay="1"
+                            )
+                        reset_depth = depths[j]
+                        reset_idx = j
+                        break
+                else:
+                    raise ValueError(
+                        f"Net {net_id!r}: cannot place repeater to extend signal at path depth {pos_idx} "
+                        f"(signal dist {dist} >= {_REPEATER_INTERVAL}, no viable position in "
+                        f"{path[reset_idx+1:cap+1]})"
+                    )
