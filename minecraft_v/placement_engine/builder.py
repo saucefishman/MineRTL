@@ -356,7 +356,7 @@ def _compute_net_protected(
                 for dy in range(-2, 3):
                     cells.add((tx + dx, ty + dy, tz + dz))
             for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-                for dy in range(-1, 2):
+                for dy in range(-2, 2):
                     cells.add((tx + dx, ty, tz + dz))
     return frozenset(cells)
 
