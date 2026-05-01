@@ -232,9 +232,8 @@ def _route_output_pin_extensions(
         rx, ry, rz = rep
         zone: set[tuple[int, int, int]] = {rep, (rx, ry + 1, rz)}
         for dx, dz in _HORIZ_DIRS:
-            for m in range(1, 3):
-                for dy in range(-2, 3):
-                    zone.add((rx + dx * m, ry + dy, rz + dz * m))
+            for dy in range(-2, 3):
+                zone.add((rx + dx * 1, ry + dy, rz + dz * 1))
         for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
             zone.add((rx + dx, ry, rz + dz))
         return frozenset(zone)
