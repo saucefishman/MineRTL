@@ -23,7 +23,7 @@ def _place_support(
     if below in solid:
         return True
     elif not _is_air(workspace[x, y - 1, z]):
-        return False
+        raise ValueError(f"Unable to place support at {(x, y - 1, z)} - block {workspace[x, y - 1, z]} is in the way.")
     is_stair = (
         y >= 2
         and _is_redstone_wire(workspace[x, y - 2, z])
