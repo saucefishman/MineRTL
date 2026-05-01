@@ -1,3 +1,19 @@
+module \$_SDFF_PP0_ (C, R, D, Q);
+  input C, R, D;
+  output Q;
+  wire D_mux;
+  \$_MUX_ mux (.A(D), .B(1'b0), .S(R), .Y(D_mux));
+  \$_DFF_P_ ff (.C(C), .D(D_mux), .Q(Q));
+endmodule
+
+module \$_SDFF_PP1_ (C, R, D, Q);
+  input C, R, D;
+  output Q;
+  wire D_mux;
+  \$_MUX_ mux (.A(D), .B(1'b1), .S(R), .Y(D_mux));
+  \$_DFF_P_ ff (.C(C), .D(D_mux), .Q(Q));
+endmodule
+
 module \$sdff (CLK, SRST, D, Q);
   parameter WIDTH = 1;
   parameter CLK_POLARITY = 1;

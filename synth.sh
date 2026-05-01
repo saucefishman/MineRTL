@@ -31,13 +31,15 @@ read_verilog -sv ${dir}/*.v
 hierarchy -top main
 proc
 memory_map
+dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 \$_DLATCH_P_ 0
+techmap -map techmap/dlatch_map.v
 opt
 techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
-dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0
 techmap -map techmap/fa_map.v
 techmap
+dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 \$_DLATCH_P_ 0
 opt
-dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0
+techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
 opt_clean
 write_json build/artifacts/netlist.json
 stat
