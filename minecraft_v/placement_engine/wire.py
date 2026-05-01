@@ -319,12 +319,10 @@ def _place_repeaters_for_net(
         x, y, z = path[j]
         px, py, pz = path[j - 1]
         nx, ny, nz = path[j + 1]
-        if y != py:
-            return False  # on slope or tower segment
         dx, dz = x - px, z - pz
         if (dx, dz) not in _DELTA_TO_FACING:
             return False
-        if ny != y:
+        if (ny != y or y != py) and (not (y == py - 1 and ny == y)):
             return False  # next cell is slope or tower
         if (nx - x, nz - z) != (dx, dz):
             return False  # turn after repeater
