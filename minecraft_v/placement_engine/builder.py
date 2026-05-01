@@ -281,6 +281,7 @@ def _route_output_pin_extensions(
             footprint_blocked=footprint_blocked,
             inverted_cells=inv_snap,
             terminal_positions=all_terminal_positions,
+            limit_exclusions=True
         )
         _lay_redstone_path(workspace, solid, dust_owner, path, base_net_id,
                            inverted_cells=inverted_cells,

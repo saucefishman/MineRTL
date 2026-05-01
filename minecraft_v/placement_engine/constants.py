@@ -34,6 +34,7 @@ _ROUTE_STAGNATION = 6_000    # consecutive re-expansions of same (pos,snap) → 
 _ROUTE_BUDGET_FACTOR = 5     # f-score cap: max_f = initial_h * factor; prunes runaway detours
 
 _HORIZ_DIRS: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_HORIZ_DIRS_8 = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
 _DELTA_TO_FACING: dict[tuple[int, int], str] = {
     (1, 0): CardinalDirection.EAST.value,
     (-1, 0): CardinalDirection.WEST.value,
