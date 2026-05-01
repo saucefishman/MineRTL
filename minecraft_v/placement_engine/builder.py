@@ -5,7 +5,7 @@ from pathlib import Path
 
 from litemapy import BlockState, Region, Schematic
 
-from minecraft_v.build_utils import save_artifact
+from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from minecraft_v.placement_engine.ir import (
     Component,
@@ -385,6 +385,7 @@ def _route_all_nets(
         max_bridge_y: int,
         footprint_blocked: frozenset[tuple[int, int, int]],
         all_terminals: dict[str, set[tuple[int, int, int]]],
+        snapshot_dir: Path | None = None,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
@@ -425,6 +426,9 @@ def _route_all_nets(
         except Exception as e:
             routing_failures.append((net.net_id, e))
             print(f"\n[error] skipped net {net.net_id}: {e}")
+        if snapshot_dir is not None and net_idx % 10 == 0:
+            safe_id = net.net_id.replace("/", "_").replace("\\", "_")
+            save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", workspace, snapshot_dir)
     print(f"\r[wire] done ({total_nets} nets, {len(routing_failures)} failed)        ")
     return routing_failures, inverted_cells
 
@@ -656,11 +660,16 @@ def build_litematic_from_component_list(
         for p in placed
     ])
 
+    snapshot_dir = DEFAULT_SNAPSHOT_DIR
+    if snapshot_dir.exists():
+        for f in snapshot_dir.iterdir():
+            f.unlink()
     sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
     routing_failures, inverted_cells = _route_all_nets(
         workspace, solid, dust_owner,
         sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
         footprint_blocked, all_terminals,
+        snapshot_dir=snapshot_dir,
     )
 
     if routing_failures:
@@ -691,6 +700,8 @@ def build_litematic_from_component_list(
                 print(f"IGNORING - Pin target routing failed: {e}")
             else:
                 raise RuntimeError(f"Pin target routing failed: {e}")
+        else:
+            save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
 
     critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace)
 

@@ -2,9 +2,19 @@ import json
 from pathlib import Path
 from typing import Any
 
+from litemapy import Region
 from minecraft_v.placement_engine.ir import ComponentList
 
 DEFAULT_ARTIFACTS_DIR = Path("build/artifacts")
+DEFAULT_SNAPSHOT_DIR = DEFAULT_ARTIFACTS_DIR / "snapshots"
+
+
+def save_schematic_artifact(filename: str, region: Region, snapshot_dir: Path = DEFAULT_SNAPSHOT_DIR) -> Path:
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    out = snapshot_dir / filename
+    schematic = region.as_schematic(name=filename, author="MineRTL")
+    schematic.save(str(out))
+    return out
 
 
 def save_artifact(filename: str, data: Any, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Path:
