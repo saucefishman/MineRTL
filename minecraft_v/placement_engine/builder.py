@@ -355,6 +355,9 @@ def _compute_net_protected(
             for dx, dz in _HORIZ_DIRS:
                 for dy in range(-2, 3):
                     cells.add((tx + dx, ty + dy, tz + dz))
+            for dz in range(3):
+                for dy in range(-1, 1):
+                    cells.add((tx, ty + dy, tz + dz))
             for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
                 for dy in range(-2, 2):
                     cells.add((tx + dx, ty, tz + dz))
