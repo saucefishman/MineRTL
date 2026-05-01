@@ -123,7 +123,7 @@ def main():
     parser.add_argument("--schematic-name", type=str, default=None)
     parser.add_argument("--allow-routing-failures", type=bool, default=False)
     parser.add_argument("--output-pin-targets-json", type=str, default=None)
-    parser.add_argument("--generate-clock", type=str, default='clk')
+    parser.add_argument("--generate-clock", type=str, default=None)
     args = parser.parse_args()
     print(args)
 
@@ -155,7 +155,7 @@ def main():
         else None
     )
     generate_clock_pin = args.generate_clock
-    if generate_clock_pin not in (c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN):
+    if generate_clock_pin is not None and generate_clock_pin not in (c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN):
         raise SystemExit(f"Input pin '{generate_clock_pin}' for clock generation does not exist. Available pins: "
                          f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")
 
