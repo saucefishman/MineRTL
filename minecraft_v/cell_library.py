@@ -110,7 +110,7 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
             PinRef(name="S", direction=Direction.IN, side=CardinalDirection.WEST, offset=(0, 0, 3)),
             PinRef(name="Y", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(3, 0, 5)),
         ],
-        propagation_delay_ticks=3
+        propagation_delay_ticks=4
     ),
 }
 
