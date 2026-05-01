@@ -120,11 +120,13 @@ def build_svg(layout: list[dict]) -> ET.Element:
 
             _svg_rect(svg, sx, sz, sw, sh, fill=color)
 
-            _svg_text(svg, sx + sw / 2, sz + sh / 2 - LABEL_FONT,
+            _svg_text(svg, sx + sw / 2, sz + sh / 2 - LABEL_FONT * 1.5,
                       comp_type.value, font_size=LABEL_FONT, fill="#111")
             short_id = cid if len(cid) <= 14 else cid[-14:]
-            _svg_text(svg, sx + sw / 2, sz + sh / 2 + LABEL_FONT,
+            _svg_text(svg, sx + sw / 2, sz + sh / 2,
                       short_id, font_size=max(5, LABEL_FONT - 1), fill="#333")
+            _svg_text(svg, sx + sw / 2, sz + sh / 2 + LABEL_FONT * 1.5,
+                      f"({ox},{y},{oz})", font_size=max(4, LABEL_FONT - 2), fill="#555")
 
             for pin in entry["pins"]:
                 px, _, pz = pin["offset"]
