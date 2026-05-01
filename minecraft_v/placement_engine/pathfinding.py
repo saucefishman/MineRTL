@@ -5,7 +5,7 @@ import heapq
 from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
-from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _DELTA_TO_FACING
+from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING
 
 
 def _in_bounds(pos: tuple[int, int, int], bounds: tuple[int, int, int, int, int, int]) -> bool:
@@ -502,7 +502,20 @@ def _find_wire_path(
         return result, additional_blocked
 
     def heuristic(pos: tuple[int, int, int]) -> int:
-        return abs(pos[0] - goal[0]) + abs(pos[2] - goal[2]) + abs(pos[1] - goal[1]) * 4
+        dx = abs(pos[0] - goal[0])
+        dz = abs(pos[2] - goal[2])
+        dxz = dx + dz
+        dy_raw = pos[1] - goal[1]
+        if dy_raw < 0:  # pos below goal: going up
+            dy = -dy_raw
+            # tower: 2/Y cost + 0.5 XZ/Y bonus → overhead 1.5/Y above XZ; lower bound: max(2*dy, dxz+1.5*dy)
+            return max(2 * dy, dxz + (3 * dy) // 2)
+        elif dy_raw > 0:  # pos above goal: going down
+            dy = dy_raw
+            # slope-down: 1 extra/Y; powered-minus4: 2/Y, no XZ bonus → lower bound: max(dxz+dy, 2*dy)
+            return max(dxz + dy, 2 * dy)
+        else:
+            return dxz
 
     # Seed cells: prefer start itself; fall back to neighbors when blocked
     seeds: list[tuple[int, int, int]] = []
@@ -566,11 +579,18 @@ def _find_wire_path(
     reached: tuple[int, int, int] | None = None
     best_node: tuple[int, int, int] = seeds[0]
     best_h: int = min(heuristic(s) for s in seeds)
+    max_f: int = max(best_h, 10) * _ROUTE_BUDGET_FACTOR
     explored: set[tuple[int, int, int]] = set()
+    explored_xyz: set[tuple[int, int, int]] = set()
     stagnation = 0
     early_stop_reason: str | None = None
     while open_heap:
-        _, g, _, current_node, parent = heapq.heappop(open_heap)
+        f, g, _, current_node, parent = heapq.heappop(open_heap)
+        # f-cap: prune nodes whose total estimated cost exceeds budget.
+        # Catches runaway detours around impossible obstacles without burning _ROUTE_MAX_NODES.
+        if f > max_f:
+            early_stop_reason = f"f-cap exceeded (f={f} > max_f={max_f})"
+            break
         # path_snapshot stored in heap is already the local snap (≤12 cells);
         # no need to re-intersect here.
         if g > g_score.get(current_node, 10 ** 9):
@@ -584,9 +604,8 @@ def _find_wire_path(
         if h < best_h:
             best_h = h
             best_node = current_node
-        # Stagnation = consecutive re-expansions of already-explored positions.
+        # Stagnation = consecutive re-expansions of already-explored (pos,snap) pairs.
         # New territory always resets it; detours away from goal don't penalize.
-        # Node cap handles searches that explore forever without reaching goal.
         if current_node in explored:
             stagnation += 1
             if stagnation >= _ROUTE_STAGNATION:
@@ -595,9 +614,11 @@ def _find_wire_path(
         else:
             stagnation = 0
             explored.add(current_node)
-        if len(explored) >= _ROUTE_MAX_NODES:
-            early_stop_reason = f"node cap ({_ROUTE_MAX_NODES})"
-            break
+            explored_xyz.add(current_node[0])
+            # Unique-XYZ cap: more meaningful than (pos,snap) pair count.
+            if len(explored_xyz) >= _ROUTE_MAX_NODES:
+                early_stop_reason = f"node cap ({_ROUTE_MAX_NODES} unique positions)"
+                break
         if current_node[0] in goal_set:
             reached = current_node
             break
@@ -624,9 +645,9 @@ def _find_wire_path(
             cx, cy, cz = cur[0]
             workspace[cx, cy, cz] = lamp
             cur = came_from.get(cur)
-        for prot in sorted(effective_footprint_blocked | effective_protected, key=heuristic)[:100]:
-            if _is_air(workspace[*prot]):
-                workspace[*prot] = GLASS
+        # for prot in sorted(effective_footprint_blocked | effective_protected, key=heuristic)[:100]:
+        #     if _is_air(workspace[*prot]):
+        #         workspace[*prot] = GLASS
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
         raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason})")
     if walkable(goal) and reached[0] != goal:
