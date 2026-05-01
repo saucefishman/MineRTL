@@ -38,8 +38,10 @@ techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
 techmap -map techmap/fa_map.v
 techmap
 dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 \$_DLATCH_P_ 0
+techmap -map techmap/dffe_pn_decompose.v
 opt
 techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
+techmap -map techmap/dffe_pn_decompose.v
 opt_clean
 write_json build/artifacts/netlist.json
 stat
