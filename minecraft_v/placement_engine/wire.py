@@ -260,6 +260,7 @@ def _lay_redstone_path(
         ax, ay, az = cells[i]
         bx, by, bz = cells[i + 1]
         delta = (bx - ax, bz - az)
+        dy = by - ay
         if by == ay + 4 and delta in _TOWER_2BLOCK:
             tower_bottom.add(i)
             tower_top.add(i + 1)
@@ -268,15 +269,22 @@ def _lay_redstone_path(
         elif by == ay - 4 and bx == ax and bz == az:
             p4_bottom.add(i)
             p4_top.add(i + 1)
+        else:
+            if not (
+                    (delta in _HORIZ_DIRS and dy in (-1, 0, 1))
+                or (i in tower_top and delta == (0, 0) and dy == 1)
+            ):
+                raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]}")
 
     for i, cell in enumerate(cells):
+        if i in slope2_bottom:
+            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
+            continue
+
         if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):
             continue  # already placed by their respective move handler
 
-        if i in slope2_bottom:
-            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
-
-        elif i in tower_bottom:
+        if i in tower_bottom:
             _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
 
         elif i in p4_bottom:

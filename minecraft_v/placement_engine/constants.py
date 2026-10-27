@@ -32,6 +32,8 @@ _REPEATER_INTERVAL = 15  # redstone signal range; repeater placed every N dust b
 _ROUTE_MAX_NODES = 100_000   # hard cap on unique XYZ positions expanded before declaring failure
 _ROUTE_STAGNATION = 6_000    # consecutive re-expansions of same (pos,snap) → early cut
 _ROUTE_BUDGET_FACTOR = 5     # f-score cap: max_f = initial_h * factor; prunes runaway detours
+_H_RADIUS_FACTOR = 2        # h-radius cull: discard nodes where h > best_h * factor
+_HORIZ_RADIUS_MIN, _Y_RADIUS_MIN = 10, 6
 
 _HORIZ_DIRS: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 _HORIZ_DIRS_8 = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
