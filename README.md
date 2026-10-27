@@ -36,6 +36,7 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
 3. **Synthesis Flags & Configuration:**
    The `synth.sh` script automatically wraps our Python-based layout engine (`main.py`) alongside Yosys. It supports several flags that you can pass directly:
    - `--out-litematic <path>`: Specifies custom output path for the `.litematic` file (Default: `build/result.litematic`).
+   - `--out-litematic-dir <dir>`: Writes the `.litematic` to `<dir>/<project-dir name>.litematic` (e.g. `examples/counter` → `<dir>/counter.litematic`). Handled by `synth.sh`.
    - `--module <name>`: Sets the top-level Verilog module to synthesize (Default: `main`).
    - `--schematics-dir <dir>`: Sets the directory containing our `.litematic` cell library objects (Default: `schematics`).
    - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).

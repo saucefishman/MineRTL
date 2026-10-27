@@ -11,6 +11,31 @@ fi
 dir="$1"
 shift
 
+# --out-litematic-dir <d> → --out-litematic <d>/<project-dir basename>.litematic
+args=()
+out_litematic_dir=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out-litematic-dir)
+            out_litematic_dir="$2"
+            shift 2
+            ;;
+        --out-litematic-dir=*)
+            out_litematic_dir="${1#*=}"
+            shift
+            ;;
+        *)
+            args+=("$1")
+            shift
+            ;;
+    esac
+done
+if [[ -n "$out_litematic_dir" ]]; then
+    project_name="$(basename "${dir%/}")"
+    args+=(--out-litematic "${out_litematic_dir%/}/${project_name}.litematic")
+fi
+set -- ${args[@]+"${args[@]}"}
+
 has_output_pin_targets_flag=false
 for arg in "$@"; do
     case "$arg" in
@@ -31,15 +56,15 @@ read_verilog -sv ${dir}/*.v
 hierarchy -top main
 proc
 memory_map
-dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 \$_DLATCH_P_ 0
+dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 -cell \$_DLATCH_P_ 0
 techmap -map techmap/dlatch_map.v
 opt
 techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
 techmap -map techmap/fa_map.v
 techmap
-dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 \$_DLATCH_P_ 0
+dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 -cell \$_DLATCH_P_ 0
 techmap -map techmap/dffe_pn_decompose.v
-opt
+opt -nosdff
 techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
 techmap -map techmap/dffe_pn_decompose.v
 opt_clean
