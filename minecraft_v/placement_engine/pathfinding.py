@@ -6,7 +6,8 @@ from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
-    _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8
+    _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
+    _Y_RADIUS_MIN
 
 
 def _in_bounds(pos: tuple[int, int, int], bounds: tuple[int, int, int, int, int, int]) -> bool:
@@ -113,7 +114,8 @@ def _find_wire_path(
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
         terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
         weight: float = 1.5,
-        limit_exclusions=False
+        limit_exclusions=False,
+        x_h_factor=1,
 ) -> list[tuple[int, int, int]]:
     min_y = bounds[1]
     # came_from is write-only during search (set at expansion, not push) and used
@@ -506,7 +508,7 @@ def _find_wire_path(
         return result, additional_blocked
 
     def heuristic(pos: tuple[int, int, int]) -> int:
-        dx = abs(pos[0] - goal[0])
+        dx = abs(pos[0] - goal[0]) * x_h_factor
         dz = abs(pos[2] - goal[2])
         dy = abs(pos[1] - goal[1])
         return dx + dy * 4 + dz
@@ -578,6 +580,7 @@ def _find_wire_path(
     explored: set[tuple[int, int, int]] = set()
     explored_xyz: set[tuple[int, int, int]] = set()
     stagnation = 0
+    h_radius_pruned = 0
     early_stop_reason: str | None = None
     while open_heap:
         f, _, g, _, current_node, parent = heapq.heappop(open_heap)
@@ -638,11 +641,14 @@ def _find_wire_path(
             if new_g < g_score.get(nkey, 10 ** 9):
                 g_score[nkey] = new_g
                 h = heuristic(neighbor)
-                heapq.heappush(
-                    open_heap,
-                    (new_g + weight * h, -h, new_g, counter, nkey, current_node),
-                )
-                counter += 1
+                if h <= best_h * _H_RADIUS_FACTOR or ((abs(goal[0] - neighbor[0]) + abs(goal[2] - neighbor[2])) < _HORIZ_RADIUS_MIN and abs(goal[1] - neighbor[1]) < _Y_RADIUS_MIN):
+                    heapq.heappush(
+                        open_heap,
+                        (new_g + weight * h, -h, new_g, counter, nkey, current_node),
+                    )
+                    counter += 1
+                else:
+                    h_radius_pruned += 1
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -655,7 +661,7 @@ def _find_wire_path(
         #     if _is_air(workspace[*prot]):
         #         workspace[*prot] = GLASS
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
-        raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason})")
+        raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason}; h_radius_pruned={h_radius_pruned})")
     if walkable(goal) and reached[0] != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {reached}")
 
