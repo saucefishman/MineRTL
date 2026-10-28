@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import heapq
+import time
+from typing import Callable
 
+import numpy as np
 from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
     _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN
+
+
+class RouteTimeout(ValueError):
+    """A* gave up because its time_limit expired (as opposed to exhausting the search)."""
 
 
 def _in_bounds(pos: tuple[int, int, int], bounds: tuple[int, int, int, int, int, int]) -> bool:
@@ -29,8 +36,57 @@ def _can_be_support(
     return _is_air(workspace[pos[0], pos[1], pos[2]])
 
 
+class _BlockIndex:
+    """Sparse sets of signal-relevant cells, built from the Region's raw block array.
+
+    litemapy's Region.__getitem__ is slow (coordinate conversion + palette lookup per
+    read); _wire_walkable does ~40 reads per call. Valid only while the workspace is
+    unchanged, i.e. for the duration of one A* search.
+    """
+    __slots__ = ("non_air", "wire", "torch", "repeater")
+
+    def __init__(self, region: Region):
+        # Positive-size regions store blocks at region coordinates directly.
+        assert region.width > 0 and region.height > 0 and region.length > 0
+        blocks = region._Region__blocks
+        kinds = np.array([
+            (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
+            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
+            for b in region._Region__palette
+        ], dtype=np.uint8)
+        k = kinds[blocks]
+
+        def cells(mask: int) -> set[tuple[int, int, int]]:
+            return set(map(tuple, np.argwhere(k & mask).tolist()))
+
+        self.non_air = cells(1)
+        self.wire = cells(2)
+        self.torch = cells(4)
+        self.repeater = cells(8)
+
+    @classmethod
+    def layered(cls, base: _BlockIndex, overlay: dict[tuple[int, int, int], BlockState]) -> _BlockIndex:
+        """base (static world) plus a net's overlay blocks. Overlay only ever fills air in base."""
+        idx = cls.__new__(cls)
+        idx.non_air = set(base.non_air)
+        idx.wire = set(base.wire)
+        idx.torch = set(base.torch)
+        idx.repeater = set(base.repeater)
+        for pos, b in overlay.items():
+            if _is_air(b):
+                continue
+            idx.non_air.add(pos)
+            if _is_redstone_wire(b):
+                idx.wire.add(pos)
+            elif _is_torch(b):
+                idx.torch.add(pos)
+            elif _is_repeater(b):
+                idx.repeater.add(pos)
+        return idx
+
+
 def _wire_walkable(
-        workspace: Region,
+        blocks: _BlockIndex | Region,
         solid: set[tuple[int, int, int]],
         dust_owner: dict[tuple[int, int, int], str],
         pos: tuple[int, int, int],
@@ -40,14 +96,19 @@ def _wire_walkable(
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
         footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> bool:
+    """Pass a _BlockIndex when calling repeatedly against an unchanged workspace."""
+    if not isinstance(blocks, _BlockIndex):
+        blocks = _BlockIndex(blocks)
+    wire, torch, repeater = blocks.wire, blocks.torch, blocks.repeater
     x, y, z = pos
-    if not _in_bounds(pos, bounds):
+    # Bounds checks inlined: this runs millions of times per routing run.
+    min_x, min_y, min_z, max_x, max_y, max_z = bounds
+    if not (min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z):
         return False
     if pos in solid:
         return False
-    block = workspace[x, y, z]
-    if not _is_air(block):
-        if _is_redstone_wire(block):
+    if pos in blocks.non_air:
+        if pos in wire:
             owner = dust_owner.get(pos)
             if owner is not None and owner != net_id:
                 return False
@@ -57,17 +118,17 @@ def _wire_walkable(
     # at horizontal cardinal neighbors at same Y or +-1 Y.
     for dx, dz in _HORIZ_DIRS:
         for dy in (-1, 0, 1):
-            np = (x + dx, y + dy, z + dz)
+            ny = y + dy
+            np = (x + dx, ny, z + dz)
             if np in exempt_foreign:
                 continue
-            if not _in_bounds(np, bounds):
+            if not (min_x <= x + dx <= max_x and min_y <= ny <= max_y and min_z <= z + dz <= max_z):
                 continue
             owner = dust_owner.get(np)
             if owner is not None and owner != net_id:
                 return False
             if owner is None and np not in footprint_blocked:
-                block_np = workspace[np[0], np[1], np[2]]
-                if _is_torch(block_np) or _is_redstone_wire(block_np):
+                if np in torch or np in wire:
                     return False
     # Vertical same-XZ: powered blocks distribute signal on all 6 faces including
     # top and bottom, so wire directly above or below a foreign-owned block is unsafe.
@@ -75,16 +136,14 @@ def _wire_walkable(
         vp = (x, y + vdy, z)
         if vp in exempt_foreign:
             continue
-        if not _in_bounds(vp, bounds):
+        if not min_y <= y + vdy <= max_y:
             continue
-        if not (any(
-                _in_bounds((vp[0] + dx, vp[1], vp[2] + dz), bounds)
-                and _is_repeater(workspace[vp[0] + dx, vp[1], vp[2] + dz])
-                for dx, dz in _HORIZ_DIRS
-        ) or (
-            _in_bounds((vp[0], vp[1] - 1, vp[2]), bounds)
-            and _is_torch(workspace[vp[0], vp[1] - 1, vp[2]])
-        )):
+        # No per-neighbour bounds guard: the index only holds cells inside the Region, and
+        # routing bounds only exclude Region cells that are empty while core nets route.
+        vx, vy, vz = vp
+        if not ((vx + 1, vy, vz) in repeater or (vx - 1, vy, vz) in repeater
+                or (vx, vy, vz + 1) in repeater or (vx, vy, vz - 1) in repeater
+                or (vx, vy - 1, vz) in torch):
             continue
         owner = dust_owner.get(vp)
         if owner is not None and owner != net_id:
@@ -116,7 +175,16 @@ def _find_wire_path(
         weight: float = 1.5,
         limit_exclusions=False,
         x_h_factor=1,
+        congestion_cost: Callable[[tuple[int, int, int]], float] | None = None,
+        time_limit: float | None = None,
 ) -> list[tuple[int, int, int]]:
+    """A* wire route from start to goal.
+
+    congestion_cost: extra cost per path cell (negotiated-congestion routing: other nets'
+    usage + history). Excluded from the f-cap budget.
+    time_limit: wall-clock seconds for the search; on expiry it fails like any other early stop.
+    workspace may be a view exposing block_index() (see negotiate.OverlayWorkspace).
+    """
     min_y = bounds[1]
     # came_from is write-only during search (set at expansion, not push) and used
     # only for final path reconstruction. All history-dependent move checks use
@@ -158,30 +226,57 @@ def _find_wire_path(
         fp_relief.add((gx, gy - 1, gz))
     effective_footprint_blocked = footprint_blocked - fp_relief
 
+    # Workspace is static during a search, so per-cell walkability is cached. A* asks
+    # about the same cell many times (multiple local snapshots, multiple move types).
+    walk_cache: dict[tuple[tuple[int, int, int], frozenset[tuple[int, int, int]]], bool] = {}
+    _no_exempt: frozenset[tuple[int, int, int]] = frozenset()
+    block_index = workspace.block_index() if hasattr(workspace, "block_index") else _BlockIndex(workspace)
+    ix_non_air, ix_wire, ix_torch, ix_repeater = (
+        block_index.non_air, block_index.wire, block_index.torch, block_index.repeater)
+
+    def can_support(pos: tuple[int, int, int]) -> bool:
+        # Same as _can_be_support, via the index.
+        return _in_bounds(pos, bounds) and (pos in solid or pos not in ix_non_air)
+
     def walkable(
             pos: tuple[int, int, int],
-            exempt: frozenset[tuple[int, int, int]] = frozenset(),
+            exempt: frozenset[tuple[int, int, int]] = _no_exempt,
     ) -> bool:
-        return (
-            pos not in effective_protected
-            and pos not in effective_footprint_blocked
-            and _wire_walkable(workspace, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt, inverted_cells=inverted_cells, footprint_blocked=effective_footprint_blocked)
-        )
+        if pos in effective_protected or pos in effective_footprint_blocked:
+            return False
+        key = (pos, exempt)
+        if key not in walk_cache:
+            walk_cache[key] = _wire_walkable(
+                block_index, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt,
+                inverted_cells=inverted_cells, footprint_blocked=effective_footprint_blocked,
+            )
+        return walk_cache[key]
+
+    mid_cache: dict[tuple[tuple[int, int, int], frozenset[tuple[int, int, int]]], bool] = {}
+
+    def mid_walkable(pos: tuple[int, int, int], exempt: frozenset[tuple[int, int, int]]) -> bool:
+        # 2x-slope intermediate cell: plain _wire_walkable (no inverted/footprint args), cached.
+        key = (pos, exempt)
+        if key not in mid_cache:
+            mid_cache[key] = _wire_walkable(block_index, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt)
+        return mid_cache[key]
 
     def _is_powered_block(pos: tuple[int, int, int]):
-        if not _in_bounds(pos, bounds):
+        if not _in_bounds(pos, bounds) or pos not in solid:
             return False
         has_input_repeater = False
         for dx, dz in _HORIZ_DIRS:
             b = (pos[0] + dx, pos[1], pos[2] + dz)
             if not _in_bounds(b, bounds):
                 continue
+            if b not in ix_repeater:
+                continue
             block = workspace[*b]
-            if _is_repeater(block) and block['facing'] == _DELTA_TO_FACING[(dx, dz)]:
+            if block['facing'] == _DELTA_TO_FACING[(dx, dz)]:
                 has_input_repeater = True
                 break
 
-        return pos in solid and has_input_repeater
+        return has_input_repeater
 
     def _torch_below(support_pos: tuple[int, int, int]) -> bool:
         """True if a torch at support_pos-1Y would power the support block → unintended signal."""
@@ -189,7 +284,7 @@ def _find_wire_path(
         below = (bx, by - 1, bz)
         if not _in_bounds(below, bounds):
             return False
-        return _is_torch(workspace[below[0], below[1], below[2]])
+        return below in ix_torch
 
     def _horiz_neighbors(
             pos: tuple[int, int, int],
@@ -207,7 +302,7 @@ def _find_wire_path(
                     not _is_powered_block((nx, y + 1, nz)):
                 if y <= min_y or (
                     (nx, y - 1, nz) not in path_snapshot
-                    and _can_be_support(workspace, solid, (nx, y - 1, nz), bounds)
+                    and can_support((nx, y - 1, nz))
                     and not _torch_below((nx, y - 1, nz))
                 ):
                     result.append((flat, 1))
@@ -216,10 +311,10 @@ def _find_wire_path(
             # has a dedicated +1Y move in _tower_neighbors)
             if y < max_bridge_y and not came_from_tower:
                 up = (nx, y + 1, nz)
-                if _is_air(workspace[x, y + 1, z]) and walkable(up) and not _is_powered_block((nx, y + 2, nz)) and up not in path_snapshot: # ensure no block will cut off slope connection and up pos is valid
+                if (x, y + 1, z) not in ix_non_air and walkable(up) and not _is_powered_block((nx, y + 2, nz)) and up not in path_snapshot: # ensure no block will cut off slope connection and up pos is valid
                     ramp = (nx, y, nz)
                     if ramp not in path_snapshot and (
-                        ramp in solid or (_in_bounds(ramp, bounds) and _is_air(workspace[ramp[0], ramp[1], ramp[2]]))
+                        ramp in solid or (_in_bounds(ramp, bounds) and ramp not in ix_non_air)
                     ) and not _torch_below(ramp):
                         # TODO: this discourages ramping so we get torch towers for vertical signal extension, but we should guarantee that vertical extension no matter what path is chosen
                         result.append((up, 3))
@@ -239,16 +334,16 @@ def _find_wire_path(
                     and above_down not in path_snapshot
                     and (nx, y + 1, nz) not in path_snapshot
                     and _in_bounds(above_down, bounds)
-                    and _is_air(workspace[above_down[0], above_down[1], above_down[2]])
+                    and above_down not in ix_non_air
                     and not _is_powered_block(above_down)
                 )
                 exempt: set[tuple[int, int, int]] = set()
                 # current dust might generate support, which would cut off connections to foreign dust below
-                if _can_be_support(workspace, solid, (x, y - 1, z), bounds):
+                if can_support((x, y - 1, z)):
                     exempt.add((x, y - 2, z))
                 if above_clear and walkable(down, frozenset(exempt)) and down not in path_snapshot:
                     if y - 1 <= min_y or (
-                        _can_be_support(workspace, solid, (nx, y - 2, nz), bounds)
+                        can_support((nx, y - 2, nz))
                         and not _torch_below((nx, y - 2, nz))
                     ):
                         below_owner = dust_owner.get((nx, y - 3, nz))
@@ -283,18 +378,18 @@ def _find_wire_path(
                 top = (nx2, y + 2, nz2)
                 mid_support = (x + dx, y, z + dz)
                 mid_ok = (
-                    _is_air(workspace[x, y + 1, z])
+                    (x, y + 1, z) not in ix_non_air
                     and mid not in protected
                     and mid not in footprint_blocked
                     and mid not in path_snapshot
                     and _in_bounds(mid, bounds)
                     and above_mid not in solid
                     and mid not in solid
-                    and _is_air(workspace[mid[0], mid[1], mid[2]])
-                    and _wire_walkable(workspace, solid, dust_owner, mid, net_id, bounds, exempt_foreign=exempt)
+                    and mid not in ix_non_air
+                    and mid_walkable(mid, exempt)
                 )
                 if mid_ok and walkable(top):
-                    if mid_support not in path_snapshot and _can_be_support(workspace, solid, mid_support, bounds) and not _torch_below(mid_support):
+                    if mid_support not in path_snapshot and can_support(mid_support) and not _torch_below(mid_support):
                         result.append((top, 7))
                         additional_blocked.append(mid)
 
@@ -309,7 +404,7 @@ def _find_wire_path(
                     and above_mid not in path_snapshot
                     and (above_mid[0], above_mid[1] + 1, above_mid[2]) not in path_snapshot
                     and _in_bounds(above_mid, bounds)
-                    and _is_air(workspace[above_mid[0], above_mid[1], above_mid[2]])
+                    and above_mid not in ix_non_air
                 )
                 mid_dn_ok = (
                     above_clear
@@ -318,12 +413,12 @@ def _find_wire_path(
                     and mid_dn not in path_snapshot
                     and _in_bounds(mid_dn, bounds)
                     and mid_dn not in solid
-                    and _is_air(workspace[mid_dn[0], mid_dn[1], mid_dn[2]])
-                    and _wire_walkable(workspace, solid, dust_owner, mid_dn, net_id, bounds, exempt_foreign=exempt_dn)
+                    and mid_dn not in ix_non_air
+                    and mid_walkable(mid_dn, exempt_dn)
                 )
                 if mid_dn_ok and walkable(top_dn):
                     if y - 2 <= min_y or (
-                        _can_be_support(workspace, solid, (nx2, y - 3, nz2), bounds)
+                        can_support((nx2, y - 3, nz2))
                         and not _torch_below((nx2, y - 3, nz2))
                     ):
                         result.append((top_dn, 7))
@@ -356,17 +451,17 @@ def _find_wire_path(
             rep = (x + tdx, y, z + tdz)
             if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected or rep in path_snapshot:
                 continue
-            if not _is_air(workspace[rep[0], rep[1], rep[2]]):
+            if rep in ix_non_air:
                 continue
             rep_support = (x + tdx, y - 1, z + tdz)
-            if rep_support in path_snapshot or not _can_be_support(workspace, solid, rep_support, bounds):
+            if rep_support in path_snapshot or not can_support(rep_support):
                 continue
             below_rep_support = (x + tdx, y - 2, z + tdz)
             rep_support_cuts_slope = False
             for dx, dz in _HORIZ_DIRS:
                 maybe_next = (below_rep_support[0] + dx, below_rep_support[1] + 1, below_rep_support[2] + dz)
-                if _in_bounds(below_rep_support, bounds) and _is_redstone_wire(workspace[*below_rep_support]) and \
-                    _in_bounds(maybe_next, bounds) and _is_redstone_wire(workspace[*maybe_next]):
+                if _in_bounds(below_rep_support, bounds) and below_rep_support in ix_wire and \
+                    _in_bounds(maybe_next, bounds) and maybe_next in ix_wire:
                     rep_support_cuts_slope = True
                     break
             if rep_support_cuts_slope:
@@ -378,12 +473,12 @@ def _find_wire_path(
                 if not _in_bounds(cp, bounds) or cp in footprint_blocked or cp in protected:
                     col_clear = False
                     break
-                if not _is_air(workspace[cp[0], cp[1], cp[2]]):
+                if cp in ix_non_air:
                     col_clear = False
                     break
                 for dx, dz in _HORIZ_DIRS:
                     cp_side = (cp[0] + dx, cp[1], cp[2] + dz)
-                    if _in_bounds(cp_side, bounds) and _is_redstone_wire(workspace[cp_side[0], cp_side[1], cp_side[2]]):
+                    if _in_bounds(cp_side, bounds) and cp_side in ix_wire:
                         # If it's our own connection, we create a loop, if its others', we're interfering
                         col_clear = False
                         break
@@ -397,10 +492,32 @@ def _find_wire_path(
                 if below_owner is not None and below_owner != net_id:
                     continue
                 # If it's our own connection, we create a loop, if its others', we're interfering
-                if _is_redstone_wire(workspace[*below_base]) or below_base in path_snapshot:
+                if below_base in ix_wire or below_base in path_snapshot:
                     continue
             result.append((tower_top, 8))
         return result
+
+    m4_clear_cache: dict[tuple[int, int, int], bool] = {}
+
+    def m4_cell_clear(cp: tuple[int, int, int]) -> bool:
+        """Path-independent part of a -4 side cell check: no protected cell or foreign
+        owner among its cardinal neighbours at Y-1/0/+1, and not foreign-owned itself."""
+        if cp not in m4_clear_cache:
+            ok = True
+            for ddx, ddz in _HORIZ_DIRS:
+                for ddy in (-1, 0, 1):
+                    sp = (cp[0] + ddx, cp[1] + ddy, cp[2] + ddz)
+                    owner = dust_owner.get(sp)
+                    if sp in protected or (owner is not None and owner != net_id):
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if ok:
+                owner = dust_owner.get(cp)
+                ok = owner is None or owner == net_id
+            m4_clear_cache[cp] = ok
+        return m4_clear_cache[cp]
 
     def _powered_minus4_neighbors(
             pos: tuple[int, int, int],
@@ -413,63 +530,42 @@ def _find_wire_path(
         if not walkable(dest):
             return []
 
+        # Support block at (x,y-1,z): permanent solid block — must not land in any
+        # footprint or protected zone (goal relief is for wire approach, not solid structures).
+        below_launch = (x, y - 1, z)
+        if below_launch in path_snapshot:
+            return []
+        if below_launch == goal or below_launch in terminal_positions or below_launch in footprint_blocked or below_launch in protected:
+            return []
+        if below_launch in solid:
+            if workspace[below_launch[0], below_launch[1], below_launch[2]] == GLASS:
+                return []
+        elif not (_in_bounds(below_launch, bounds) and below_launch not in ix_non_air):
+            return []
+
         for dx, dz in _HORIZ_DIRS:
             nx, nz = x + dx, z + dz
-
-            # Support block at (x,y-1,z): permanent solid block — must not land in any
-            # footprint or protected zone (goal relief is for wire approach, not solid structures).
-            below_launch = (x, y - 1, z)
-            if below_launch in path_snapshot:
-                continue
-            if below_launch == goal or below_launch in terminal_positions or below_launch in footprint_blocked or below_launch in protected:
-                continue
-            if below_launch in solid:
-                if workspace[below_launch[0], below_launch[1], below_launch[2]] == GLASS:
-                    continue
-            elif not (_in_bounds(below_launch, bounds) and _is_air(workspace[below_launch[0], below_launch[1], below_launch[2]])):
-                continue
 
             # All side/clearance cells must be air, unblocked, and unowned by foreign net.
             # Use full protected (not effective_protected) — goal relief is for wire approach only,
             # not for permanent solid blocks or torches placed by this move.
-            side_cells = [
+            side_cells = (
                 (nx, y - 1, nz),  # first wall torch (inverted)
                 (nx, y - 2, nz),  # inverted dust
                 (nx, y - 3, nz),  # second support block
                 (x,  y - 3, z),   # second wall torch (active)
                 (nx, y,     nz),  # clearance above first torch
                 (x,  y - 2, z),   # clearance above second torch
-            ]
+            )
             ok = True
-            for cp in side_cells:
-                if not _in_bounds(cp, bounds):
+            for cp in side_cells:  # cheap checks first
+                if (not _in_bounds(cp, bounds) or cp == goal or cp in terminal_positions
+                        or cp in footprint_blocked or cp in protected or cp in path_snapshot
+                        or (cp[0], cp[1] + 1, cp[2]) in path_snapshot
+                        or cp in solid or cp in ix_non_air):
                     ok = False
                     break
-                if cp == goal or cp in terminal_positions or cp in footprint_blocked or cp in protected or cp in path_snapshot \
-                        or (cp[0], cp[1] + 1, cp[2]) in path_snapshot:
-                    ok = False
-                    break
-                for ddx, ddz in _HORIZ_DIRS:
-                    for ddy in (-1, 0, 1):
-                        sp = (cp[0] + ddx, cp[1] + ddy, cp[2] + ddz)
-                        if sp in protected:
-                            ok = False
-                            break
-                        owner = dust_owner.get(sp)
-                        if owner is not None and owner != net_id:
-                            ok = False
-                            break
-                if cp in solid:
-                    ok = False
-                    break
-                if not _is_air(workspace[cp[0], cp[1], cp[2]]):
-                    ok = False
-                    break
-                owner = dust_owner.get(cp)
-                if owner is not None and owner != net_id:
-                    ok = False
-                    break
-            if not ok:
+            if not ok or not all(m4_cell_clear(cp) for cp in side_cells):
                 continue
 
             # Inverted dust at (nx,y-2,nz) must have no wire at slope-adjacent positions
@@ -547,16 +643,20 @@ def _find_wire_path(
         # Cells in snap within ±1 cardinal of pos at Y-1/0/+1 — exactly the cells
         # checked in neighbor move conditions. Called at push time only; heap entries
         # store the already-restricted local snap so it never grows beyond 12 cells.
+        if not snap:
+            return snap
         x, y, z = pos
-        relevant = frozenset(
-            (x + dx, y + dy, z + dz)
-            for dx, dz in _HORIZ_DIRS_8
-            for dy in (-1, 0, 1)
-        )
-        return snap & relevant
+        # Iterate the (small) snapshot rather than building the window. Window = the 8
+        # horizontal neighbours (not pos's own column) at Y-1/0/+1.
+        return frozenset([
+            c for c in snap
+            if -1 <= c[0] - x <= 1 and -1 <= c[2] - z <= 1 and -1 <= c[1] - y <= 1
+            and (c[0] != x or c[2] != z)
+        ])
 
     # A* search
-    # Heap entry: (f, g, counter, pos, parent, path_snapshot).
+    # Heap entry: (f, -h, g, counter, g_wire, node, parent_node). g_wire excludes conflict
+    # penalties so the f-cap only bounds real wire length, not negotiation cost.
     # counter is unique per push so comparison never falls through to pos/parent/path_snapshot.
     # g_score keyed on (pos, local_snapshot) so paths with different local histories
     # coexist — a cheaper path with a restrictive snapshot does not block a more
@@ -570,11 +670,11 @@ def _find_wire_path(
         seed_key = (seed, snap0)
         g_score[seed_key] = 0
         h0 = heuristic(seed)
-        heapq.heappush(open_heap, (weight * h0, -h0, 0, counter, seed_key, (None, snap0)))
+        heapq.heappush(open_heap, (weight * h0, -h0, 0, counter, 0, seed_key, (None, snap0)))
         counter += 1
 
     reached: tuple[int, int, int] | None = None
-    best_node: tuple[int, int, int] = seeds[0]
+    best_node = (seeds[0], frozenset())  # same (pos, local_snap) key shape as heap nodes
     best_h: int = min(heuristic(s) for s in seeds)
     max_f: int = max(best_h, 10) * _ROUTE_BUDGET_FACTOR
     explored: set[tuple[int, int, int]] = set()
@@ -582,12 +682,19 @@ def _find_wire_path(
     stagnation = 0
     h_radius_pruned = 0
     early_stop_reason: str | None = None
+    deadline = time.monotonic() + time_limit if time_limit is not None else None
+    pops = 0
     while open_heap:
-        f, _, g, _, current_node, parent = heapq.heappop(open_heap)
+        pops += 1
+        if deadline is not None and pops & 255 == 0 and time.monotonic() > deadline:
+            early_stop_reason = f"timeout ({time_limit}s)"
+            break
+        f, _, g, _, g_wire, current_node, parent = heapq.heappop(open_heap)
         # f-cap: prune nodes whose total estimated cost exceeds budget.
         # Catches runaway detours around impossible obstacles without burning _ROUTE_MAX_NODES.
-        if f > max_f:
-            early_stop_reason = f"f-cap exceeded (f={f} > max_f={max_f})"
+        f_wire = f - g + g_wire
+        if f_wire > max_f:
+            early_stop_reason = f"f-cap exceeded (f={f_wire} > max_f={max_f})"
             break
         # path_snapshot stored in heap is already the local snap (≤12 cells);
         # no need to re-intersect here.
@@ -635,6 +742,9 @@ def _find_wire_path(
             if par_pos is not None and ny == cy and abs(out_dx) <= 1 and abs(out_dz) <= 1:
                 if (out_dx, out_dz) != (in_dx, in_dz):
                     cost += 1
+            new_g_wire = g_wire + cost
+            if congestion_cost is not None:
+                cost += congestion_cost(neighbor)
             new_g = g + cost
             neighbor_snap = _local_snap(neighbor, new_snap)
             nkey = (neighbor, neighbor_snap)
@@ -644,7 +754,7 @@ def _find_wire_path(
                 if h <= best_h * _H_RADIUS_FACTOR or ((abs(goal[0] - neighbor[0]) + abs(goal[2] - neighbor[2])) < _HORIZ_RADIUS_MIN and abs(goal[1] - neighbor[1]) < _Y_RADIUS_MIN):
                     heapq.heappush(
                         open_heap,
-                        (new_g + weight * h, -h, new_g, counter, nkey, current_node),
+                        (new_g + weight * h, -h, new_g, counter, new_g_wire, nkey, current_node),
                     )
                     counter += 1
                 else:
@@ -652,8 +762,9 @@ def _find_wire_path(
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
-        cur: tuple[int, int, int] | None = best_node
-        while cur[0] is not None:
+        cur = best_node
+        # Seeds only enter came_from once expanded; an early stop (f-cap) can precede that.
+        while cur is not None and cur[0] is not None:
             cx, cy, cz = cur[0]
             workspace[cx, cy, cz] = lamp
             cur = came_from.get(cur)
@@ -661,7 +772,8 @@ def _find_wire_path(
         #     if _is_air(workspace[*prot]):
         #         workspace[*prot] = GLASS
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
-        raise ValueError(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason}; h_radius_pruned={h_radius_pruned})")
+        error = RouteTimeout if early_stop_reason and early_stop_reason.startswith("timeout") else ValueError
+        raise error(f"No route for net {net_id} from {start} to {goal} (closest reached: {best_node}{reason}; h_radius_pruned={h_radius_pruned})")
     if walkable(goal) and reached[0] != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {reached}")
 

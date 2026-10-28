@@ -7,25 +7,28 @@ def _block_str(block: BlockState) -> str:
     return str(block)
 
 
+# Classifiers use BlockState.id (block name only): str(block) formats every property and
+# dominated routing time when called millions of times from _wire_conflicts.
 def _is_air(block: BlockState) -> bool:
-    text = _block_str(block)
-    return text == "minecraft:air" or text.startswith("minecraft:air[")
+    return block.id == "minecraft:air"
 
 
 def _is_redstone_wire(block: BlockState) -> bool:
-    return "redstone_wire" in _block_str(block)
+    return "redstone_wire" in block.id
 
 
 def _is_repeater(block: BlockState) -> bool:
-    return "minecraft:repeater" in _block_str(block)
+    return block.id == "minecraft:repeater"
+
+
+_TORCH_IDS = frozenset(("minecraft:redstone_torch", "minecraft:redstone_wall_torch"))
 
 
 def _is_torch(block: BlockState) -> bool:
-    s = _block_str(block)
-    return "minecraft:redstone_torch" in s or "minecraft:redstone_wall_torch" in s
+    return block.id in _TORCH_IDS
 
 def _is_glass(block: BlockState) -> bool:
-    return "minecraft:glass" in _block_str(block)
+    return "minecraft:glass" in block.id
 
 
 def _needs_support(block: BlockState) -> bool:
