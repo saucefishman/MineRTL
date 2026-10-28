@@ -579,7 +579,10 @@ def _find_wire_path(
                 if not ok:
                     break
             if ok:
-                return [(dest, 8)]
+                # Third element: cells this move fills besides the path cells. They go into
+                # the dest's path snapshot so later moves don't step into them (e.g. sloping
+                # up onto the second support block).
+                return [(dest, 8, (below_launch, *side_cells))]
 
         return []
 
@@ -735,7 +738,9 @@ def _find_wire_path(
         par_pos = parent[0]
         in_dx = cx - par_pos[0] if par_pos is not None else 0
         in_dz = cz - par_pos[2] if par_pos is not None else 0
-        for neighbor, cost in neighbor_results:
+        for neighbor_result in neighbor_results:
+            neighbor, cost = neighbor_result[0], neighbor_result[1]
+            move_cells = neighbor_result[2] if len(neighbor_result) > 2 else ()
             nx, ny, nz = neighbor
             out_dx, out_dz = nx - cx, nz - cz
             # Penalise XZ direction change on flat moves only (avoids disrupting slope/tower costs).
@@ -746,7 +751,7 @@ def _find_wire_path(
             if congestion_cost is not None:
                 cost += congestion_cost(neighbor)
             new_g = g + cost
-            neighbor_snap = _local_snap(neighbor, new_snap)
+            neighbor_snap = _local_snap(neighbor, new_snap | frozenset(move_cells) if move_cells else new_snap)
             nkey = (neighbor, neighbor_snap)
             if new_g < g_score.get(nkey, 10 ** 9):
                 g_score[nkey] = new_g
