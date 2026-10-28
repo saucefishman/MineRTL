@@ -124,6 +124,11 @@ def main():
     parser.add_argument("--allow-routing-failures", type=bool, default=False)
     parser.add_argument("--output-pin-targets-json", type=str, default=None)
     parser.add_argument("--generate-clock", type=str, default=None)
+    parser.add_argument("--route-passes", type=int, default=None,
+                        help="Routing passes incl. final hard pass; 1 = single greedy pass (default: _ROUTE_MAX_PASSES)")
+    parser.add_argument("--wire-timeout", type=float, default=None,
+                        help="Per-search A* time limit in seconds for non-final passes; 0 disables "
+                             "(default: _ROUTE_SEARCH_TIMEOUT)")
     args = parser.parse_args()
     print(args)
 
@@ -163,7 +168,9 @@ def main():
                                         out_path=out_litematic, schematic_name=schematic_name,
                                         allow_routing_failures=allow_routing_failures,
                                         output_pin_targets=output_pin_targets,
-                                        clock_pin=generate_clock_pin)
+                                        clock_pin=generate_clock_pin,
+                                        **({"route_passes": args.route_passes} if args.route_passes is not None else {}),
+                                        **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}))
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 

@@ -35,6 +35,15 @@ _ROUTE_BUDGET_FACTOR = 5     # f-score cap: max_f = initial_h * factor; prunes r
 _H_RADIUS_FACTOR = 2        # h-radius cull: discard nodes where h > best_h * factor
 _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN = 10, 6
 
+# Negotiated-congestion routing (PathFinder)
+_ROUTE_MAX_PASSES = 1              # 1 = single greedy hard pass (default); N>1 = N-1 negotiation passes + final hard pass
+_PRES_SCHEDULE = (2.0, 4.0, 8.0, 16.0, 32.0)  # present-congestion factor per negotiation pass (last value repeats)
+_CONFLICT_BASE = 4.0               # per-cell congestion cost = base * (hist + (1 + hist) * pres * other_users)
+_ROUTE_STAGNATION_PASSES = 2       # stop negotiating after this many passes without a better score
+_ROUTE_SEARCH_TIMEOUT = 0.3        # per-A*-search wall-clock limit (s) in a net's first negotiation attempt
+_ROUTE_TIMEOUT_ESCALATION = 3.0    # after a timeout, that net's limit is multiplied by this (up to the final limit)
+_ROUTE_FINAL_SEARCH_TIMEOUT = 3.0  # per-search limit in the final hard pass (and the escalation cap)
+
 _HORIZ_DIRS: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 _HORIZ_DIRS_8 = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
 _DELTA_TO_FACING: dict[tuple[int, int], str] = {
