@@ -400,11 +400,15 @@ def _route_all_nets(
         footprint_blocked: frozenset[tuple[int, int, int]],
         all_terminals: dict[str, set[tuple[int, int, int]]],
         snapshot_dir: Path | None = None,
+        deadline: float | None = None,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
     inverted_cells: set[tuple[int, int, int]] = set()
     for net_idx, net in enumerate(sorted_nets, 1):
+        if deadline is not None and time.monotonic() > deadline:
+            routing_failures.append((net.net_id, ValueError("route deadline reached")))
+            continue
         print(f"[wire] {net_idx}/{total_nets} — {net.net_id:<40}", flush=True)
         try:
             src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
@@ -508,6 +512,7 @@ def _route_all_nets_negotiated(
         search_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
         final_search_timeout: float | None = _ROUTE_FINAL_SEARCH_TIMEOUT,
         route_workers: int = 1,
+        deadline: float | None = None,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     """Negotiated-congestion routing (PathFinder), then commit, then a hard cleanup pass.
 
@@ -529,6 +534,10 @@ def _route_all_nets_negotiated(
 
     route_workers > 1 runs negotiation passes in forked worker processes (parallel.py):
     nets are routed in batches against congestion frozen at the start of each batch.
+
+    deadline (time.monotonic()): past it, no new net/batch is started; the best pass so far
+    is committed and the final hard pass skips its remaining nets (reported as failures),
+    so a capped build still writes a partial result.
     """
     base_index = _BlockIndex(workspace)  # static world; unchanged until commit
     inverted_cells = JournaledSet(rec, name="inverted")
@@ -597,8 +606,13 @@ def _route_all_nets_negotiated(
             net_timeout[net_id] = min(limit * _ROUTE_TIMEOUT_ESCALATION, cap)
         return old
 
+    def past_deadline() -> bool:
+        return deadline is not None and time.monotonic() > deadline
+
     def route_pass_sequential(k: int, pres: float) -> None:
         for i, net_id in enumerate(to_route, 1):
+            if past_deadline():
+                return
             print(f"[wire] p{k} {i}/{len(to_route)} — {net_id:<40}", flush=True)
             old = routes.pop(net_id, None)
             if old is not None:
@@ -625,6 +639,8 @@ def _route_all_nets_negotiated(
             print(f"[wire] p{k} {done}/{len(to_route)} — {net_id:<40}", flush=True)
 
         for b in range(0, len(to_route), batch_size):
+            if past_deadline():
+                return
             batch = to_route[b:b + batch_size]
             olds = {}
             for net_id in batch:
@@ -679,6 +695,9 @@ def _route_all_nets_negotiated(
                 break
             if stale >= _ROUTE_STAGNATION_PASSES:
                 break
+            if past_deadline():
+                print("[wire] route deadline reached; committing best pass", flush=True)
+                break
             to_route = [net_id for net_id in order if net_id in conflicted or net_id not in routes]
     finally:
         if workers is not None:
@@ -716,6 +735,9 @@ def _route_all_nets_negotiated(
     ws = JournalingWorkspace(workspace, rec)
     failures: list[tuple[str, Exception]] = []
     for net_id in sorted(leftovers, key=net_order.get):
+        if past_deadline():
+            failures.append((net_id, ValueError("route deadline reached")))
+            continue
         print(f"[wire] final — {net_id:<40}", flush=True)
         try:
             with rec.recording(net_id):
@@ -906,6 +928,7 @@ def build_litematic_from_component_list(
         route_passes: int = _ROUTE_MAX_PASSES,
         wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
         route_workers: int = 1,
+        route_deadline: float | None = None,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -985,6 +1008,7 @@ def build_litematic_from_component_list(
         for f in snapshot_dir.iterdir():
             f.unlink()
     sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
+    deadline = None if route_deadline is None else time.monotonic() + route_deadline
     if route_passes <= 1:
         if route_workers > 1:
             print("[wire] --route-workers ignored: needs --route-passes > 1")
@@ -993,6 +1017,7 @@ def build_litematic_from_component_list(
             sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
             footprint_blocked, all_terminals,
             snapshot_dir=snapshot_dir,
+            deadline=deadline,
         )
     else:
         routing_failures, inverted_cells = _route_all_nets_negotiated(
@@ -1003,6 +1028,7 @@ def build_litematic_from_component_list(
             snapshot_dir=snapshot_dir,
             search_timeout=wire_timeout,
             route_workers=route_workers,
+            deadline=deadline,
         )
 
     _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
