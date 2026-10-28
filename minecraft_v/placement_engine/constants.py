@@ -37,6 +37,7 @@ _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN = 10, 6
 
 # Negotiated-congestion routing (PathFinder)
 _ROUTE_MAX_PASSES = 1              # 1 = single greedy hard pass (default); N>1 = N-1 negotiation passes + final hard pass
+_ROUTE_BATCH_PER_WORKER = 4        # parallel negotiation: nets per batch = this × --route-workers
 _PRES_SCHEDULE = (2.0, 4.0, 8.0, 16.0, 32.0)  # present-congestion factor per negotiation pass (last value repeats)
 _CONFLICT_BASE = 4.0               # per-cell congestion cost = base * (hist + (1 + hist) * pres * other_users)
 _ROUTE_STAGNATION_PASSES = 2       # stop negotiating after this many passes without a better score

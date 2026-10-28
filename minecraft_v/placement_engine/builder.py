@@ -18,13 +18,14 @@ from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeat
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, _REPEATER_MAX_DELAY,
     _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
-    _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT,
+    _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT, _ROUTE_BATCH_PER_WORKER,
 )
 from .layout import (
     _Placed, _expand_multibit_io, _assign_component_y_levels,
     _layout_components, _compute_workspace_dims,
 )
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
+from .parallel import RouteWorkers, claims_of
 from .pathfinding import RouteTimeout, _BlockIndex, _find_wire_path
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up
 from .template import (
@@ -506,6 +507,7 @@ def _route_all_nets_negotiated(
         snapshot_dir: Path | None = None,
         search_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
         final_search_timeout: float | None = _ROUTE_FINAL_SEARCH_TIMEOUT,
+        route_workers: int = 1,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     """Negotiated-congestion routing (PathFinder), then commit, then a hard cleanup pass.
 
@@ -524,6 +526,9 @@ def _route_all_nets_negotiated(
     any that clash, or that verify_signals finds open/shorted afterwards (claims don't model
     every interaction), are ripped out. Leftovers get a final hard (overlap-free) A* pass
     with final_search_timeout per search.
+
+    route_workers > 1 runs negotiation passes in forked worker processes (parallel.py):
+    nets are routed in batches against congestion frozen at the start of each batch.
     """
     base_index = _BlockIndex(workspace)  # static world; unchanged until commit
     inverted_cells = JournaledSet(rec, name="inverted")
@@ -571,61 +576,113 @@ def _route_all_nets_negotiated(
             net_ordered_paths.append(path)
         _place_repeaters_for_net(ws, owner_view, net.net_id, net_ordered_paths)
 
-    def route_virtual(net_id: str, pres: float) -> NetRoute:
+    def route_virtual(net_id: str, pres: float, cong: Congestion, time_limit: float | None) -> NetRoute:
         view = OverlayWorkspace(workspace, base_index)
         solid_view = OverlaySet(solid)
         owner_view = OverlayDict(dust_owner)
         inverted: set[tuple[int, int, int]] = set()
         route_net(net_by_id[net_id], view, solid_view, owner_view, inverted,
-                  lambda pos: cong.cost(pos, pres, _CONFLICT_BASE), net_timeout.get(net_id, search_timeout))
+                  lambda pos: cong.cost(pos, pres, _CONFLICT_BASE), time_limit)
         return NetRoute.from_view(view, solid_view, owner_view, inverted)
 
-    order = [net.net_id for net in sorted_nets]
-    to_route = list(order)
-    best: tuple[tuple[int, int], dict[str, NetRoute]] | None = None
-    stale = 0
-    for k in range(max(passes - 1, 0)):
-        t0 = time.monotonic()
-        pres = _PRES_SCHEDULE[min(k, len(_PRES_SCHEDULE) - 1)]
+    def settle(net_id: str, old: NetRoute | None, route: NetRoute | None, error: Exception | None) -> NetRoute | None:
+        """Record a reroute's outcome; a failed one (e.g. timeout) keeps the previous route."""
+        if error is None:
+            last_error.pop(net_id, None)
+            return route
+        last_error[net_id] = error
+        limit = net_timeout.get(net_id, search_timeout)
+        if isinstance(error, RouteTimeout) and limit is not None:
+            cap = final_search_timeout if final_search_timeout is not None else limit * _ROUTE_TIMEOUT_ESCALATION
+            net_timeout[net_id] = min(limit * _ROUTE_TIMEOUT_ESCALATION, cap)
+        return old
+
+    def route_pass_sequential(k: int, pres: float) -> None:
         for i, net_id in enumerate(to_route, 1):
             print(f"[wire] p{k} {i}/{len(to_route)} — {net_id:<40}", flush=True)
             old = routes.pop(net_id, None)
             if old is not None:
                 cong.remove(net_id, old)
             try:
-                route = route_virtual(net_id, pres)
+                route, error = route_virtual(net_id, pres, cong, net_timeout.get(net_id, search_timeout)), None
             except Exception as e:
-                last_error[net_id] = e
-                limit = net_timeout.get(net_id, search_timeout)
-                if isinstance(e, RouteTimeout) and limit is not None:
-                    cap = final_search_timeout if final_search_timeout is not None else limit * _ROUTE_TIMEOUT_ESCALATION
-                    net_timeout[net_id] = min(limit * _ROUTE_TIMEOUT_ESCALATION, cap)
-                route = old  # reroute failed (e.g. timeout): keep the previous route, if any
-                if route is None:
-                    continue
+                route, error = None, e
+            route = settle(net_id, old, route, error)
+            if route is not None:
+                routes[net_id] = route
+                cong.add(net_id, route)
+
+    def route_pass_parallel(k: int, pres: float) -> None:
+        # Batches of _ROUTE_BATCH_PER_WORKER * workers nets route against the same frozen
+        # congestion; within a batch, slowest-last-time nets go out first.
+        nonlocal deltas
+        batch_size = _ROUTE_BATCH_PER_WORKER * route_workers
+        done = 0
+
+        def progress(net_id: str) -> None:
+            nonlocal done
+            done += 1
+            print(f"[wire] p{k} {done}/{len(to_route)} — {net_id:<40}", flush=True)
+
+        for b in range(0, len(to_route), batch_size):
+            batch = to_route[b:b + batch_size]
+            olds = {}
+            for net_id in batch:
+                old = olds[net_id] = routes.pop(net_id, None)
+                if old is not None:
+                    cong.remove(net_id, old)
+                    deltas.append(("rm", net_id, claims_of(old)))
+            tasks = [(net_id, pres, net_timeout.get(net_id, search_timeout))
+                     for net_id in sorted(batch, key=lambda n: -net_seconds.get(n, 0.0))]
+            results = workers.run_batch(deltas, tasks, progress)
+            deltas = []
+            for net_id in batch:
+                route, error, net_seconds[net_id] = results[net_id]
+                route = settle(net_id, olds[net_id], route, error)
+                if route is not None:
+                    routes[net_id] = route
+                    cong.add(net_id, route)
+                    deltas.append(("add", net_id, claims_of(route)))
+
+    order = [net.net_id for net in sorted_nets]
+    to_route = list(order)
+    best: tuple[tuple[int, int], dict[str, NetRoute]] | None = None
+    stale = 0
+    deltas: list = []  # congestion changes not yet sent to the workers
+    net_seconds: dict[str, float] = {}
+    workers = RouteWorkers(route_workers, route_virtual) if route_workers > 1 and passes > 1 else None
+    try:
+        for k in range(max(passes - 1, 0)):
+            t0 = time.monotonic()
+            pres = _PRES_SCHEDULE[min(k, len(_PRES_SCHEDULE) - 1)]
+            if workers is None:
+                route_pass_sequential(k, pres)
             else:
-                last_error.pop(net_id, None)
-            routes[net_id] = route
-            cong.add(net_id, route)
-        over = cong.overused()
-        for pos in over:
-            cong.hist[pos] += 1
-        conflicted = cong.nets_at(over) & routes.keys()
-        unrouted = [net_id for net_id in order if net_id not in routes]
-        print(f"[wire] pass {k} (pres={pres}): {len(routes)}/{len(order)} routed, "
-              f"{len(over)} overused cells, {len(conflicted)} conflicting nets, "
-              f"{time.monotonic() - t0:.1f}s", flush=True)
-        score = (len(unrouted) + len(conflicted), len(over))
-        if best is None or score < best[0]:
-            best = (score, dict(routes))
-            stale = 0
-        else:
-            stale += 1
-        if not over and not unrouted:
-            break
-        if stale >= _ROUTE_STAGNATION_PASSES:
-            break
-        to_route = [net_id for net_id in order if net_id in conflicted or net_id not in routes]
+                route_pass_parallel(k, pres)
+            over = cong.overused()
+            for pos in over:
+                cong.hist[pos] += 1
+            if workers is not None:
+                deltas.append(("hist", None, list(over)))
+            conflicted = cong.nets_at(over) & routes.keys()
+            unrouted = [net_id for net_id in order if net_id not in routes]
+            print(f"[wire] pass {k} (pres={pres}): {len(routes)}/{len(order)} routed, "
+                  f"{len(over)} overused cells, {len(conflicted)} conflicting nets, "
+                  f"{time.monotonic() - t0:.1f}s", flush=True)
+            score = (len(unrouted) + len(conflicted), len(over))
+            if best is None or score < best[0]:
+                best = (score, dict(routes))
+                stale = 0
+            else:
+                stale += 1
+            if not over and not unrouted:
+                break
+            if stale >= _ROUTE_STAGNATION_PASSES:
+                break
+            to_route = [net_id for net_id in order if net_id in conflicted or net_id not in routes]
+    finally:
+        if workers is not None:
+            workers.close()
 
     # Commit the best pass. Rebuild congestion for exactly those routes to know which are clean.
     final_routes = best[1] if best is not None else {}
@@ -848,6 +905,7 @@ def build_litematic_from_component_list(
         clock_pin: str = 'clk',
         route_passes: int = _ROUTE_MAX_PASSES,
         wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
+        route_workers: int = 1,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -928,6 +986,8 @@ def build_litematic_from_component_list(
             f.unlink()
     sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
     if route_passes <= 1:
+        if route_workers > 1:
+            print("[wire] --route-workers ignored: needs --route-passes > 1")
         routing_failures, inverted_cells = _route_all_nets(
             workspace, solid, dust_owner,
             sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
@@ -942,6 +1002,7 @@ def build_litematic_from_component_list(
             component_cells=frozenset(_component_interior(placed)),
             snapshot_dir=snapshot_dir,
             search_timeout=wire_timeout,
+            route_workers=route_workers,
         )
 
     _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
