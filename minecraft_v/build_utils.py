@@ -1,11 +1,13 @@
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from litemapy import Region
 from minecraft_v.placement_engine.ir import ComponentList
 
-DEFAULT_ARTIFACTS_DIR = Path("build/artifacts")
+# Override per build (e.g. synth.sh --artifacts-dir) so parallel builds don't share files.
+DEFAULT_ARTIFACTS_DIR = Path(os.environ.get("MINECRAFT_V_ARTIFACTS_DIR", "build/artifacts"))
 DEFAULT_SNAPSHOT_DIR = DEFAULT_ARTIFACTS_DIR / "snapshots"
 
 
