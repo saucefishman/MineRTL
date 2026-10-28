@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from math import ceil
 from pathlib import Path
 
@@ -15,17 +16,22 @@ from minecraft_v.placement_engine.ir import (
 )
 from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
-    _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, _REPEATER_MAX_DELAY
+    _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, _REPEATER_MAX_DELAY,
+    _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
+    _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT,
 )
 from .layout import (
     _Placed, _expand_multibit_io, _assign_component_y_levels,
     _layout_components, _compute_workspace_dims,
 )
-from .pathfinding import _find_wire_path
+from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
+from .pathfinding import RouteTimeout, _BlockIndex, _find_wire_path
+from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
+from .verify import verify_signals
 from .wire import _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -291,14 +297,9 @@ def _route_output_pin_extensions(
         _place_repeaters_for_net(workspace, dust_owner, base_net_id, [path])
 
 
-def _build_footprint_blocked(
-        placed: list[_Placed],
-        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
-        io_repeater_cells: set[tuple[int, int, int]],
-        const_positions: set[tuple[int, int, int]],
-) -> frozenset[tuple[int, int, int]]:
-    """Hard-block zone: footprint interiors + expanded borders + IO repeater tops + const air-gaps."""
-    fp_interior: set[tuple[int, int, int]] = {
+def _component_interior(placed: list[_Placed]) -> set[tuple[int, int, int]]:
+    """Cells inside non-IO component footprints."""
+    return {
         (ox + dx, oy + dy, oz + dz)
         for item in placed
         if item.component.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
@@ -308,6 +309,16 @@ def _build_footprint_blocked(
         for dy in range(fp.height)
         for dz in range(fp.depth)
     }
+
+
+def _build_footprint_blocked(
+        placed: list[_Placed],
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+        io_repeater_cells: set[tuple[int, int, int]],
+        const_positions: set[tuple[int, int, int]],
+) -> frozenset[tuple[int, int, int]]:
+    """Hard-block zone: footprint interiors + expanded borders + IO repeater tops + const air-gaps."""
+    fp_interior = _component_interior(placed)
     fp_expanded: set[tuple[int, int, int]] = set(fp_interior)
     for cx, cy, cz in fp_interior:
         for ddx, ddy, ddz in _DIRS_6:
@@ -433,6 +444,252 @@ def _route_all_nets(
             save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", workspace, snapshot_dir)
     print(f"\r[wire] done ({total_nets} nets, {len(routing_failures)} failed)        ")
     return routing_failures, inverted_cells
+
+
+def _commit_route(
+        workspace: Region,
+        rec: Recorder,
+        solid: JournaledSet,
+        dust_owner: JournaledDict,
+        inverted_cells: JournaledSet,
+        net_id: str,
+        route: NetRoute,
+        net_ids: set[str],
+) -> bool:
+    """Write a virtual route into the real workspace; rip it back out if it clashes.
+
+    Clash = a block lands on a non-air cell (other than sharing an existing solid as
+    support), or one of its signal cells ends up next to (halo) another committed net's
+    signal — the same adjacency _wire_walkable forbids.
+    """
+    ws = JournalingWorkspace(workspace, rec)
+    ok = True
+    with rec.recording(net_id):
+        for pos, block in route.overlay.items():
+            if not _is_air(workspace[pos]):
+                if pos in solid and pos in route.support:
+                    continue  # shared support block
+                ok = False
+                break
+            ws[pos] = block
+        if ok:
+            for pos in route.solid:
+                solid.add(pos)
+            for pos, owner in route.owner.items():
+                dust_owner[pos] = owner
+            for pos in route.inverted:
+                inverted_cells.add(pos)
+    if ok:
+        for pos in route.halo:
+            owner = dust_owner.get(pos)
+            if owner is not None and owner != net_id and owner in net_ids:
+                ok = False
+                break
+    if not ok:
+        rip_up(rec, net_id, workspace, solid, dust_owner)
+    return ok
+
+
+def _route_all_nets_negotiated(
+        workspace: Region,
+        rec: Recorder,
+        solid: JournaledSet,
+        dust_owner: JournaledDict,
+        sorted_nets: list[NetConnection],
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+        ws_bounds: tuple[int, int, int, int, int, int],
+        max_bridge_y: int,
+        footprint_blocked: frozenset[tuple[int, int, int]],
+        all_terminals: dict[str, set[tuple[int, int, int]]],
+        passes: int,
+        component_cells: frozenset[tuple[int, int, int]] = frozenset(),
+        snapshot_dir: Path | None = None,
+        search_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
+        final_search_timeout: float | None = _ROUTE_FINAL_SEARCH_TIMEOUT,
+) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
+    """Negotiated-congestion routing (PathFinder), then commit, then a hard cleanup pass.
+
+    Negotiation passes: every net (pass 0) or every net touching overuse / unrouted (later
+    passes) is ripped up and rerouted against the static world plus its own blocks only.
+    Other nets add cost, not walls: Congestion.cost = history + pres * users, with pres
+    rising per pass and history growing on cells still overused after each pass. Stops
+    when a pass leaves no overuse and no unrouted nets, or after _ROUTE_STAGNATION_PASSES
+    passes without improvement, or passes-1 passes.
+
+    Per-net search limit starts at search_timeout and is multiplied by
+    _ROUTE_TIMEOUT_ESCALATION each time that net times out (capped at final_search_timeout),
+    so hard nets aren't retried with a limit they already failed.
+
+    Commit: the best pass's routes are written into the real workspace, clean nets first;
+    any that clash, or that verify_signals finds open/shorted afterwards (claims don't model
+    every interaction), are ripped out. Leftovers get a final hard (overlap-free) A* pass
+    with final_search_timeout per search.
+    """
+    base_index = _BlockIndex(workspace)  # static world; unchanged until commit
+    inverted_cells = JournaledSet(rec, name="inverted")
+    net_ids = {net.net_id for net in sorted_nets}
+    net_by_id = {net.net_id: net for net in sorted_nets}
+    net_order = {net.net_id: i for i, net in enumerate(sorted_nets)}
+    all_terminal_positions = frozenset(pin_terminal.values())
+    cong = Congestion()
+    routes: dict[str, NetRoute] = {}
+    last_error: dict[str, Exception] = {}
+    net_timeout: dict[str, float | None] = {}
+
+    def terminals(net_id: str) -> tuple[tuple[int, int, int], list[tuple[int, int, int]]]:
+        net = net_by_id[net_id]
+        return (_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
+                [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks])
+
+    def route_net(net: NetConnection, ws, solid_view, owner_view, inverted, congestion_cost, time_limit):
+        src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
+        protected = _compute_net_protected(net.net_id, all_terminals)
+        net_ordered_paths: list[list[tuple[int, int, int]]] = []
+        dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
+        sorted_pins = sorted(dst_pins,
+                             key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
+        support_block = WOOLS[net_order[net.net_id] % len(WOOLS)]
+        for dst_pin in sorted_pins:
+            tree_seeds = [pos for _path in net_ordered_paths for pos in _path]
+            path = _find_wire_path(
+                ws, solid_view, owner_view,
+                src_pin, dst_pin, net.net_id,
+                ws_bounds, max_bridge_y,
+                tree_seeds=tree_seeds,
+                protected=protected,
+                footprint_blocked=footprint_blocked,
+                inverted_cells=frozenset(inverted),
+                terminal_positions=all_terminal_positions,
+                congestion_cost=congestion_cost,
+                time_limit=time_limit,
+            )
+            _lay_redstone_path(ws, solid_view, owner_view, path, net.net_id,
+                               opaque_support_block=support_block,
+                               inverted_cells=inverted,
+                               goal=dst_pin,
+                               terminal_positions=all_terminal_positions)
+            net_ordered_paths.append(path)
+        _place_repeaters_for_net(ws, owner_view, net.net_id, net_ordered_paths)
+
+    def route_virtual(net_id: str, pres: float) -> NetRoute:
+        view = OverlayWorkspace(workspace, base_index)
+        solid_view = OverlaySet(solid)
+        owner_view = OverlayDict(dust_owner)
+        inverted: set[tuple[int, int, int]] = set()
+        route_net(net_by_id[net_id], view, solid_view, owner_view, inverted,
+                  lambda pos: cong.cost(pos, pres, _CONFLICT_BASE), net_timeout.get(net_id, search_timeout))
+        return NetRoute.from_view(view, solid_view, owner_view, inverted)
+
+    order = [net.net_id for net in sorted_nets]
+    to_route = list(order)
+    best: tuple[tuple[int, int], dict[str, NetRoute]] | None = None
+    stale = 0
+    for k in range(max(passes - 1, 0)):
+        t0 = time.monotonic()
+        pres = _PRES_SCHEDULE[min(k, len(_PRES_SCHEDULE) - 1)]
+        for i, net_id in enumerate(to_route, 1):
+            print(f"[wire] p{k} {i}/{len(to_route)} — {net_id:<40}", flush=True)
+            old = routes.pop(net_id, None)
+            if old is not None:
+                cong.remove(net_id, old)
+            try:
+                route = route_virtual(net_id, pres)
+            except Exception as e:
+                last_error[net_id] = e
+                limit = net_timeout.get(net_id, search_timeout)
+                if isinstance(e, RouteTimeout) and limit is not None:
+                    cap = final_search_timeout if final_search_timeout is not None else limit * _ROUTE_TIMEOUT_ESCALATION
+                    net_timeout[net_id] = min(limit * _ROUTE_TIMEOUT_ESCALATION, cap)
+                route = old  # reroute failed (e.g. timeout): keep the previous route, if any
+                if route is None:
+                    continue
+            else:
+                last_error.pop(net_id, None)
+            routes[net_id] = route
+            cong.add(net_id, route)
+        over = cong.overused()
+        for pos in over:
+            cong.hist[pos] += 1
+        conflicted = cong.nets_at(over) & routes.keys()
+        unrouted = [net_id for net_id in order if net_id not in routes]
+        print(f"[wire] pass {k} (pres={pres}): {len(routes)}/{len(order)} routed, "
+              f"{len(over)} overused cells, {len(conflicted)} conflicting nets, "
+              f"{time.monotonic() - t0:.1f}s", flush=True)
+        score = (len(unrouted) + len(conflicted), len(over))
+        if best is None or score < best[0]:
+            best = (score, dict(routes))
+            stale = 0
+        else:
+            stale += 1
+        if not over and not unrouted:
+            break
+        if stale >= _ROUTE_STAGNATION_PASSES:
+            break
+        to_route = [net_id for net_id in order if net_id in conflicted or net_id not in routes]
+
+    # Commit the best pass. Rebuild congestion for exactly those routes to know which are clean.
+    final_routes = best[1] if best is not None else {}
+    final_cong = Congestion()
+    for net_id, route in final_routes.items():
+        final_cong.add(net_id, route)
+    conflicted = final_cong.nets_at(final_cong.overused())
+    commit_order = sorted(final_routes, key=lambda n: (n in conflicted, net_order[n]))
+    leftovers = [net_id for net_id in order if net_id not in final_routes]
+    for net_id in commit_order:
+        if not _commit_route(workspace, rec, solid, dust_owner, inverted_cells, net_id,
+                             final_routes[net_id], net_ids):
+            last_error[net_id] = ValueError("route clashed with another net at commit")
+            leftovers.append(net_id)
+    # Claims only model same-cell use and adjacency; check the committed result for real.
+    committed = [net_id for net_id in commit_order if net_id not in leftovers]
+    bad: set[str] = set()
+    for violation in verify_signals(workspace, {n: terminals(n) for n in committed}, dust_owner,
+                                    component_cells):
+        bad |= violation.nets & set(committed)
+    for net_id in sorted(bad, key=net_order.get):
+        rip_up(rec, net_id, workspace, solid, dust_owner)
+        last_error[net_id] = ValueError("open/short after commit (verify_signals)")
+        leftovers.append(net_id)
+    print(f"[wire] committed {len(order) - len(leftovers)}/{len(order)} nets "
+          f"({len(bad)} ripped by verifier); {len(leftovers)} to hard-route", flush=True)
+    if snapshot_dir is not None:
+        save_schematic_artifact("negotiated_commit.litematic", workspace, snapshot_dir)
+
+    # Final hard pass in the real workspace: overlaps forbidden, no search timeout.
+    ws = JournalingWorkspace(workspace, rec)
+    failures: list[tuple[str, Exception]] = []
+    for net_id in sorted(leftovers, key=net_order.get):
+        print(f"[wire] final — {net_id:<40}", flush=True)
+        try:
+            with rec.recording(net_id):
+                route_net(net_by_id[net_id], ws, solid, dust_owner, inverted_cells, None, final_search_timeout)
+        except Exception as e:
+            rip_up(rec, net_id, workspace, solid, dust_owner)
+            failures.append((net_id, e))
+    for net_id, e in failures:
+        print(f"[error] unrouted net {net_id}: {e}")
+    print(f"\r[wire] done ({len(order)} nets, {len(failures)} failed)        ")
+    return failures, inverted_cells
+
+
+def _report_signal_violations(
+        workspace: Region,
+        nets: list[NetConnection],
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+        dust_owner: dict[tuple[int, int, int], str],
+        component_cells: frozenset[tuple[int, int, int]],
+        failed: set[str],
+) -> None:
+    """Print verify_signals opens/shorts for the routed nets (routing can 'succeed' yet be broken)."""
+    spec = {
+        net.net_id: (_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
+                     [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks])
+        for net in nets if net.net_id not in failed
+    }
+    violations = verify_signals(workspace, spec, dust_owner, component_cells)
+    for violation in violations:
+        print(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
+    print(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
 
 
 def _compute_critical_path(
@@ -588,7 +845,9 @@ def build_litematic_from_component_list(
         allow_routing_failures: bool = False,
         output_pin_targets: dict[str, tuple[int, int]] | None = None,
         pin_targets_space=15,
-        clock_pin: str = 'clk'
+        clock_pin: str = 'clk',
+        route_passes: int = _ROUTE_MAX_PASSES,
+        wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -618,8 +877,9 @@ def build_litematic_from_component_list(
     workspace_depth = depth
 
     workspace = Region(0, 0, 0, width, height, workspace_depth)
-    solid: set[tuple[int, int, int]] = set()
-    dust_owner: dict[tuple[int, int, int], str] = {}
+    rec = Recorder()
+    solid: set[tuple[int, int, int]] = JournaledSet(rec, name="solid")
+    dust_owner: dict[tuple[int, int, int], str] = JournaledDict(rec)
     # Keep core net routing out of the reserved extension layer at z=0.
     ws_min_z = pin_targets_space if output_pin_targets else 0
     ws_bounds = (0, 0, ws_min_z, width - 1, height - 1, depth - 1)
@@ -667,12 +927,25 @@ def build_litematic_from_component_list(
         for f in snapshot_dir.iterdir():
             f.unlink()
     sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
-    routing_failures, inverted_cells = _route_all_nets(
-        workspace, solid, dust_owner,
-        sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
-        footprint_blocked, all_terminals,
-        snapshot_dir=snapshot_dir,
-    )
+    if route_passes <= 1:
+        routing_failures, inverted_cells = _route_all_nets(
+            workspace, solid, dust_owner,
+            sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
+            footprint_blocked, all_terminals,
+            snapshot_dir=snapshot_dir,
+        )
+    else:
+        routing_failures, inverted_cells = _route_all_nets_negotiated(
+            workspace, rec, solid, dust_owner,
+            sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
+            footprint_blocked, all_terminals, route_passes,
+            component_cells=frozenset(_component_interior(placed)),
+            snapshot_dir=snapshot_dir,
+            search_timeout=wire_timeout,
+        )
+
+    _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
+                              frozenset(_component_interior(placed)), {nid for nid, _ in routing_failures})
 
     if routing_failures:
         failed = ", ".join(nid for nid, _ in routing_failures)
