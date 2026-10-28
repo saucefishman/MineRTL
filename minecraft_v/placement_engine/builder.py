@@ -929,6 +929,7 @@ def build_litematic_from_component_list(
         wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
         route_workers: int = 1,
         route_deadline: float | None = None,
+        snapshots: bool = False,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -1003,10 +1004,11 @@ def build_litematic_from_component_list(
         for p in placed
     ])
 
-    snapshot_dir = DEFAULT_SNAPSHOT_DIR
-    if snapshot_dir.exists():
-        for f in snapshot_dir.iterdir():
+    # Snapshots are slow debug output (litematic serialization); stale ones are cleared either way.
+    if DEFAULT_SNAPSHOT_DIR.exists():
+        for f in DEFAULT_SNAPSHOT_DIR.iterdir():
             f.unlink()
+    snapshot_dir = DEFAULT_SNAPSHOT_DIR if snapshots else None
     sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     if route_passes <= 1:
@@ -1063,7 +1065,8 @@ def build_litematic_from_component_list(
             else:
                 raise RuntimeError(f"Pin target routing failed: {e}")
         else:
-            save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
+            if snapshot_dir is not None:
+                save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
 
     critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace)
 

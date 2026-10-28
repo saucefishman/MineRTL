@@ -134,6 +134,8 @@ def main():
     parser.add_argument("--route-deadline", type=float, default=None,
                         help="Seconds of routing before giving up on remaining nets (writes a partial result; "
                              "use with --allow-routing-failures True)")
+    parser.add_argument("--snapshots", action="store_true",
+                        help="Save debug litematic snapshots during routing to <artifacts>/snapshots (slow)")
     args = parser.parse_args()
     print(args)
 
@@ -177,7 +179,8 @@ def main():
                                         **({"route_passes": args.route_passes} if args.route_passes is not None else {}),
                                         **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}),
                                         route_workers=args.route_workers,
-                                        route_deadline=args.route_deadline)
+                                        route_deadline=args.route_deadline,
+                                        snapshots=args.snapshots)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 
