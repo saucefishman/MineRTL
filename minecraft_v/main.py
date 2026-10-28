@@ -131,6 +131,9 @@ def main():
                              "(default: _ROUTE_SEARCH_TIMEOUT)")
     parser.add_argument("--route-workers", type=int, default=1,
                         help="Processes for negotiation passes (needs --route-passes > 1); 1 = sequential")
+    parser.add_argument("--route-deadline", type=float, default=None,
+                        help="Seconds of routing before giving up on remaining nets (writes a partial result; "
+                             "use with --allow-routing-failures True)")
     args = parser.parse_args()
     print(args)
 
@@ -173,7 +176,8 @@ def main():
                                         clock_pin=generate_clock_pin,
                                         **({"route_passes": args.route_passes} if args.route_passes is not None else {}),
                                         **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}),
-                                        route_workers=args.route_workers)
+                                        route_workers=args.route_workers,
+                                        route_deadline=args.route_deadline)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 
