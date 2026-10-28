@@ -441,29 +441,47 @@ def _find_wire_path(
                 if y + 1 <= max_bridge_y and walkable(up):
                     result.append((up, 1))
 
-        # Tower-up: 2 blocks to the side + 4 blocks up
-        for tdx, tdz in _HORIZ_DIRS:
-            if y + 4 > max_bridge_y:
+        # Tower-up: 2 blocks to the side + 4 blocks up. Everything except the path_snapshot
+        # checks depends only on the static workspace, so it's computed once per pos.
+        candidates = tower_cache.get(pos)
+        if candidates is None:
+            candidates = tower_cache[pos] = _tower_candidates(pos)
+        for tower_top, rep, rep_support, below_base in candidates:
+            if rep in path_snapshot or rep_support in path_snapshot or below_base in path_snapshot:
                 continue
+            result.append((tower_top, 8))
+        return result
+
+    tower_cache: dict[tuple[int, int, int], list[tuple[tuple[int, int, int], ...]]] = {}
+
+    def _tower_candidates(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], ...]]:
+        """Tower-up moves from pos legal against the static world: (tower_top, rep, rep_support,
+        below_base). The caller still rejects ones whose rep/rep_support/below_base are in the
+        path snapshot (below_base is None when out of bounds)."""
+        x, y, z = pos
+        out: list[tuple[tuple[int, int, int], ...]] = []
+        if y + 4 > max_bridge_y:
+            return out
+        for tdx, tdz in _HORIZ_DIRS:
             tower_top = (x + 2 * tdx, y + 4, z + 2 * tdz)
             if not walkable(tower_top):
                 continue
             rep = (x + tdx, y, z + tdz)
-            if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected or rep in path_snapshot:
+            if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected:
                 continue
             if rep in ix_non_air:
                 continue
             rep_support = (x + tdx, y - 1, z + tdz)
-            if rep_support in path_snapshot or not can_support(rep_support):
+            if not can_support(rep_support):
                 continue
             below_rep_support = (x + tdx, y - 2, z + tdz)
             rep_support_cuts_slope = False
-            for dx, dz in _HORIZ_DIRS:
-                maybe_next = (below_rep_support[0] + dx, below_rep_support[1] + 1, below_rep_support[2] + dz)
-                if _in_bounds(below_rep_support, bounds) and below_rep_support in ix_wire and \
-                    _in_bounds(maybe_next, bounds) and maybe_next in ix_wire:
-                    rep_support_cuts_slope = True
-                    break
+            if _in_bounds(below_rep_support, bounds) and below_rep_support in ix_wire:
+                for dx, dz in _HORIZ_DIRS:
+                    maybe_next = (below_rep_support[0] + dx, below_rep_support[1] + 1, below_rep_support[2] + dz)
+                    if _in_bounds(maybe_next, bounds) and maybe_next in ix_wire:
+                        rep_support_cuts_slope = True
+                        break
             if rep_support_cuts_slope:
                 continue
 
@@ -482,6 +500,8 @@ def _find_wire_path(
                         # If it's our own connection, we create a loop, if its others', we're interfering
                         col_clear = False
                         break
+                if not col_clear:
+                    break
 
             if not col_clear:
                 continue
@@ -492,10 +512,12 @@ def _find_wire_path(
                 if below_owner is not None and below_owner != net_id:
                     continue
                 # If it's our own connection, we create a loop, if its others', we're interfering
-                if below_base in ix_wire or below_base in path_snapshot:
+                if below_base in ix_wire:
                     continue
-            result.append((tower_top, 8))
-        return result
+            else:
+                below_base = None
+            out.append((tower_top, rep, rep_support, below_base))
+        return out
 
     m4_clear_cache: dict[tuple[int, int, int], bool] = {}
 
