@@ -534,6 +534,7 @@ _LAY_RETRIES = 4  # per sink: re-searches after a path that couldn't be laid (La
 _NET_RETRIES = 2  # per net: re-routes after no repeater fits a stretch
 _BLOCKER_RADIUS = 3  # nets with cells this close to a failed sink get ripped up and re-queued
 _BLOCKER_MAX = 4
+_RIP_ROUNDS = 3  # per job: rip-and-retry rounds, each for a sink that hasn't had one yet
 
 Pos = tuple[int, int, int]
 
@@ -561,8 +562,9 @@ class _GreedyRouter:
       sink's partial path and search again without the conflicting cell.
     - per job: no repeater slot on a stretch (all slopes/turns): undo the job and route it
       again with that stretch blocked, keeping clear of the job's terminals.
-    - per run: a sink search that fails is usually walled in by jobs routed earlier. Once
-      per job, rip the jobs around the failed sink, route it again, then re-queue them.
+    - per run: a sink search that fails is usually walled in by jobs routed earlier. Rip the
+      jobs around the failed sink, route it again, then re-queue them. Up to _RIP_ROUNDS
+      times per job, once per failed sink (a repeat failure at the same sink is final).
 
     A job that still fails is ripped up so its partial wire / support / repeaters don't
     block later jobs or show up as debris.
@@ -606,21 +608,21 @@ class _GreedyRouter:
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
             keep = {job.src, dst, *tree_seeds}
             while True:
-                path = _find_wire_path(
-                    ws, self.solid, self.dust_owner,
-                    job.src, dst, job.net_id,
-                    job.bounds, self.max_bridge_y,
-                    tree_seeds=tree_seeds,
-                    protected=job.protected,
-                    footprint_blocked=self.footprint_blocked,
-                    inverted_cells=frozenset(self.inverted_cells),
-                    terminal_positions=self.terminal_positions,
-                    blocked=frozenset(blocked),
-                    seed_depths=seed_depths,
-                    **job.search_kwargs,
-                )
                 mark = len(rec.journals[job.key])
                 try:
+                    path = _find_wire_path(
+                        ws, self.solid, self.dust_owner,
+                        job.src, dst, job.net_id,
+                        job.bounds, self.max_bridge_y,
+                        tree_seeds=tree_seeds,
+                        protected=job.protected,
+                        footprint_blocked=self.footprint_blocked,
+                        inverted_cells=frozenset(self.inverted_cells),
+                        terminal_positions=self.terminal_positions,
+                        blocked=frozenset(blocked),
+                        seed_depths=seed_depths,
+                        **job.search_kwargs,
+                    )
                     _lay_redstone_path(ws, self.solid, self.dust_owner, path, job.net_id,
                                        opaque_support_block=job.support_block,
                                        inverted_cells=self.inverted_cells,
@@ -683,7 +685,7 @@ class _GreedyRouter:
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
         queue = deque(enumerate(jobs, 1))
-        cleared_for: set[str] = set()
+        cleared_for: dict[str, set[Pos]] = {}  # job key -> sinks whose blockers were ripped
         ripped: set[str] = set()
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
@@ -701,10 +703,12 @@ class _GreedyRouter:
                 except Exception as e:
                     self.rip(job.key)
                     goal = self.failed_goal.get(job.key)
-                    victims = [] if goal is None or job.key in cleared_for or not rip_blockers else [
+                    cleared = cleared_for.get(job.key, set())
+                    victims = [] if goal is None or goal in cleared or len(cleared) >= _RIP_ROUNDS \
+                        or not rip_blockers else [
                         v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX]
                     if victims and not isinstance(e, LayConflict):
-                        cleared_for.add(job.key)
+                        cleared_for.setdefault(job.key, set()).add(goal)
                         log(f"{label} {job.key}: {e}; ripping {', '.join(victims)} and retrying")
                         for v in victims:
                             self.rip(v)

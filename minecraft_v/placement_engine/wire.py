@@ -136,6 +136,10 @@ def _lay_powered_minus4_move(
                 or (nx_c, y,     nz_c) in terminal_positions \
                 or (x,    y - 2, z)    in terminal_positions:
             continue
+        # Inverted cells beside a terminal would make it unwalkable (A* World.next_to_terminal).
+        if any((cx + adx, cy + ady, cz + adz) in terminal_positions
+               for cx, cy, cz in side_cells[:2] for adx, adz in _HORIZ_DIRS for ady in (-1, 0, 1)):
+            continue
         # The search picks a side from its local path snapshot, which may differ from the
         # first side that is clear right now: skip sides that later path cells (or their
         # supports) need, or the rest of the path can't be laid.

@@ -11,8 +11,9 @@ import numpy as np
 from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
+from .wire import LayConflict
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
-    _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
+    _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
 
@@ -793,6 +794,7 @@ def _find_wire_path(
     best_node = _pid(best_seed) << _NODE_SHIFT
     best_h: int = heuristic(best_seed)
     group_max_f: list[int] = [max(gh, 10) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
+    initial_group_best_h = list(group_best_h)
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
                    weight, time_limit, pos_list, h_list, expand, congestion_cost)
 
@@ -809,6 +811,12 @@ def _find_wire_path(
             pos_ids, pos_list, h_list, move_cache)
 
     reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world)
+    if reached is None and early_stop_reason is None and h_radius_pruned:
+        # The open list ran dry only because the h-radius cull discarded detours (typically a
+        # blocked approach close to the goal): search again without the cull.
+        group_best_h[:] = initial_group_best_h
+        reached, best_node, _, early_stop_reason, came_from = _run_search(
+            search_args, net_id, make_world, h_radius_factor=0)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -856,7 +864,8 @@ def _check_tower_self_overlap(path: list[tuple[int, int, int]], net_id: str) -> 
         cells = [(rx, y, rz), (rx, y + 1, rz)] + [(bx, y + cdy, bz) for cdy in range(4)]
         for c in cells:
             if c in path_cells:
-                raise ValueError(f"Tower move {(x, y, z)} -> {(bx, by, bz)} for net {net_id} overlaps its own path at {c}")
+                raise LayConflict(f"Tower move {(x, y, z)} -> {(bx, by, bz)} for net {net_id} overlaps its own path at {c}",
+                                  (c,))
 
 
 def _search_py(seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
@@ -1033,8 +1042,8 @@ else:
     if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
         atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
     _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
-                _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN, _SIG_SHIFT,
-                _REPEATER_INTERVAL)
+                _ROUTE_MAX_EXPANSIONS, _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN,
+                _SIG_SHIFT, _REPEATER_INTERVAL)
 
 _check_stats = {"searches": 0, "py": 0.0, "kernel": 0.0}
 
@@ -1070,18 +1079,19 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-def _run_search(args: tuple, net_id: str, make_world):
+def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1):
+    """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
     if _astar is None or _ASTAR_MODE == "py":
         return _search_py(*args)
     world = make_world()
     if _ASTAR_MODE == "kernel":
-        return _astar.search(*args, world)
+        return _astar.search(*args, world, h_radius_factor=h_radius_factor)
     # check: both loops from the same start state (group_best_h is updated in place).
     group_best_h = args[3]
     t0 = time.perf_counter()
     ref = _search_py(*args[:3], list(group_best_h), *args[4:])
     t1 = time.perf_counter()
-    got = _astar.search(*args, world, True)
+    got = _astar.search(*args, world, True, h_radius_factor=h_radius_factor)
     t2 = time.perf_counter()
     timed_out = any(r[3] is not None and r[3].startswith("timeout") for r in (ref, got))
     if not timed_out:
