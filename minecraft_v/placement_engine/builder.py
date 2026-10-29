@@ -26,7 +26,7 @@ from .layout import (
 )
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
-from .pathfinding import RouteTimeout, _BlockIndex, _find_wire_path
+from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -360,21 +360,68 @@ def _compute_net_protected(
     """Cells (terminal + 1-cell horiz buffer) of every other net — hard-blocked for routing."""
     cells: set[tuple[int, int, int]] = set()
     for other_id, terminals in all_terminals.items():
-        if other_id == net_id:
-            continue
-        for tx, ty, tz in terminals:
-            cells.add((tx, ty, tz))
-            cells.add((tx, ty + 1, tz))
-            for dx, dz in _HORIZ_DIRS:
-                for dy in range(-2, 3):
-                    cells.add((tx + dx, ty + dy, tz + dz))
-            for dz in range(3):
-                for dy in range(-1, 1):
-                    cells.add((tx, ty + dy, tz + dz))
-            for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-                for dy in range(-2, 2):
-                    cells.add((tx + dx, ty, tz + dz))
+        if other_id != net_id:
+            cells |= _terminal_keepout(terminals)
     return frozenset(cells)
+
+
+def _terminal_keepout(terminals: set[tuple[int, int, int]]) -> set[tuple[int, int, int]]:
+    """One net's terminal keepout cells (what _compute_net_protected unions over other nets)."""
+    cells: set[tuple[int, int, int]] = set()
+    for tx, ty, tz in terminals:
+        cells.add((tx, ty, tz))
+        cells.add((tx, ty + 1, tz))
+        for dx, dz in _HORIZ_DIRS:
+            for dy in range(-2, 3):
+                cells.add((tx + dx, ty + dy, tz + dz))
+        for dz in range(3):
+            for dy in range(-1, 1):
+                cells.add((tx, ty + dy, tz + dz))
+        for dx, dz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            for dy in range(-2, 2):
+                cells.add((tx + dx, ty, tz + dz))
+    return cells
+
+
+class _ForeignKeepout:
+    """_compute_net_protected(net_id, ...) as a lazy view over a per-cell net count.
+
+    Materializing every other net's keepout per net is quadratic in net count; this answers
+    `pos in protected` (and `protected - cells`, as _find_wire_path uses it) without copying.
+    """
+    __slots__ = ("_count", "_own", "_excluded")
+
+    def __init__(self, count: dict[tuple[int, int, int], int], own: set[tuple[int, int, int]],
+                 excluded: frozenset[tuple[int, int, int]] = frozenset()):
+        self._count = count
+        self._own = own
+        self._excluded = excluded
+
+    def __contains__(self, pos) -> bool:
+        n = self._count.get(pos, 0)
+        if n == 0 or (n == 1 and pos in self._own):
+            return False
+        return pos not in self._excluded
+
+    def __sub__(self, other) -> _ForeignKeepout:
+        return _ForeignKeepout(self._count, self._own, self._excluded | frozenset(other))
+
+    def __iter__(self):
+        return (pos for pos in self._count if pos in self)
+
+
+class _KeepoutMap:
+    """Per-net terminal keepouts, computed once; for_net(n) == _compute_net_protected(n, ...)."""
+
+    def __init__(self, all_terminals: dict[str, set[tuple[int, int, int]]]):
+        self._own = {net_id: _terminal_keepout(t) for net_id, t in all_terminals.items()}
+        self._count: dict[tuple[int, int, int], int] = {}
+        for cells in self._own.values():
+            for pos in cells:
+                self._count[pos] = self._count.get(pos, 0) + 1
+
+    def for_net(self, net_id: str) -> _ForeignKeepout:
+        return _ForeignKeepout(self._count, self._own.get(net_id, set()))
 
 
 def _net_sort_key(
@@ -405,6 +452,9 @@ def _route_all_nets(
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
     inverted_cells: set[tuple[int, int, int]] = set()
+    keepouts = _KeepoutMap(all_terminals)
+    region = workspace
+    workspace = IndexedWorkspace(region)  # all writes below go through this, keeping its index current
     for net_idx, net in enumerate(sorted_nets, 1):
         if deadline is not None and time.monotonic() > deadline:
             routing_failures.append((net.net_id, ValueError("route deadline reached")))
@@ -412,7 +462,7 @@ def _route_all_nets(
         print(f"[wire] {net_idx}/{total_nets} — {net.net_id:<40}", flush=True)
         try:
             src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
-            protected = _compute_net_protected(net.net_id, all_terminals)
+            protected = keepouts.for_net(net.net_id)
             net_ordered_paths: list[list[tuple[int, int, int]]] = []
             dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
             sorted_pins = sorted(dst_pins,
@@ -446,7 +496,7 @@ def _route_all_nets(
             print(f"\n[error] skipped net {net.net_id}: {e}")
         if snapshot_dir is not None and net_idx % 10 == 0:
             safe_id = net.net_id.replace("/", "_").replace("\\", "_")
-            save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", workspace, snapshot_dir)
+            save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", region, snapshot_dir)
     print(f"\r[wire] done ({total_nets} nets, {len(routing_failures)} failed)        ")
     return routing_failures, inverted_cells
 
@@ -555,9 +605,11 @@ def _route_all_nets_negotiated(
         return (_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
                 [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks])
 
+    keepouts = _KeepoutMap(all_terminals)
+
     def route_net(net: NetConnection, ws, solid_view, owner_view, inverted, congestion_cost, time_limit):
         src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
-        protected = _compute_net_protected(net.net_id, all_terminals)
+        protected = keepouts.for_net(net.net_id)
         net_ordered_paths: list[list[tuple[int, int, int]]] = []
         dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
         sorted_pins = sorted(dst_pins,
