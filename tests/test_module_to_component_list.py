@@ -1,5 +1,6 @@
 import pytest
 
+from minecraft_v.cell_library import SCHEMATIC_MAP
 from minecraft_v.main import module_to_component_list
 from minecraft_v.models import Cell, Module, Port
 from minecraft_v.placement_engine.ir import (
@@ -90,7 +91,7 @@ class TestCellMapping:
         result = module_to_component_list(mod)
         comp = _comp(result, "u1")
         assert comp.type == ComponentType.AND
-        assert comp.footprint.width == 3
+        assert comp.footprint.width == 4
         assert comp.footprint.depth == 3
 
     def test_and_pin_sides(self):
@@ -146,7 +147,7 @@ class TestCellMapping:
         comp = _comp(result, "ffe")
         assert comp.type == ComponentType.DFFE
         assert comp.footprint.width == 7
-        assert comp.footprint.depth == 3
+        assert comp.footprint.depth == 4
         assert _pin(comp, "E").side == CardinalDirection.EAST
 
     def test_mux_cell(self):
@@ -175,8 +176,9 @@ class TestCellMapping:
         result = module_to_component_list(mod)
         comp = _comp(result, "fa")
         assert comp.type == ComponentType.FULL_ADDER
-        # no port_directions → no pins emitted, but component still present
-        assert comp.pins == []
+        # no port_directions → pins and their directions come from the schematic
+        assert {p.name: p.direction for p in comp.pins} == {
+            p.name: p.direction for p in SCHEMATIC_MAP[ComponentType.FULL_ADDER].pins}
 
     def test_unknown_cell_type_raises(self):
         mod = _make_module(cells={
