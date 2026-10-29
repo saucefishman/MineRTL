@@ -649,8 +649,11 @@ cdef class World:
                     and self.inb(mx, y, mz)
                     and not (self.cell(mx, y, mz).val & F_NONAIR)
                 )
+                # The mid -> dest dust step also needs the cell above dest open.
                 mid_dn_ok = (
                     above_clear
+                    and self.inb(nx2, y - 1, nz2)
+                    and not (self.cell(nx2, y - 1, nz2).val & F_NONAIR)
                     and not (self.cell(mx, my, mz).val & F_PROT)
                     and not (self.cell(mx, my, mz).val & F_FP)
                     and self.inb(mx, my, mz)
