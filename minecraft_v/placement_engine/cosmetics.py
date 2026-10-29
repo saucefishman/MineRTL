@@ -73,3 +73,49 @@ def place_io_signs(region: Region, signs: list[tuple[Pos, tuple[int, int], str]]
         }))
         te.position = pos
         region.tile_entities.append(te)
+
+
+def place_io_fixtures(region: Region, fixtures: list[tuple[Pos, tuple[int, int], bool]]) -> int:
+    """Redstone lamp past each output repeater, stone + lever behind each input repeater.
+
+    `fixtures` is (repeater cell, outward direction, is_input). A fixture is skipped when its
+    cells aren't free or any neighbour carries other redstone parts (it would power or be
+    powered by them). Returns the number placed.
+    """
+    parts = ("redstone_wire", "repeater", "comparator", "torch", "lever", "redstone_block", "lamp")
+
+    def free(p: Pos) -> bool:
+        return all(0 <= c < n for c, n in zip(p, (region.width, region.height, region.length))) \
+            and region[p].id == "minecraft:air"
+
+    def quiet(p: Pos, ignore: set[Pos]) -> bool:
+        for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+            q = (p[0] + dx, p[1] + dy, p[2] + dz)
+            if q in ignore or not (0 <= q[0] < region.width and 0 <= q[1] < region.height
+                                   and 0 <= q[2] < region.length):
+                continue
+            if any(m in region[q].id for m in parts):
+                return False
+        return True
+
+    placed = 0
+    for (x, y, z), (nx, nz), is_input in fixtures:
+        if is_input:
+            base = (x + nx, y, z + nz)
+            lever = (base[0], y + 1, base[2])
+            if not (free(base) and free(lever)):
+                continue
+            ignore = {(x, y, z), base, lever}
+            if not (quiet(base, ignore) and quiet(lever, ignore)):
+                continue
+            region[base] = BlockState("minecraft:stone")
+            region[lever] = BlockState(
+                "minecraft:lever", face="floor", facing=_DIR_NAME[(nx, nz)], powered="false",
+            )
+        else:
+            lamp = (x + nx, y, z + nz)
+            if not free(lamp) or not quiet(lamp, {(x, y, z), lamp}):
+                continue
+            region[lamp] = BlockState("minecraft:redstone_lamp", lit="false")
+        placed += 1
+    return placed

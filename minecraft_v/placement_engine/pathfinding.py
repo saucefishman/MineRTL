@@ -11,6 +11,7 @@ import numpy as np
 from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
+from .wire import LayConflict
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
     _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
@@ -856,7 +857,9 @@ def _check_tower_self_overlap(path: list[tuple[int, int, int]], net_id: str) -> 
         cells = [(rx, y, rz), (rx, y + 1, rz)] + [(bx, y + cdy, bz) for cdy in range(4)]
         for c in cells:
             if c in path_cells:
-                raise ValueError(f"Tower move {(x, y, z)} -> {(bx, by, bz)} for net {net_id} overlaps its own path at {c}")
+                # A LayConflict, so the router searches again without the overlapped cell.
+                raise LayConflict(f"Tower move {(x, y, z)} -> {(bx, by, bz)} for net {net_id} overlaps its own path at {c}",
+                                  (c, (bx, by, bz)))
 
 
 def _search_py(seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,

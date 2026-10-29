@@ -259,3 +259,35 @@ def test_sa_mirror_moves_keep_cost_consistent():
     st.restore(snap)
     assert gid in st.mirrored
     assert st.cost == pytest.approx(st.full_recompute(refresh_io=True))
+
+
+def test_undo_restores_state_exactly():
+    comp, y_level, _ = _setup()
+    st = _state(comp, y_level)
+    rng = random.Random(5)
+    kinds = list(anneal._PLACE_MOVE_WEIGHTS)
+    weights = list(anneal._PLACE_MOVE_WEIGHTS.values())
+    for _ in range(500):
+        mv = st.propose(rng, kinds, weights, 4)
+        if mv is None:
+            continue
+        before = (st.snapshot(), dict(st.pos), list(st.net_cost), st.cost)
+        st.apply(*mv)
+        st.undo()
+        assert (st.snapshot(), dict(st.pos), list(st.net_cost), st.cost) == before
+        st.apply(*mv)
+        st.commit()
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_anneal_cost_is_true_cost(seed):
+    """Final state's cost is its recomputed (fresh IO/Z) cost and no worse than the seed's."""
+    comp, y_level, _ = _setup()
+    st = _state(comp, y_level)
+    anneal._barycenter(st)
+    anneal._greedy_mirror(st)
+    seed_cost = st.cost
+    anneal._anneal(st, random.Random(seed), y_moves=True, z_moves=True)
+    final = st.cost
+    assert final <= seed_cost + 1e-9
+    assert final == pytest.approx(st.full_recompute(refresh_io=True))

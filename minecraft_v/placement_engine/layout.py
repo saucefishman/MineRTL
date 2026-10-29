@@ -510,7 +510,7 @@ def _pack_layout(
 
     placed: list[_Placed] = []
     x_cursors: dict[tuple[int, int], int] = {}
-    max_layer_width = max(layer_widths.values())
+    max_layer_width = max(layer_widths.values(), default=0)
 
     # Place gates first so their X positions are known for IO optimisation.
     for layer_idx in layer_order:
@@ -555,6 +555,6 @@ def _compute_workspace_dims(
         max_y = max(max_y, oy + fp.height)
         max_z = max(max_z, oz + fp.depth)
     width = max_x + io_margin
-    depth = max_z + 1  # +1 so the I/O repeater fits at depth-1; shadow falls out of bounds
+    depth = max_z + 2  # I/O repeater at max_z, with the input lever's stone behind it
     height = max_y + routing_headroom + io_margin
     return (width, height, depth)

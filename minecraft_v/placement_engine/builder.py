@@ -37,7 +37,7 @@ from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
-from .cosmetics import apply_dust_shapes, place_io_signs
+from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
 from .verify import verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
@@ -179,11 +179,17 @@ def _place_io_repeaters(
         solid: set[tuple[int, int, int]],
         pin_world_map: dict[tuple[str, str], tuple[int, int, int]],
         ws_bounds: tuple[int, int, int, int, int, int],
+        clock_pin: str | None = None,
 ) -> tuple[set[tuple[int, int, int]], dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]],
-           list[tuple[tuple[int, int, int], tuple[int, int], str]]]:
-    """Place I/O repeaters and return (all repeater cells, output target lookup, sign specs)."""
+           list[tuple[tuple[int, int, int], tuple[int, int], str]],
+           list[tuple[tuple[int, int, int], tuple[int, int], bool]]]:
+    """Place I/O repeaters and return (all repeater cells, output target lookup, sign specs, fixture specs).
+
+    The clock input (`clock_pin`, or a pin named `clk`) gets no lever: it is driven by a clock.
+    """
     io_repeater_cells: set[tuple[int, int, int]] = set()
     io_signs: list[tuple[tuple[int, int, int], tuple[int, int], str]] = []
+    io_fixtures: list[tuple[tuple[int, int, int], tuple[int, int], bool]] = []
     output_repeater_lookup: dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]] = {}
     for item in placed:
         c = item.component
@@ -203,12 +209,15 @@ def _place_io_repeaters(
             io_repeater_cells.add(cell)
             nx, _, nz = _SIDE_NORMAL[side.value]
             io_signs.append((cell, (nx, nz), pin.name))
+            is_input = c.type == ComponentType.INPUT_PIN
+            if not (is_input and c.id in (clock_pin, 'clk')):
+                io_fixtures.append((cell, (nx, nz), is_input))
             if c.type == ComponentType.OUTPUT_PIN:
                 side_name = side.value
                 endpoint = (c.id, pin.name)
                 for key in (c.id, pin.name, f"{c.id}.{pin.name}"):
                     output_repeater_lookup[key] = (cell, side_name, endpoint)
-    return io_repeater_cells, output_repeater_lookup, io_signs
+    return io_repeater_cells, output_repeater_lookup, io_signs, io_fixtures
 
 
 def _route_output_pin_extensions(
@@ -275,10 +284,33 @@ def _route_output_pin_extensions(
             zone.add((rx + dx, ry, rz + dz))
         return frozenset(zone)
 
+    def _approach_zone(target: tuple[int, int, int]) -> frozenset[tuple[int, int, int]]:
+        """A target's straight approach (the +z cells limit_exclusions relieves for its own job)
+        plus the cells where foreign wire would make it unwalkable (_wire_walkable checks 2-3).
+        Targets sit on a 3-pitch grid: without this, one extension running across the face of
+        the grid at z=2 cuts off a whole row of targets."""
+        tx, ty, tz = target
+        zone: set[tuple[int, int, int]] = set()
+        for k in range(1, _EXT_APPROACH_CORRIDOR + 1):
+            cz = tz + k
+            zone |= {(tx, ty, cz), (tx, ty + 1, cz), (tx, ty - 1, cz)}
+            for dx, dz in _HORIZ_DIRS:
+                for dy in (-1, 0, 1):
+                    zone.add((tx + dx, ty + dy, cz + dz))
+        return frozenset(zone)
+
+    approach_zones = {pn: _approach_zone(t) for pn, t in ext_target_positions.items()}
+
     all_terminal_positions = frozenset(
         pos for ts in (all_terminals or {}).values() for pos in ts) | all_ext_targets
+    # Nearest-in-height first: a wire to a far target passes the nearer targets' heights, so
+    # it goes around their (already laid) approaches instead of the nearer ones being walled
+    # in by it (video: sources above the target grid, low bits descended across high bits').
+    def _ext_height_gap(pn: str) -> int:
+        return abs(ext_target_positions[pn][1] - repeater_cells_by_pin[pn][1])
+
     jobs: list[_RouteJob] = []
-    for pin_name in sorted(output_pin_targets, key=lambda pn: ext_target_positions[pn][1]):
+    for pin_name in sorted(output_pin_targets, key=_ext_height_gap):
         repeater_cell, side_name, endpoint = output_repeater_lookup[pin_name]
         base_net_id = net_id_by_output_endpoint.get(endpoint)
         if base_net_id is None:
@@ -293,10 +325,16 @@ def _route_output_pin_extensions(
         target = ext_target_positions[pin_name]
         protected = _compute_net_protected(base_net_id, all_terminals) if all_terminals else frozenset()
         # Other output pin targets and their source repeaters act as foreign terminals.
+        corridors: set[tuple[int, int, int]] = set()
         for other_pin, rc in repeater_cells_by_pin.items():
             if other_pin != pin_name:
                 protected = protected | _repeater_protection_zone(rc) | _repeater_protection_zone(
                     ext_target_positions[other_pin])
+                corridors |= approach_zones[other_pin]
+        # Other targets' approaches stay blocked inside this target's goal relief too (the
+        # rows above/below are 3 away, inside its dy -2..2 relief).
+        protected = _ForeignKeepout({pos: 1 for pos in protected}, set()).with_extra(
+            corridors - approach_zones[pin_name])
         jobs.append(_RouteJob(
             key=f"{base_net_id}>{pin_name}", net_id=base_net_id,
             src=launch, sinks=[target], bounds=ext_bounds,
@@ -308,7 +346,8 @@ def _route_output_pin_extensions(
     router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                            all_terminal_positions, paths=net_paths)
     # Targets sit on a tight grid in one layer: ripping neighbours there cascades (runner SA
-    # seed 3: 5 rip rounds, 44s) without routing more pins, so that layer is off here.
+    # seed 3: 5 rip rounds, 44s; video: 5 -> 7 failed even ripping just the jobs crossing a
+    # failed target's approach column) without routing more pins, so that layer is off here.
     failures = router.run(jobs, "[ext]", rip_blockers=False)
     print(f"[ext] done ({len(jobs)} extensions, {len(failures)} failed)")
     return failures
@@ -333,8 +372,11 @@ def _build_footprint_blocked(
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         io_repeater_cells: set[tuple[int, int, int]],
         const_positions: set[tuple[int, int, int]],
+        io_fixtures: list[tuple[tuple[int, int, int], tuple[int, int], bool]] = (),
+        block_output_lamps: bool = True,
 ) -> frozenset[tuple[int, int, int]]:
-    """Hard-block zone: footprint interiors + expanded borders + IO repeater tops + const air-gaps."""
+    """Hard-block zone: footprint interiors + expanded borders + IO repeater tops + const air-gaps
+    + the lever/lamp cells (and their neighbours) behind input / in front of output repeaters."""
     fp_interior = _component_interior(placed)
     fp_expanded: set[tuple[int, int, int]] = set(fp_interior)
     for cx, cy, cz in fp_interior:
@@ -347,6 +389,14 @@ def _build_footprint_blocked(
             fp_expanded.add((cx + ddx, cy - 1, cz + ddz))
     for rx, ry, rz in io_repeater_cells:
         fp_expanded.add((rx, ry + 1, rz))
+    for (rx, ry, rz), (nx, nz), is_input in io_fixtures:
+        if not is_input and not block_output_lamps:
+            continue  # output extensions start in front of the repeater
+        fixture = [(rx + nx, ry, rz + nz)] + ([(rx + nx, ry + 1, rz + nz)] if is_input else [])
+        for fx, fy, fz in fixture:
+            fp_expanded.add((fx, fy, fz))
+            for ddx, ddy, ddz in _DIRS_6:
+                fp_expanded.add((fx + ddx, fy + ddy, fz + ddz))
     # Air-gap const redstone blocks: block all 6 immediate neighbors
     for rbx, rby, rbz in const_positions:
         for ddx, ddy, ddz in _DIRS_6:
@@ -400,6 +450,7 @@ def _terminal_keepout(terminals: set[tuple[int, int, int]]) -> set[tuple[int, in
 
 
 _APPROACH_CORRIDOR = 2  # cells reserved straight out from each gate pin's terminal
+_EXT_APPROACH_CORRIDOR = 3  # same for output pin targets (limit_exclusions relieves z+1..3)
 
 
 def _terminal_halo(
@@ -540,7 +591,7 @@ class _GreedyRouter:
     - per job: no repeater slot on a stretch (all slopes/turns): undo the job and route it
       again with that stretch blocked, keeping clear of the job's terminals.
     - per run: a sink search that fails is usually walled in by jobs routed earlier. Once
-      per job, rip the jobs around the failed sink, route it again, then re-queue them.
+      per (job, sink), rip the jobs around the failed sink, route it again, then re-queue them.
 
     A job that still fails is ripped up so its partial wire / support / repeaters don't
     block later jobs or show up as debris.
@@ -584,21 +635,21 @@ class _GreedyRouter:
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
             keep = {job.src, dst, *tree_seeds}
             while True:
-                path = _find_wire_path(
-                    ws, self.solid, self.dust_owner,
-                    job.src, dst, job.net_id,
-                    job.bounds, self.max_bridge_y,
-                    tree_seeds=tree_seeds,
-                    protected=job.protected,
-                    footprint_blocked=self.footprint_blocked,
-                    inverted_cells=frozenset(self.inverted_cells),
-                    terminal_positions=self.terminal_positions,
-                    blocked=frozenset(blocked),
-                    seed_depths=seed_depths,
-                    **job.search_kwargs,
-                )
                 mark = len(rec.journals[job.key])
                 try:
+                    path = _find_wire_path(
+                        ws, self.solid, self.dust_owner,
+                        job.src, dst, job.net_id,
+                        job.bounds, self.max_bridge_y,
+                        tree_seeds=tree_seeds,
+                        protected=job.protected,
+                        footprint_blocked=self.footprint_blocked,
+                        inverted_cells=frozenset(self.inverted_cells),
+                        terminal_positions=self.terminal_positions,
+                        blocked=frozenset(blocked),
+                        seed_depths=seed_depths,
+                        **job.search_kwargs,
+                    )
                     _lay_redstone_path(ws, self.solid, self.dust_owner, path, job.net_id,
                                        opaque_support_block=job.support_block,
                                        inverted_cells=self.inverted_cells,
@@ -661,12 +712,13 @@ class _GreedyRouter:
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
         queue = deque(enumerate(jobs, 1))
-        cleared_for: set[str] = set()
+        cleared_for: set[tuple[str, Pos]] = set()  # (job key, sink) whose blockers were ripped
+        requeued: set[str] = set()
         ripped: set[str] = set()
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
                 i, job = queue.popleft()
-                bar.update(n=0 if job.key in ripped or job.key in cleared_for else 1, info=job.key)
+                bar.update(n=0 if job.key in ripped or job.key in requeued else 1, info=job.key)
                 if deadline is not None and time.monotonic() > deadline:
                     if fail_fast:
                         raise RuntimeError(f"Routing failed for net {job.key}: route deadline reached")
@@ -679,10 +731,11 @@ class _GreedyRouter:
                 except Exception as e:
                     self.rip(job.key)
                     goal = self.failed_goal.get(job.key)
-                    victims = [] if goal is None or job.key in cleared_for or not rip_blockers else [
+                    victims = [] if goal is None or (job.key, goal) in cleared_for or not rip_blockers else [
                         v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX]
                     if victims and not isinstance(e, LayConflict):
-                        cleared_for.add(job.key)
+                        cleared_for.add((job.key, goal))
+                        requeued.add(job.key)
                         log(f"{label} {job.key}: {e}; ripping {', '.join(victims)} and retrying")
                         for v in victims:
                             self.rip(v)
@@ -1214,7 +1267,7 @@ def build_litematic_from_component_list(
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
         output_pin_targets: dict[str, tuple[int, int]] | None = None,
-        pin_targets_space=15,
+        pin_targets_space=50,
         clock_pin: str = 'clk',
         route_passes: int = _ROUTE_MAX_PASSES,
         wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
@@ -1251,6 +1304,12 @@ def build_litematic_from_component_list(
             _Placed(component=p.component, origin=(p.origin[0], p.origin[1], p.origin[2] + pin_targets_space))
             for p in placed
         ]
+    else:
+        # One free layer in front of the output repeaters, for their lamps.
+        placed = [
+            _Placed(component=p.component, origin=(p.origin[0], p.origin[1], p.origin[2] + 1))
+            for p in placed
+        ]
     work_nets = comp.nets
 
     if workspace_size is None:
@@ -1279,7 +1338,8 @@ def build_litematic_from_component_list(
     const_positions = _place_const_sources(workspace, placed, solid)
     max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
     pin_world_map, pin_terminal, terminal_approach = _compute_pin_maps(placed)
-    io_repeater_cells, output_repeater_lookup, io_signs = _place_io_repeaters(workspace, placed, solid, pin_world_map, io_bounds)
+    io_repeater_cells, output_repeater_lookup, io_signs, io_fixtures = _place_io_repeaters(
+        workspace, placed, solid, pin_world_map, io_bounds, clock_pin)
     output_component_ids = {c.id for c in comp.components if c.type == ComponentType.OUTPUT_PIN}
     net_id_by_output_endpoint: dict[tuple[str, str], str] = {
         (sink.component_id, sink.pin_name): net.net_id
@@ -1287,7 +1347,9 @@ def build_litematic_from_component_list(
         for sink in net.sinks
         if sink.component_id in output_component_ids
     }
-    footprint_blocked = _build_footprint_blocked(placed, pin_terminal, io_repeater_cells, const_positions)
+    footprint_blocked = _build_footprint_blocked(
+        placed, pin_terminal, io_repeater_cells, const_positions, io_fixtures, block_output_lamps=not output_pin_targets,
+    )
     all_terminals = _build_terminal_map(work_nets, pin_terminal)
 
     save_artifact("component_layout.json", [
@@ -1389,6 +1451,7 @@ def build_litematic_from_component_list(
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
     apply_dust_shapes(workspace)
     place_io_signs(workspace, io_signs)
+    place_io_fixtures(workspace, io_fixtures)
 
     regions = {'main': workspace}
 
