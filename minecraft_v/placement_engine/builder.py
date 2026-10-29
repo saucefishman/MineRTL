@@ -1223,7 +1223,7 @@ def build_litematic_from_component_list(
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
     y_stride = max_comp_height + additional_component_height_spacing
-    y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride)
+    y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride, clock_pin=clock_pin)
     if placer == "legacy":
         placed = _layout_components(
             comp.components, comp.nets,
@@ -1236,6 +1236,7 @@ def build_litematic_from_component_list(
             placer=placer, base_y=base_y, gutter=gutter,
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
             y_moves=place_y_moves, z_moves=place_z_moves, seed=place_seed,
+            clock_pin=clock_pin,
         )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
