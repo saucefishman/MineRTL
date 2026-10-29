@@ -46,7 +46,8 @@ def run_example(example: str, cap: float, extra: list[str], out_root: Path) -> s
     verify = re.findall(r"\[verify\] (\d+) violation", text)
     unsupported = re.findall(r"\[verify\] (\d+) unsupported", text)
     routed = f"{done[-1][1]}/{done[-1][0]} failed" if done else "-"
-    violations = f"{verify[-1]} verify violations" if verify else ""
+    # verify summaries are printed only when nonzero
+    violations = f"{verify[-1] if verify else 0} verify violations" if done else ""
     if unsupported and unsupported[-1] != "0":
         violations += f", {unsupported[-1]} unsupported"
     error = ""

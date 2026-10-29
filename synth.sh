@@ -63,7 +63,7 @@ if [[ -f "$default_pin_targets_json" && "$has_output_pin_targets_flag" == false 
     set -- "$@" --output-pin-targets-json "$default_pin_targets_json"
 fi
 
-yosys -p "
+yosys -q -p "
 read_verilog -sv ${dir}/*.v
 hierarchy -top main
 proc

@@ -774,19 +774,13 @@ def _find_wire_path(
     path: list[tuple[int, int, int]] = []
     back_visited = set()
     cur = reached
-    duplicate = False
     while cur != _NO_PARENT:
         if cur in back_visited:
             raise ValueError("Path tracing resulted in loop")
         cur_pos = pos_list[cur >> _NODE_SHIFT]
-        if cur_pos in path:
-            duplicate = True
         path.append(cur_pos)
         back_visited.add(cur)
         cur = came_from[cur]
-    if duplicate:
-        print("patch contains duplicates:")
-        print(path)
     path.reverse()
     if not tree_seeds and path[0] != start:
         raise ValueError(f"Path for net {net_id} does not begin at start {start}; begins at {path[0]}")

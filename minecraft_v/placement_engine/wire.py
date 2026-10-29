@@ -346,7 +346,6 @@ def _place_repeaters_for_net(
     # reset point to pos. Prepended to tree-seed paths so the backward cap search can
     # reach viable repeater positions in the already-laid upstream wire.
     upstream_seg: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
-    hit_first_path = False
 
     for orig_path in ordered_paths:
         path: list[tuple[int, int, int]] = list(orig_path)
@@ -354,10 +353,6 @@ def _place_repeaters_for_net(
         # Prepend upstream segment so the cap search can look back into prior wire.
         if start in upstream_seg and len(upstream_seg[start]) > 1:
             path = upstream_seg[start][:-1] + path  # upstream[:-1] avoids duplicating start
-        else:
-            if hit_first_path:
-                print('warn: appparently hit first path more than once, repeater placement may be incorrect')
-            hit_first_path = True
 
 
         reset_depth = 0 # path will always start at reset location
