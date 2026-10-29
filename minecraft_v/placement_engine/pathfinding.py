@@ -264,8 +264,12 @@ def _find_wire_path(
         x_h_factor=1,
         congestion_cost: Callable[[tuple[int, int, int]], float] | None = None,
         time_limit: float | None = None,
+        blocked: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
     """A* wire route from start to goal.
+
+    blocked: extra cells the path must not use, even inside the goal's relief zone (a
+    retry after a path that couldn't be laid, see wire.LayConflict).
 
     congestion_cost: extra cost per path cell (negotiated-congestion routing: other nets'
     usage + history). Excluded from the f-cap budget.
@@ -285,6 +289,9 @@ def _find_wire_path(
             goal_exclusion.add((gx + _dx, gy + _dy, gz + _dz))
     goal_exclusion.add((gx, gy - 1, gz))
     effective_protected = protected - goal_exclusion
+    if blocked:
+        protected = _with_blocked(protected, blocked)
+        effective_protected = _with_blocked(effective_protected, blocked)
 
     sx, sy, sz = start
 
@@ -997,12 +1004,18 @@ def _came_from_chain(came_from, node: int) -> list[int]:
     return chain
 
 
+def _with_blocked(keepout, blocked: frozenset[tuple[int, int, int]]):
+    if hasattr(keepout, "with_extra"):  # builder._ForeignKeepout
+        return keepout.with_extra(blocked)
+    return frozenset(keepout) | blocked
+
+
 def _keepout_spec(keepout) -> tuple | None:
     """A protected-cells container in a form the kernel reads directly, or None if unsupported."""
     if isinstance(keepout, (set, frozenset)):
         return ("set", keepout)
     if hasattr(keepout, "_count"):  # builder._ForeignKeepout
-        return ("keepout", keepout._count, keepout._own, keepout._excluded)
+        return ("keepout", keepout._count, keepout._own, keepout._excluded, keepout._extra)
     return None
 
 

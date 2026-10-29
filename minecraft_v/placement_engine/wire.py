@@ -8,6 +8,17 @@ from .constants import (
 from .block_utils import _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
 
 
+class LayConflict(ValueError):
+    """A searched path that can't be laid as-is (e.g. it crosses its own support or wire).
+
+    cells: path cells whose exclusion would let a re-search avoid the conflict, best first.
+    """
+
+    def __init__(self, msg: str, cells: tuple[tuple[int, int, int], ...]):
+        super().__init__(msg)
+        self.cells = cells
+
+
 def _place_support(
         workspace: Region,
         solid: set[tuple[int, int, int]],
@@ -23,7 +34,8 @@ def _place_support(
     if below in solid:
         return True
     elif not _is_air(workspace[x, y - 1, z]):
-        raise ValueError(f"Unable to place support at {(x, y - 1, z)} - block {workspace[x, y - 1, z]} is in the way.")
+        raise LayConflict(f"Unable to place support at {(x, y - 1, z)} - block {workspace[x, y - 1, z]} is in the way.",
+                          (cell, below))
     is_stair = (
         y >= 2
         and _is_redstone_wire(workspace[x, y - 2, z])
@@ -49,10 +61,10 @@ def _lay_dust_cell(
     if _is_redstone_wire(existing) or _is_torch(existing):
         owner = dust_owner.get(pos)
         if owner is not None and owner != net_id:
-            raise ValueError(f"Dust collision at {pos} for nets {owner} vs {net_id}")
+            raise LayConflict(f"Dust collision at {pos} for nets {owner} vs {net_id}", (pos,))
         return
     elif not _is_air(existing):
-        raise ValueError(f"Tried to redstone over an existing block ({existing}) at {pos}")
+        raise LayConflict(f"Tried to redstone over an existing block ({existing}) at {pos}", (pos, (x, y + 1, z)))
     workspace[x, y, z] = REDSTONE
     dust_owner[pos] = net_id
     _place_support(workspace, solid, dust_owner, net_id, pos, opaque_support_block)
@@ -87,6 +99,7 @@ def _lay_powered_minus4_move(
         inverted_cells: set[tuple[int, int, int]] | None = None,
         goal: tuple[int, int, int] | None = None,
         terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
+        path_cells: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> None:
     """Lay a powered -4 move via two wall torch inversions.
 
@@ -123,6 +136,12 @@ def _lay_powered_minus4_move(
                 or (nx_c, y,     nz_c) in terminal_positions \
                 or (x,    y - 2, z)    in terminal_positions:
             continue
+        # The search picks a side from its local path snapshot, which may differ from the
+        # first side that is clear right now: skip sides that later path cells (or their
+        # supports) need, or the rest of the path can't be laid.
+        if any(c in path_cells for c in side_cells) or any(
+                (cx, cy + 1, cz) in path_cells for cx, cy, cz in side_cells if (cx, cy, cz) != (nx_c, y - 3, nz_c)):
+            continue
         # Mirror A* adjacency check: no foreign-owned wire at ±1 XZ ±1 Y of any
         # side cell — matches _powered_minus4_neighbors lines 378-387.
         adj_ok = True
@@ -143,7 +162,7 @@ def _lay_powered_minus4_move(
         direction = (dx, dz)
         break
     if direction is None:
-        raise ValueError(f"No valid direction for powered_minus4 at {launch}")
+        raise LayConflict(f"No valid direction for powered_minus4 at {launch}", (dest, launch))
     tdx, tdz = direction
     nx, nz = x + tdx, z + tdz
 
@@ -225,13 +244,14 @@ def _lay_tower_move(
     for cx, cy, cz, blk in col:
         existing_owner = dust_owner.get((cx, cy, cz))
         if existing_owner is not None and existing_owner != net_id:
-            raise ValueError(f"Tower collision at {(cx, cy, cz)} for nets {existing_owner} vs {net_id}")
+            raise LayConflict(f"Tower collision at {(cx, cy, cz)} for nets {existing_owner} vs {net_id}", (tower_top, launch))
         if existing_owner == net_id:
             # Own stone shared with a neighbouring structure is fine; anything else in the
             # column (dust, repeater) would leave the tower without its torch.
             if blk == opaque_support_block and (cx, cy, cz) in solid:
                 continue
-            raise ValueError(f"Tower column cell {(cx, cy, cz)} already holds net {net_id}'s signal")
+            raise LayConflict(f"Tower column cell {(cx, cy, cz)} already holds net {net_id}'s signal",
+                              (tower_top, (cx, cy, cz)))
         workspace[cx, cy, cz] = blk
         if blk == opaque_support_block:
             solid.add((cx, cy, cz))
@@ -254,6 +274,7 @@ def _lay_redstone_path(
 ) -> None:
     cells = list(path)
     n = len(cells)
+    path_cells = frozenset(cells)
 
     tower_bottom: set[int] = set()
     tower_top: set[int] = set()
@@ -292,7 +313,8 @@ def _lay_redstone_path(
             _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
 
         elif i in p4_bottom:
-            _lay_powered_minus4_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells, goal, terminal_positions)
+            _lay_powered_minus4_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block,
+                                     inverted_cells, goal, terminal_positions, path_cells)
 
         else:
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)

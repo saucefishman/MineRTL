@@ -196,6 +196,28 @@ def rip_up(
         rec.journals[dependent].extend(reversed(moved))
 
 
+def rollback(rec: Recorder, net_id: str, mark: int) -> None:
+    """Revert net_id's mutations journaled after position mark (its journal length then).
+
+    For undoing the net's own latest attempt, so no support preservation: nothing laid
+    since mark can have been built on by another net.
+    """
+    entries = rec.journals.get(net_id)
+    if not entries or len(entries) <= mark:
+        return
+    tail = entries[mark:]
+    del entries[mark:]
+    for kind, target, key, prev, prev_writer in reversed(tail):
+        if kind == "block":
+            target[key] = prev
+            if prev_writer is None:
+                rec.writer.pop(key, None)
+            else:
+                rec.writer[key] = prev_writer
+        else:
+            target._restore(key, prev)
+
+
 def invalid_supports(
         region: Region,
         solid: set[tuple[int, int, int]],

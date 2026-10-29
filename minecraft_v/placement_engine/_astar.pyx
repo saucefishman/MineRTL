@@ -311,7 +311,7 @@ cdef class World:
     cdef object net_id
     cdef int min_x, min_y, min_z, max_x, max_y, max_z, max_bridge_y
     cdef int gx, gy, gz, x_h_factor
-    cdef object eprot, prot  # ("set", s) or ("keepout", count, own, excluded)
+    cdef object eprot, prot  # ("set", s) or ("keepout", count, own, excluded, extra)
     cdef object workspace, glass, facing  # facing: per HORIZ direction, the input-facing name
     cdef dict pos_ids
     cdef list pos_list, h_list, move_cache
@@ -351,6 +351,8 @@ cdef class World:
         if spec[0] == "set":
             return PySet_Contains(spec[1], key)
         # _ForeignKeepout.__contains__
+        if PySet_Contains(spec[4], key):
+            return True
         n = (<dict>spec[1]).get(key, 0)
         if n == 0 or (n == 1 and PySet_Contains(spec[2], key)):
             return False

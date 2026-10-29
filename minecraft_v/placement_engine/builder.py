@@ -29,13 +29,13 @@ from .anneal import _optimize_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
 from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path
-from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up
+from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
 from .verify import verify_signals, verify_support
-from .wire import _lay_redstone_path, _place_repeaters_for_net
+from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
@@ -391,22 +391,30 @@ class _ForeignKeepout:
     Materializing every other net's keepout per net is quadratic in net count; this answers
     `pos in protected` (and `protected - cells`, as _find_wire_path uses it) without copying.
     """
-    __slots__ = ("_count", "_own", "_excluded")
+    __slots__ = ("_count", "_own", "_excluded", "_extra")
 
     def __init__(self, count: dict[tuple[int, int, int], int], own: set[tuple[int, int, int]],
-                 excluded: frozenset[tuple[int, int, int]] = frozenset()):
+                 excluded: frozenset[tuple[int, int, int]] = frozenset(),
+                 extra: frozenset[tuple[int, int, int]] = frozenset()):
         self._count = count
         self._own = own
         self._excluded = excluded
+        self._extra = extra  # always protected, regardless of excluded (see with_extra)
 
     def __contains__(self, pos) -> bool:
+        if pos in self._extra:
+            return True
         n = self._count.get(pos, 0)
         if n == 0 or (n == 1 and pos in self._own):
             return False
         return pos not in self._excluded
 
     def __sub__(self, other) -> _ForeignKeepout:
-        return _ForeignKeepout(self._count, self._own, self._excluded | frozenset(other))
+        return _ForeignKeepout(self._count, self._own, self._excluded | frozenset(other), self._extra)
+
+    def with_extra(self, cells) -> _ForeignKeepout:
+        """Also protect cells, surviving later subtraction (goal relief)."""
+        return _ForeignKeepout(self._count, self._own, self._excluded, self._extra | frozenset(cells))
 
     def __iter__(self):
         return (pos for pos in self._count if pos in self)
@@ -436,6 +444,9 @@ def _net_sort_key(
         for sink in net.sinks
         for d in [_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name)]
     )
+
+
+_LAY_RETRIES = 4  # per sink: re-searches after a path that couldn't be laid (LayConflict)
 
 
 def _route_all_nets(
@@ -478,23 +489,38 @@ def _route_all_nets(
                 pos for _path in net_ordered_paths for pos in _path
             ]
             all_terminal_positions = frozenset(pin_terminal.values())
-            path = _find_wire_path(
-                indexed, solid, dust_owner,
-                src_pin, dst_pin, net.net_id,
-                ws_bounds, max_bridge_y,
-                tree_seeds=tree_seeds,
-                protected=protected,
-                footprint_blocked=footprint_blocked,
-                inverted_cells=frozenset(inverted_cells),
-                terminal_positions=all_terminal_positions,
-            )
             support_block = WOOLS[net_idx % len(WOOLS)]
-
-            _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
-                               opaque_support_block=support_block,
-                               inverted_cells=inverted_cells,
-                               goal=dst_pin,
-                               terminal_positions=all_terminal_positions)
+            # A path the search accepted can still fail to lay when it crosses its own
+            # earlier cells/supports outside the search's local snapshot. Undo that sink's
+            # partial path and search again without the conflicting cell.
+            blocked: set[tuple[int, int, int]] = set()
+            keep = {src_pin, dst_pin, *tree_seeds}
+            while True:
+                path = _find_wire_path(
+                    indexed, solid, dust_owner,
+                    src_pin, dst_pin, net.net_id,
+                    ws_bounds, max_bridge_y,
+                    tree_seeds=tree_seeds,
+                    protected=protected,
+                    footprint_blocked=footprint_blocked,
+                    inverted_cells=frozenset(inverted_cells),
+                    terminal_positions=all_terminal_positions,
+                    blocked=frozenset(blocked),
+                )
+                mark = len(rec.journals[net.net_id])
+                try:
+                    _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
+                                       opaque_support_block=support_block,
+                                       inverted_cells=inverted_cells,
+                                       goal=dst_pin,
+                                       terminal_positions=all_terminal_positions)
+                    break
+                except LayConflict as e:
+                    cell = next((c for c in e.cells if c not in keep and c not in blocked), None)
+                    if cell is None or len(blocked) >= _LAY_RETRIES:
+                        raise
+                    rollback(rec, net.net_id, mark)
+                    blocked.add(cell)
             net_ordered_paths.append(path)
         _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
 
