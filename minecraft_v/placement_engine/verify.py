@@ -29,7 +29,7 @@ from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
 Pos = tuple[int, int, int]
 
 _FACING_TO_DELTA = {facing: delta for delta, facing in _DELTA_TO_FACING.items()}
-_NON_OPAQUE_MARKERS = ("glass", "trapdoor", "redstone_wire", "torch", "repeater", "comparator", "slab")
+_NON_OPAQUE_MARKERS = ("glass", "trapdoor", "redstone_wire", "torch", "repeater", "comparator", "slab", "sign")
 
 _AIR, _DUST, _REPEATER, _TORCH, _WALL_TORCH, _OPAQUE, _OTHER = range(7)
 _STRONG, _WEAK = "S", "W"
