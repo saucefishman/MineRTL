@@ -277,6 +277,9 @@ def _route_output_pin_extensions(
 
     all_terminal_positions = frozenset(
         pos for ts in (all_terminals or {}).values() for pos in ts) | all_ext_targets
+    # Per pin: its source repeater's and target's zones; built once (unioning frozensets per pair was O(P^2) copies).
+    pin_zones = {pin: _repeater_protection_zone(rc) | _repeater_protection_zone(ext_target_positions[pin])
+                 for pin, rc in repeater_cells_by_pin.items()}
     jobs: list[_RouteJob] = []
     for pin_name in sorted(output_pin_targets, key=lambda pn: ext_target_positions[pn][1]):
         repeater_cell, side_name, endpoint = output_repeater_lookup[pin_name]
@@ -291,12 +294,12 @@ def _route_output_pin_extensions(
         if not _in_bounds(launch):
             raise ValueError(f"No in-bounds launch cell for output target '{pin_name}'")
         target = ext_target_positions[pin_name]
-        protected = _compute_net_protected(base_net_id, all_terminals) if all_terminals else frozenset()
+        protected_set = set(_compute_net_protected(base_net_id, all_terminals) if all_terminals else ())
         # Other output pin targets and their source repeaters act as foreign terminals.
-        for other_pin, rc in repeater_cells_by_pin.items():
+        for other_pin, zone in pin_zones.items():
             if other_pin != pin_name:
-                protected = protected | _repeater_protection_zone(rc) | _repeater_protection_zone(
-                    ext_target_positions[other_pin])
+                protected_set.update(zone)
+        protected = frozenset(protected_set)
         jobs.append(_RouteJob(
             key=f"{base_net_id}>{pin_name}", net_id=base_net_id,
             src=launch, sinks=[target], bounds=ext_bounds,
