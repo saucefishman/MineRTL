@@ -211,7 +211,7 @@ def _place_io_repeaters(
     return io_repeater_cells, output_repeater_lookup, io_signs
 
 
-_EXT_TUBE_DEPTH = int(__import__("os").environ.get("EXT_TUBE", "3"))
+_EXT_TUBE_DEPTH = 3  # cells of straight approach lane kept clear in front of each output pin target
 
 
 def _route_output_pin_extensions(
