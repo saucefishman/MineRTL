@@ -136,6 +136,14 @@ def main():
                              "use with --allow-routing-failures True)")
     parser.add_argument("--snapshots", action="store_true",
                         help="Save debug litematic snapshots during routing to <artifacts>/snapshots (slow)")
+    parser.add_argument("--placer", choices=("legacy", "bary", "sa"), default="legacy",
+                        help="Gate placement: legacy list order, barycenter row ordering, or barycenter + "
+                             "simulated annealing")
+    parser.add_argument("--place-y-moves", action=argparse.BooleanOptionalAction, default=True,
+                        help="Let --placer sa move gates between Y levels (default: on)")
+    parser.add_argument("--place-z-moves", action=argparse.BooleanOptionalAction, default=True,
+                        help="Let --placer sa move gates between depth layers within their slack (default: on)")
+    parser.add_argument("--place-seed", type=int, default=0, help="RNG seed for --placer sa (default 0)")
     args = parser.parse_args()
 
     out_litematic = Path(args.out_litematic)
@@ -178,7 +186,11 @@ def main():
                                         **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}),
                                         route_workers=args.route_workers,
                                         route_deadline=args.route_deadline,
-                                        snapshots=args.snapshots)
+                                        snapshots=args.snapshots,
+                                        placer=args.placer,
+                                        place_y_moves=args.place_y_moves,
+                                        place_z_moves=args.place_z_moves,
+                                        place_seed=args.place_seed)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 
