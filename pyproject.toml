@@ -9,6 +9,14 @@ dependencies = [
     "litemapy>=0.11.0b0",
 ]
 
+[build-system]
+requires = ["setuptools>=69", "Cython>=3.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+# Rebuild the Cython A* kernel whenever its source changes.
+cache-keys = [{ file = "pyproject.toml" }, { file = "setup.py" }, { file = "minecraft_v/**/*.pyx" }]
+
 [tool.setuptools.packages.find]
 include = ["minecraft_v*"]
 
@@ -19,4 +27,5 @@ pythonpath = ["."]
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "Cython>=3.0",
 ]
