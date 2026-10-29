@@ -137,10 +137,15 @@ def _compute_max_bridge_y(
 
 def _compute_pin_maps(
         placed: list[_Placed],
-) -> tuple[dict[tuple[str, str], tuple[int, int, int]], dict[tuple[str, str], tuple[int, int, int]]]:
-    """Return (pin_world_map, pin_terminal) for all component pins."""
+) -> tuple[dict[tuple[str, str], tuple[int, int, int]], dict[tuple[str, str], tuple[int, int, int]],
+           dict[tuple[int, int, int], tuple[int, int]]]:
+    """Return (pin_world_map, pin_terminal, terminal_approach) for all component pins.
+
+    terminal_approach: gate-pin terminal -> horizontal direction wire leaves it in (the pin's side normal).
+    """
     pin_world_map: dict[tuple[str, str], tuple[int, int, int]] = {}
     pin_terminal: dict[tuple[str, str], tuple[int, int, int]] = {}
+    terminal_approach: dict[tuple[int, int, int], tuple[int, int]] = {}
     for item in placed:
         c = item.component
         origin = item.origin
@@ -156,8 +161,11 @@ def _compute_pin_maps(
                     pin_terminal[(c.id, pin.name)] = pw
                 else:
                     nx, ny, nz = _SIDE_NORMAL[side.value]
-                    pin_terminal[(c.id, pin.name)] = (pw[0] + nx, pw[1] + ny, pw[2] + nz)
-    return pin_world_map, pin_terminal
+                    terminal = (pw[0] + nx, pw[1] + ny, pw[2] + nz)
+                    pin_terminal[(c.id, pin.name)] = terminal
+                    if ny == 0:
+                        terminal_approach[terminal] = (nx, nz)
+    return pin_world_map, pin_terminal, terminal_approach
 
 
 def _place_io_repeaters(
@@ -385,21 +393,61 @@ def _terminal_keepout(terminals: set[tuple[int, int, int]]) -> set[tuple[int, in
     return cells
 
 
+_APPROACH_CORRIDOR = 2  # cells reserved straight out from each gate pin's terminal
+
+
+def _terminal_halo(
+        terminals: set[tuple[int, int, int]],
+        approach: dict[tuple[int, int, int], tuple[int, int]],
+) -> set[tuple[int, int, int]]:
+    """Cells where foreign wire makes a terminal, or its straight approach corridor,
+    unwalkable (_wire_walkable checks 2 and 3)."""
+    cells: set[tuple[int, int, int]] = set()
+    for t in terminals:
+        tx, ty, tz = t
+        adx, adz = approach.get(t, (0, 0))
+        n = _APPROACH_CORRIDOR if t in approach else 0
+        for k in range(n + 1):
+            cx, cz = tx + k * adx, tz + k * adz
+            if k:
+                cells.add((cx, ty, cz))
+            cells.add((cx, ty + 1, cz))
+            cells.add((cx, ty - 1, cz))
+            for dx, dz in _HORIZ_DIRS:
+                for dy in (-1, 0, 1):
+                    cells.add((cx + dx, ty + dy, cz + dz))
+    return cells
+
+
+def _count_cells(per_net: dict[str, set[tuple[int, int, int]]]) -> dict[tuple[int, int, int], int]:
+    count: dict[tuple[int, int, int], int] = {}
+    for cells in per_net.values():
+        for pos in cells:
+            count[pos] = count.get(pos, 0) + 1
+    return count
+
+
 class _ForeignKeepout:
     """_compute_net_protected(net_id, ...) as a lazy view over a per-cell net count.
 
     Materializing every other net's keepout per net is quadratic in net count; this answers
     `pos in protected` (and `protected - cells`, as _find_wire_path uses it) without copying.
+    Subtraction (goal relief) never frees a cell in another net's terminal halo: wire there
+    would make that terminal unreachable, e.g. a slope into a goal two cells from another pin.
     """
-    __slots__ = ("_count", "_own", "_excluded", "_extra")
+    __slots__ = ("_count", "_own", "_excluded", "_extra", "_halo", "_own_halo")
 
     def __init__(self, count: dict[tuple[int, int, int], int], own: set[tuple[int, int, int]],
                  excluded: frozenset[tuple[int, int, int]] = frozenset(),
-                 extra: frozenset[tuple[int, int, int]] = frozenset()):
+                 extra: frozenset[tuple[int, int, int]] = frozenset(),
+                 halo: dict[tuple[int, int, int], int] | None = None,
+                 own_halo: set[tuple[int, int, int]] = frozenset()):
         self._count = count
         self._own = own
         self._excluded = excluded
         self._extra = extra  # always protected, regardless of excluded (see with_extra)
+        self._halo = {} if halo is None else halo
+        self._own_halo = own_halo
 
     def __contains__(self, pos) -> bool:
         if pos in self._extra:
@@ -407,31 +455,39 @@ class _ForeignKeepout:
         n = self._count.get(pos, 0)
         if n == 0 or (n == 1 and pos in self._own):
             return False
-        return pos not in self._excluded
+        if pos not in self._excluded:
+            return True
+        h = self._halo.get(pos, 0)
+        return h > 1 or (h == 1 and pos not in self._own_halo)
+
+    def _copy(self, excluded, extra) -> _ForeignKeepout:
+        return _ForeignKeepout(self._count, self._own, excluded, extra, self._halo, self._own_halo)
 
     def __sub__(self, other) -> _ForeignKeepout:
-        return _ForeignKeepout(self._count, self._own, self._excluded | frozenset(other), self._extra)
+        return self._copy(self._excluded | frozenset(other), self._extra)
 
     def with_extra(self, cells) -> _ForeignKeepout:
         """Also protect cells, surviving later subtraction (goal relief)."""
-        return _ForeignKeepout(self._count, self._own, self._excluded, self._extra | frozenset(cells))
+        return self._copy(self._excluded, self._extra | frozenset(cells))
 
     def __iter__(self):
         return (pos for pos in self._count if pos in self)
 
 
 class _KeepoutMap:
-    """Per-net terminal keepouts, computed once; for_net(n) == _compute_net_protected(n, ...)."""
+    """Per-net terminal keepouts, counted per cell (see _ForeignKeepout)."""
 
-    def __init__(self, all_terminals: dict[str, set[tuple[int, int, int]]]):
-        self._own = {net_id: _terminal_keepout(t) for net_id, t in all_terminals.items()}
-        self._count: dict[tuple[int, int, int], int] = {}
-        for cells in self._own.values():
-            for pos in cells:
-                self._count[pos] = self._count.get(pos, 0) + 1
+    def __init__(self, all_terminals: dict[str, set[tuple[int, int, int]]],
+                 terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None):
+        approach = terminal_approach or {}
+        self._own_halo = {net_id: _terminal_halo(t, approach) for net_id, t in all_terminals.items()}
+        self._halo = _count_cells(self._own_halo)
+        self._own = {net_id: _terminal_keepout(t) | self._own_halo[net_id] for net_id, t in all_terminals.items()}
+        self._count = _count_cells(self._own)
 
     def for_net(self, net_id: str) -> _ForeignKeepout:
-        return _ForeignKeepout(self._count, self._own.get(net_id, set()))
+        return _ForeignKeepout(self._count, self._own.get(net_id, set()),
+                               halo=self._halo, own_halo=self._own_halo.get(net_id, set()))
 
 
 def _net_sort_key(
@@ -447,6 +503,7 @@ def _net_sort_key(
 
 
 _LAY_RETRIES = 4  # per sink: re-searches after a path that couldn't be laid (LayConflict)
+_NET_RETRIES = 2  # per net: re-routes after no repeater fits a stretch
 
 
 def _route_all_nets(
@@ -463,6 +520,7 @@ def _route_all_nets(
         snapshot_dir: Path | None = None,
         deadline: float | None = None,
         fail_fast: bool = False,
+        terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     """fail_fast: raise on the first net that fails instead of collecting failures.
 
@@ -472,12 +530,12 @@ def _route_all_nets(
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
     inverted_cells: set[tuple[int, int, int]] = JournaledSet(rec, name="inverted")
-    keepouts = _KeepoutMap(all_terminals)
+    keepouts = _KeepoutMap(all_terminals, terminal_approach)
     region = workspace
     indexed = IndexedWorkspace(region)  # all writes below go through this, keeping its index current
     workspace = JournalingWorkspace(indexed, rec)
 
-    def route_net(net_idx: int, net: NetConnection) -> None:
+    def route_net(net_idx: int, net: NetConnection, net_blocked: frozenset[tuple[int, int, int]]) -> None:
         src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
         protected = keepouts.for_net(net.net_id)
         net_ordered_paths: list[list[tuple[int, int, int]]] = []
@@ -493,11 +551,11 @@ def _route_all_nets(
             # A path the search accepted can still fail to lay when it crosses its own
             # earlier cells/supports outside the search's local snapshot. Undo that sink's
             # partial path and search again without the conflicting cell.
-            blocked: set[tuple[int, int, int]] = set()
+            blocked: set[tuple[int, int, int]] = set(net_blocked - {src_pin, dst_pin})
             keep = {src_pin, dst_pin, *tree_seeds}
             while True:
                 path = _find_wire_path(
-                    indexed, solid, dust_owner,
+                    workspace, solid, dust_owner,
                     src_pin, dst_pin, net.net_id,
                     ws_bounds, max_bridge_y,
                     tree_seeds=tree_seeds,
@@ -517,12 +575,31 @@ def _route_all_nets(
                     break
                 except LayConflict as e:
                     cell = next((c for c in e.cells if c not in keep and c not in blocked), None)
-                    if cell is None or len(blocked) >= _LAY_RETRIES:
+                    if cell is None or len(blocked) >= len(net_blocked) + _LAY_RETRIES:
                         raise
                     rollback(rec, net.net_id, mark)
                     blocked.add(cell)
             net_ordered_paths.append(path)
         _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
+
+    def route_net_retrying(net_idx: int, net: NetConnection) -> None:
+        # No repeater slot on a stretch (all slopes/turns): undo the whole net and route it
+        # again with that stretch blocked, keeping clear of the net's own terminals.
+        terminals = all_terminals.get(net.net_id, set())
+        near_terminal = {(x + dx, y + dy, z + dz) for x, y, z in terminals
+                         for dx, dy, dz in ((0, 0, 0), *_DIRS_6)}
+        net_blocked: frozenset[tuple[int, int, int]] = frozenset()
+        for attempt in range(_NET_RETRIES + 1):
+            mark = len(rec.journals[net.net_id])
+            try:
+                route_net(net_idx, net, net_blocked)
+                return
+            except LayConflict as e:
+                stretch = frozenset(e.cells) - near_terminal - net_blocked
+                if attempt == _NET_RETRIES or not stretch or "cannot place repeater" not in str(e):
+                    raise
+                rollback(rec, net.net_id, mark)
+                net_blocked |= stretch
 
     with ProgressBar("[wire]", total_nets) as bar:
         for net_idx, net in enumerate(sorted_nets, 1):
@@ -534,7 +611,7 @@ def _route_all_nets(
                 continue
             try:
                 with rec.recording(net.net_id):
-                    route_net(net_idx, net)
+                    route_net_retrying(net_idx, net)
             except Exception as e:
                 if fail_fast:
                     raise RuntimeError(f"Routing failed for net {net.net_id}: {e}") from e
@@ -611,6 +688,7 @@ def _route_all_nets_negotiated(
         route_workers: int = 1,
         deadline: float | None = None,
         fail_fast: bool = False,
+        terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     """Negotiated-congestion routing (PathFinder), then commit, then a hard cleanup pass.
 
@@ -656,7 +734,7 @@ def _route_all_nets_negotiated(
         return (_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
                 [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks])
 
-    keepouts = _KeepoutMap(all_terminals)
+    keepouts = _KeepoutMap(all_terminals, terminal_approach)
 
     def route_net(net: NetConnection, ws, solid_view, owner_view, inverted, congestion_cost, time_limit):
         src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
@@ -1076,7 +1154,7 @@ def build_litematic_from_component_list(
     )
     const_positions = _place_const_sources(workspace, placed, solid)
     max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
-    pin_world_map, pin_terminal = _compute_pin_maps(placed)
+    pin_world_map, pin_terminal, terminal_approach = _compute_pin_maps(placed)
     io_repeater_cells, output_repeater_lookup = _place_io_repeaters(workspace, placed, solid, pin_world_map, io_bounds)
     output_component_ids = {c.id for c in comp.components if c.type == ComponentType.OUTPUT_PIN}
     net_id_by_output_endpoint: dict[tuple[str, str], str] = {
@@ -1124,6 +1202,7 @@ def build_litematic_from_component_list(
             snapshot_dir=snapshot_dir,
             deadline=deadline,
             fail_fast=not allow_routing_failures,
+            terminal_approach=terminal_approach,
         )
     else:
         routing_failures, inverted_cells = _route_all_nets_negotiated(
@@ -1136,6 +1215,7 @@ def build_litematic_from_component_list(
             route_workers=route_workers,
             deadline=deadline,
             fail_fast=not allow_routing_failures,
+            terminal_approach=terminal_approach,
         )
 
     _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
