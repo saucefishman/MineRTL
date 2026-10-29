@@ -918,7 +918,7 @@ cdef inline bint dominated(FlatMap[NodeInfo]* nodes, long long node, double g):
     cdef NodeInfo* other
     for k in range(d):
         other = nodes.find(base | (<long long>k << SIG_SHIFT))
-        if other != NULL and other.expanded and other.g <= g:
+        if other != NULL and other.g <= g:
             return True
     return False
 
@@ -1006,8 +1006,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         ni = nodes.find(e.node)
         if e.g > ni.g:
             continue
-        # Dominance: the same state with less signal depth, already expanded at no more cost,
-        # reaches everything this one can.
+        # Dominance: the same state with less signal depth at no more cost reaches everything
+        # this one can (it is expanded first, or was dominated in turn).
         if not ni.expanded and dominated(nodes, e.node, e.g):
             continue
         cid = <int>(e.node >> NODE_SHIFT)
@@ -1121,6 +1121,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                                      cells.m4_cells[i + 2] - m.dz)
             nkey = ((<long long>m.dest << NODE_SHIFT) | m.arrive | snap
                     | (<long long>(ndepth | (ncand << 4)) << SIG_SHIFT))
+            if dominated(nodes, nkey, new_g):
+                continue
             np = nodes.find(nkey)
             if np != NULL:
                 if not new_g < np.g:
