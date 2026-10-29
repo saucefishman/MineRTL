@@ -44,7 +44,7 @@ _PLACE_W_CONG = 0.0          # RUDY congestion: w * sum(bin demand^2) / bin area
 _PLACE_BIN = 6               # congestion bin size in X and Z (blocks)
 _PLACE_BARY_SWEEPS = 6
 _PLACE_INNER_NUM = 4.0       # moves per temperature = inner_num * N^(4/3), at most _PLACE_MAX_TEMP_MOVES
-_PLACE_MAX_TEMP_MOVES = 4000  # keeps enough temperatures inside the budget on big designs (video)
+_PLACE_MAX_TEMP_MOVES = 1000  # past ~1000 lower cost stops buying routing (halfvideo: 2000/4000 fail more, 2-4x slower)
 _PLACE_T0_ACCEPT = 0.3       # T0 accepts this fraction of uphill random moves; low — we start from a good seed
 _PLACE_MAX_TEMPS = 150       # deterministic stop (time budget is only a safety net)
 _PLACE_TIME_BUDGET = 10.0    # seconds, plus _PLACE_TIME_PER_GATE per gate, at most _PLACE_TIME_MAX
@@ -317,10 +317,12 @@ class _PlaceState:
             self.layer[c], self.y[c] = layer, level
 
         # Layer Z stays frozen until the next full_recompute, so every move is local.
-        gates_moved = [g for lst in rows_new.values() for g in lst]
-        undo["pos"] = {g: self.pos[g] for g in gates_moved}
+        gates_in_rows = [g for lst in rows_new.values() for g in lst]
+        undo["pos"] = {g: self.pos[g] for g in gates_in_rows}
         for key in rows_new:
             self._place_row(key)
+        # Only gates that actually shifted touch their nets (a swap of equal-width gates moves just those two).
+        gates_moved = [g for g in gates_in_rows if self.pos[g] != undo["pos"][g]]
         nets = {ni for g in gates_moved for ni in self.comp_nets[g]}
         if mirror is not None:
             nets.update(self.comp_nets[mirror])
