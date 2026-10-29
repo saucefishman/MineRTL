@@ -88,7 +88,8 @@ def _place_gate_templates(
             for p in c.pins
         )
         _paste_template(workspace, template, item.origin, solid,
-                        dust_owner, f"__schematic__{c.id}", pin_positions)
+                        dust_owner, f"__schematic__{c.id}", pin_positions,
+                        mirror_width=c.footprint.width if c.metadata.get("mirror_x") else None)
     return (ref_mc_version, ref_lm_version, ref_lm_sub)
 
 
@@ -1223,6 +1224,7 @@ def build_litematic_from_component_list(
         placer: str = "sa",
         place_y_moves: bool = True,
         place_z_moves: bool = True,
+        place_mirror: bool = True,
         place_seed: int = 0,
 ) -> Path:
     comp = _expand_multibit_io(comp)
@@ -1240,7 +1242,7 @@ def build_litematic_from_component_list(
             comp.components, comp.nets, y_level,
             placer=placer, base_y=base_y, gutter=gutter,
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
-            y_moves=place_y_moves, z_moves=place_z_moves, seed=place_seed,
+            y_moves=place_y_moves, z_moves=place_z_moves, mirror_moves=place_mirror, seed=place_seed,
             clock_pin=clock_pin,
         )
     if output_pin_targets:

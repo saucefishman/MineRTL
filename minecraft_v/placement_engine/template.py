@@ -27,6 +27,39 @@ def _non_air_bounds(template: Region) -> tuple[int, int, int, int, int, int]:
     return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
 
 
+_MIRROR_X_DIR = {"east": "west", "west": "east"}
+
+
+def _mirror_block_x(block: BlockState) -> BlockState:
+    """``block`` reflected across the YZ plane: east and west swap in ``facing`` and wire sides."""
+    props = dict(block.properties())
+    changed = {}
+    if props.get("facing") in _MIRROR_X_DIR:
+        changed["facing"] = _MIRROR_X_DIR[props["facing"]]
+    if "east" in props and "west" in props:
+        changed["east"], changed["west"] = props["west"], props["east"]
+    return block.with_properties(**changed) if changed else block
+
+
+def _mirror_component_x(component: Component) -> Component:
+    """Copy of ``component`` mirrored in X within its footprint; mirroring twice restores it.
+
+    Pins move to ``width - 1 - x`` and east/west sides swap; ``metadata['mirror_x']`` tells
+    ``_paste_template`` (via the builder) to reflect the schematic the same way.
+    """
+    w = component.footprint.width
+    pins = [
+        pin.model_copy(update={
+            "offset": (w - 1 - pin.offset[0], pin.offset[1], pin.offset[2]),
+            "side": CardinalDirection(_MIRROR_X_DIR[pin.side.value])
+            if pin.side is not None and pin.side.value in _MIRROR_X_DIR else pin.side,
+        })
+        for pin in component.pins
+    ]
+    metadata = {**component.metadata, "mirror_x": not component.metadata.get("mirror_x", False)}
+    return component.model_copy(update={"pins": pins, "metadata": metadata})
+
+
 def _paste_template(
         workspace: Region,
         template: Region,
@@ -35,7 +68,10 @@ def _paste_template(
         dust_owner: dict[tuple[int, int, int], str] | None = None,
         schematic_net_id: str | None = None,
         pin_positions: frozenset[tuple[int, int, int]] = frozenset(),
+        mirror_width: int | None = None,
 ) -> None:
+    """Paste ``template``'s non-air blocks at ``dest_origin``; ``mirror_width`` reflects it in X
+    within that width (see ``_mirror_component_x``)."""
     tmin_x, tmin_y, tmin_z, _, _, _ = _non_air_bounds(template)
     dx, dy, dz = dest_origin
     placed: list[tuple[tuple[int, int, int], BlockState]] = []
@@ -44,7 +80,11 @@ def _paste_template(
         if _is_air(block):
             continue
         x, y, z = pos
-        wx, wy, wz = dx + (x - tmin_x), dy + (y - tmin_y), dz + (z - tmin_z)
+        rx = x - tmin_x
+        if mirror_width is not None:
+            rx = mirror_width - 1 - rx
+            block = _mirror_block_x(block)
+        wx, wy, wz = dx + rx, dy + (y - tmin_y), dz + (z - tmin_z)
         workspace[wx, wy, wz] = block
         # `solid` doubles as "can support dust": skip dust, repeaters, comparators, torches.
         if not (_needs_support(block) or _is_torch(block)):
