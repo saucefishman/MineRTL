@@ -15,7 +15,7 @@ Model (Java redstone, simplified to what the router builds):
 from litemapy import BlockState, Region
 
 from minecraft_v.placement_engine.constants import GLASS, REDSTONE, REDSTONE_TORCH, STONE, _DELTA_TO_FACING
-from minecraft_v.placement_engine.verify import Violation, verify_signals
+from minecraft_v.placement_engine.verify import Violation, verify_signals, verify_support
 from minecraft_v.placement_engine.wire import _lay_redstone_path
 
 
@@ -246,3 +246,50 @@ def test_powered_minus4_move_connects():
     path = [(4, 9, 5), (5, 9, 5), (5, 5, 5), (6, 5, 5)]
     region, owner = _laid(path)
     assert verify_signals(region, {"a": (path[0], [path[-1]])}, owner) == []
+
+
+def test_laid_moves_are_supported():
+    for path in ([(1, 2, 5), (2, 2, 5), (4, 6, 5), (4, 7, 5), (5, 7, 5)],
+                 [(1, 2, 5), (2, 2, 5), (4, 4, 5), (5, 4, 5)],
+                 [(4, 9, 5), (5, 9, 5), (5, 5, 5), (6, 5, 5)]):
+        region, owner = _laid(path)
+        assert verify_support(region, owner) == []
+
+
+# ---------------------------------------------------------------- support
+
+def test_dust_on_stone_or_glass_is_supported():
+    region, owner = _region(), {}
+    _wire(region, owner, "a", _line_x(1, 3, 2, 5))
+    region[2, 1, 5] = GLASS
+    assert verify_support(region, owner) == []
+
+
+def test_floating_dust_is_unsupported():
+    region, owner = _region(), {}
+    region[3, 4, 5] = REDSTONE
+    owner[(3, 4, 5)] = "a"
+    assert verify_support(region, owner) == [Violation("unsupported", frozenset({"a"}), (3, 4, 5))]
+
+
+def test_dust_on_repeater_is_unsupported():
+    region, owner = _region(), {}
+    region[3, 1, 5] = STONE
+    region[3, 2, 5] = _repeater((1, 0))
+    region[3, 3, 5] = REDSTONE
+    owner[(3, 3, 5)] = "a"
+    assert verify_support(region, owner) == [Violation("unsupported", frozenset({"a"}), (3, 3, 5))]
+
+
+def test_wall_torch_needs_block_behind():
+    region, owner = _region(), {}
+    region[3, 2, 5] = BlockState("minecraft:redstone_wall_torch", facing="east", lit="true")
+    assert [v.pos for v in verify_support(region, owner)] == [(3, 2, 5)]
+    region[2, 2, 5] = STONE
+    assert verify_support(region, owner) == []
+
+
+def test_blocked_cells_skip_support_check():
+    region, owner = _region(), {}
+    region[3, 4, 5] = REDSTONE
+    assert verify_support(region, owner, blocked=frozenset({(3, 4, 5)})) == []

@@ -46,7 +46,9 @@ def _paste_template(
         x, y, z = pos
         wx, wy, wz = dx + (x - tmin_x), dy + (y - tmin_y), dz + (z - tmin_z)
         workspace[wx, wy, wz] = block
-        solid.add((wx, wy, wz))
+        # `solid` doubles as "can support dust": skip dust, repeaters, comparators, torches.
+        if not (_needs_support(block) or _is_torch(block)):
+            solid.add((wx, wy, wz))
         placed.append(((wx, wy, wz), block))
         if (dust_owner is not None and schematic_net_id is not None
                 and (wx, wy, wz) not in pin_positions

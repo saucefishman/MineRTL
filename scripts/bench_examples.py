@@ -44,8 +44,11 @@ def run_example(example: str, cap: float, extra: list[str], out_root: Path) -> s
     text = log_path.read_text(errors="replace")
     done = re.findall(r"\[wire\] done \((\d+) nets, (\d+) failed", text)
     verify = re.findall(r"\[verify\] (\d+) violation", text)
+    unsupported = re.findall(r"\[verify\] (\d+) unsupported", text)
     routed = f"{done[-1][1]}/{done[-1][0]} failed" if done else "-"
     violations = f"{verify[-1]} verify violations" if verify else ""
+    if unsupported and unsupported[-1] != "0":
+        violations += f", {unsupported[-1]} unsupported"
     error = ""
     if status not in ("ok", "KILLED"):
         lines = [line for line in text.splitlines() if line.strip()]
