@@ -227,7 +227,11 @@ def _lay_tower_move(
         if existing_owner is not None and existing_owner != net_id:
             raise ValueError(f"Tower collision at {(cx, cy, cz)} for nets {existing_owner} vs {net_id}")
         if existing_owner == net_id:
-            continue
+            # Own stone shared with a neighbouring structure is fine; anything else in the
+            # column (dust, repeater) would leave the tower without its torch.
+            if blk == opaque_support_block and (cx, cy, cz) in solid:
+                continue
+            raise ValueError(f"Tower column cell {(cx, cy, cz)} already holds net {net_id}'s signal")
         workspace[cx, cy, cz] = blk
         if blk == opaque_support_block:
             solid.add((cx, cy, cz))
