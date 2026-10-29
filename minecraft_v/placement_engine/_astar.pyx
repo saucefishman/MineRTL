@@ -143,6 +143,8 @@ cdef int HORIZ[4][2]             # _HORIZ_DIRS
 cdef int SNAP_BIT_INDEX[27]      # (ox+1)*9 + (oy+1)*3 + (oz+1) -> bit index, or -1
 cdef long long TOWER_FLAG = 0
 cdef int NODE_SHIFT = 0
+cdef int SIG_SHIFT = 0           # signal depth (4 bits) then repeater-candidate dir (3 bits)
+cdef int SIG_LIMIT = 0           # _REPEATER_INTERVAL
 cdef long long SNAP_MASK = 0
 cdef int STAGNATION = 0
 cdef int MAX_NODES = 0
@@ -173,9 +175,9 @@ cdef int SNAP_OFF[32][3]
 
 
 def init(snap_offsets, tower_flag, node_shift, stagnation, max_nodes, h_radius_factor,
-         horiz_dirs, horiz_radius_min, y_radius_min):
+         horiz_dirs, horiz_radius_min, y_radius_min, sig_shift, sig_limit):
     global TOWER_FLAG, NODE_SHIFT, SNAP_MASK, STAGNATION, MAX_NODES, H_RADIUS_FACTOR, N_SNAP_BITS, _init_done
-    global HORIZ_RADIUS_MIN, Y_RADIUS_MIN
+    global HORIZ_RADIUS_MIN, Y_RADIUS_MIN, SIG_SHIFT, SIG_LIMIT
     cdef int i
     assert len(horiz_dirs) == 4
     for i, (dx, dz) in enumerate(horiz_dirs):
@@ -196,6 +198,9 @@ def init(snap_offsets, tower_flag, node_shift, stagnation, max_nodes, h_radius_f
         SHIFT_READY[i] = False
     TOWER_FLAG = tower_flag
     NODE_SHIFT = node_shift
+    SIG_SHIFT = sig_shift
+    SIG_LIMIT = sig_limit
+    assert SIG_SHIFT + 7 <= NODE_SHIFT and SIG_LIMIT <= 16
     SNAP_MASK = (1 << N_SNAP_BITS) - 1
     STAGNATION = stagnation
     MAX_NODES = max_nodes
@@ -907,6 +912,17 @@ cdef class _Cells:
         return 0
 
 
+cdef inline bint dominated(FlatMap[NodeInfo]* nodes, long long node, double g):
+    cdef int d = (node >> SIG_SHIFT) & 15, k
+    cdef long long base = node & ~(<long long>15 << SIG_SHIFT)
+    cdef NodeInfo* other
+    for k in range(d):
+        other = nodes.find(base | (<long long>k << SIG_SHIFT))
+        if other != NULL and other.expanded and other.g <= g:
+            return True
+    return False
+
+
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False):
@@ -937,6 +953,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef long long n_explored_xyz = 0, pops = 0
     cdef int stagnation = 0, cid, i, k, last, m4_side = -1
     cdef int in_dx = 0, in_dz = 0, nx, ny, nz
+    cdef int cur_depth, cur_cand, ndepth, ncand, step
     cdef bint has_in_dir, came_from_tower, has_reached = False
     cdef long long reached = 0
     cdef double max_f, f_wire, h_limit, new_g, new_g_wire, cost
@@ -989,6 +1006,10 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         ni = nodes.find(e.node)
         if e.g > ni.g:
             continue
+        # Dominance: the same state with less signal depth, already expanded at no more cost,
+        # reaches everything this one can.
+        if not ni.expanded and dominated(nodes, e.node, e.g):
+            continue
         cid = <int>(e.node >> NODE_SHIFT)
         h = cells.h[cid]
         if h < best_h:
@@ -1020,6 +1041,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
 
         cur_snap = e.node & SNAP_MASK
         came_from_tower = (e.node & TOWER_FLAG) != 0
+        cur_depth = (e.node >> SIG_SHIFT) & 15
+        cur_cand = (e.node >> (SIG_SHIFT + 4)) & 7
         if cells.cm[cid].start < 0:
             t_load = time.perf_counter()
             cells.load(cid, expand, world, verify, pos_list, h_list, congestion_cost)
@@ -1060,6 +1083,25 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         last = <int>taken.size() - 1
         for k in range(<int>taken.size()):
             m = &cells.moves[taken[k]]
+            # Signal state (pathfinding._signal_step): prune moves that would leave a stretch
+            # with no cell _place_repeaters_for_net could put a repeater on.
+            step = abs(m.dx) + abs(m.dz)
+            if m.arrive or (m.dy == -4 and step == 0):
+                ndepth = 1
+                ncand = 0
+            else:
+                ndepth = cur_depth
+                if (cur_cand and m.dy == 0 and step == 1 and HORIZ[cur_cand - 1][0] == m.dx
+                        and HORIZ[cur_cand - 1][1] == m.dz):
+                    ndepth = 0
+                ndepth += step
+                if ndepth >= SIG_LIMIT:
+                    continue
+                ncand = 0
+                if step == 1 and (m.dy == 0 or m.dy == -1):
+                    for i in range(4):
+                        if HORIZ[i][0] == m.dx and HORIZ[i][1] == m.dz:
+                            ncand = i + 1
             cost = m.cost
             # Penalise XZ direction change on flat moves only (avoids disrupting slope/tower costs).
             if has_in_dir and m.has_flat and (m.fdx != in_dx or m.fdz != in_dz):
@@ -1077,7 +1119,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 for i in range(side.start, side.start + 3 * side.count, 3):
                     snap |= snap_bit(cells.m4_cells[i] - m.dx, cells.m4_cells[i + 1] - m.dy,
                                      cells.m4_cells[i + 2] - m.dz)
-            nkey = (<long long>m.dest << NODE_SHIFT) | m.arrive | snap
+            nkey = ((<long long>m.dest << NODE_SHIFT) | m.arrive | snap
+                    | (<long long>(ndepth | (ncand << 4)) << SIG_SHIFT))
             np = nodes.find(nkey)
             if np != NULL:
                 if not new_g < np.g:

@@ -31,7 +31,7 @@ from .layout import (
 from .anneal import _optimize_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
-from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path
+from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -573,6 +573,7 @@ class _GreedyRouter:
         sinks = sorted(job.sinks, key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
         for dst in sinks:
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
+            seed_depths = _signal_depths((self.net_paths(job.net_id) if net_seeds else []) + paths)
             self.failed_goal[job.key] = dst  # cleared when the sink is laid
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
             keep = {job.src, dst, *tree_seeds}
@@ -587,6 +588,7 @@ class _GreedyRouter:
                     inverted_cells=frozenset(self.inverted_cells),
                     terminal_positions=self.terminal_positions,
                     blocked=frozenset(blocked),
+                    seed_depths=seed_depths,
                     **job.search_kwargs,
                 )
                 mark = len(rec.journals[job.key])
@@ -870,6 +872,7 @@ def _route_all_nets_negotiated(
                 terminal_positions=all_terminal_positions,
                 congestion_cost=congestion_cost,
                 time_limit=time_limit,
+                seed_depths=_signal_depths(net_ordered_paths),
             )
             _lay_redstone_path(ws, solid_view, owner_view, path, net.net_id,
                                opaque_support_block=support_block,
