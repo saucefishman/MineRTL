@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from math import ceil
 from pathlib import Path
 
@@ -504,6 +505,8 @@ def _net_sort_key(
 
 _LAY_RETRIES = 4  # per sink: re-searches after a path that couldn't be laid (LayConflict)
 _NET_RETRIES = 2  # per net: re-routes after no repeater fits a stretch
+_BLOCKER_RADIUS = 3  # nets with cells this close to a failed sink get ripped up and re-queued
+_BLOCKER_MAX = 4
 
 
 def _route_all_nets(
@@ -534,6 +537,7 @@ def _route_all_nets(
     region = workspace
     indexed = IndexedWorkspace(region)  # all writes below go through this, keeping its index current
     workspace = JournalingWorkspace(indexed, rec)
+    failed_goal: dict[str, tuple[int, int, int]] = {}  # net -> sink whose search/laying raised
 
     def route_net(net_idx: int, net: NetConnection, net_blocked: frozenset[tuple[int, int, int]]) -> None:
         src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
@@ -551,6 +555,7 @@ def _route_all_nets(
             # A path the search accepted can still fail to lay when it crosses its own
             # earlier cells/supports outside the search's local snapshot. Undo that sink's
             # partial path and search again without the conflicting cell.
+            failed_goal[net.net_id] = dst_pin  # cleared when the sink is laid
             blocked: set[tuple[int, int, int]] = set(net_blocked - {src_pin, dst_pin})
             keep = {src_pin, dst_pin, *tree_seeds}
             while True:
@@ -579,6 +584,7 @@ def _route_all_nets(
                         raise
                     rollback(rec, net.net_id, mark)
                     blocked.add(cell)
+            failed_goal.pop(net.net_id, None)
             net_ordered_paths.append(path)
         _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
 
@@ -601,23 +607,59 @@ def _route_all_nets(
                 rollback(rec, net.net_id, mark)
                 net_blocked |= stretch
 
+    net_ids = {net.net_id for net in sorted_nets}
+
+    def blockers(goal: tuple[int, int, int], net_id: str) -> list[str]:
+        """Nets with wire or blocks within _BLOCKER_RADIUS of goal, nearest first."""
+        gx, gy, gz = goal
+        r = _BLOCKER_RADIUS
+        dist: dict[str, int] = {}
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    pos = (gx + dx, gy + dy, gz + dz)
+                    d = abs(dx) + abs(dy) + abs(dz)
+                    for owner in (dust_owner.get(pos), rec.writer.get(pos)):
+                        if owner is not None and owner != net_id and owner in net_ids:
+                            dist[owner] = min(dist.get(owner, d), d)
+        return sorted(dist, key=lambda n: dist[n])
+
+    # A sink search that fails is usually walled in by nets routed earlier. Once per net:
+    # rip the nets around the failed sink, route the net again, then re-queue them.
+    queue = deque(enumerate(sorted_nets, 1))
+    cleared_for: set[str] = set()
+    ripped: set[str] = set()
     with ProgressBar("[wire]", total_nets) as bar:
-        for net_idx, net in enumerate(sorted_nets, 1):
-            bar.update(info=net.net_id)
+        while queue:
+            net_idx, net = queue.popleft()
+            bar.update(n=0 if net.net_id in ripped or net.net_id in cleared_for else 1, info=net.net_id)
             if deadline is not None and time.monotonic() > deadline:
                 if fail_fast:
                     raise RuntimeError(f"Routing failed for net {net.net_id}: route deadline reached")
                 routing_failures.append((net.net_id, ValueError("route deadline reached")))
                 continue
+            failed_goal.pop(net.net_id, None)
             try:
                 with rec.recording(net.net_id):
                     route_net_retrying(net_idx, net)
             except Exception as e:
+                rip_up(rec, net.net_id, indexed, solid, dust_owner)
+                goal = failed_goal.get(net.net_id)
+                victims = [] if goal is None or net.net_id in cleared_for else [
+                    v for v in blockers(goal, net.net_id) if v not in ripped][:_BLOCKER_MAX]
+                if victims and not isinstance(e, LayConflict):
+                    cleared_for.add(net.net_id)
+                    log(f"[wire] {net.net_id}: {e}; ripping {', '.join(victims)} and retrying")
+                    for v in victims:
+                        rip_up(rec, v, indexed, solid, dust_owner)
+                        ripped.add(v)
+                    queue.appendleft((net_idx, net))
+                    queue.extend(entry for entry in enumerate(sorted_nets, 1) if entry[1].net_id in victims)
+                    continue
                 if fail_fast:
                     raise RuntimeError(f"Routing failed for net {net.net_id}: {e}") from e
                 routing_failures.append((net.net_id, e))
                 log(f"[error] skipped net {net.net_id}: {e}")
-                rip_up(rec, net.net_id, indexed, solid, dust_owner)
             if snapshot_dir is not None and net_idx % 10 == 0:
                 safe_id = net.net_id.replace("/", "_").replace("\\", "_")
                 save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", region, snapshot_dir)
