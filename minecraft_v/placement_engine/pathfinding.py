@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import atexit
 import heapq
+import os
+import sys
 import time
 from typing import Callable
 
@@ -264,12 +267,6 @@ def _find_wire_path(
     workspace may be a view exposing block_index() (see negotiate.OverlayWorkspace).
     """
     min_y = bounds[1]
-    # came_from is write-only during search (set at expansion, not push) and used
-    # only for final path reconstruction. All history-dependent move checks use
-    # path_snapshot carried per heap entry instead, so different paths to the same
-    # cell don't corrupt each other's move conditions.
-    came_from: dict[int, int] = {}  # node -> parent node (see the A* search below)
-
     # Strip the goal terminal's own keepout zone from protected so the approach
     # path is not blocked by the destination's own neighborhood.
     gx, gy, gz = goal
@@ -381,6 +378,7 @@ def _find_wire_path(
     # Cells get small int ids (pos_list[id] = cell) so a search node is one int,
     # id << _NODE_SHIFT | tower flag | snapshot, instead of a nested tuple that is re-hashed on every lookup.
     pos_list: list[tuple[int, int, int]] = []
+    h_list: list[int] = []  # heuristic(pos_list[id])
     pos_ids: dict[tuple[int, int, int], int] = {}
     move_cache: list[tuple[list[tuple], tuple | None] | None] = []  # by cell id
 
@@ -389,8 +387,15 @@ def _find_wire_path(
         if i is None:
             i = pos_ids[p] = len(pos_list)
             pos_list.append(p)
+            h_list.append(heuristic(p))
             move_cache.append(None)
         return i
+
+    def expand(cid: int) -> tuple[list[tuple], tuple | None]:
+        static = move_cache[cid]
+        if static is None:
+            static = move_cache[cid] = _static_moves(pos_list[cid])
+        return static
 
     def _entry(pos, dest, cost, forbid, gate=0, extra=None):
         x, y, z = pos
@@ -704,155 +709,24 @@ def _find_wire_path(
     if not goal_set:
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
-    # A* search
-    # Heap entry: (f, -h, g, counter, g_wire, node, parent_node, group). g_wire excludes conflict
-    # penalties so the f-cap only bounds real wire length, not negotiation cost.
-    # group: the seed group a node descends from (0 = start seeds, then one per tree seed).
-    # f-cap and h-radius budgets are per group: with one shared budget sized to the nearest
-    # tree seed, a boxed-in near branch starves every farther seed (and the start itself).
-    # counter is unique per push so comparison never falls through to node/parent.
-    # Nodes are (cell id << _NODE_SHIFT | tower flag | local_snapshot), so paths with different local histories
-    # coexist — a cheaper path with a restrictive snapshot does not block a more
-    # expensive path whose snapshot enables moves the cheaper one can't make.
-    # A seed's parent is _NO_PARENT.
-    counter = 0
-    open_heap = []
-    g_score: dict[int, int] = {}
+    # A* search: seeds in order, with their group (0 = start seeds, then one per tree seed).
+    seed_nodes = [_pid(seed) << _NODE_SHIFT for seed in seeds]
+    seed_groups = [0 if i < n_start_seeds else 1 + i - n_start_seeds for i in range(len(seeds))]
     group_best_h: list[int] = [10 ** 9] * (1 + len(seeds) - n_start_seeds)
-    for i, seed in enumerate(seeds):
-        # Local snap of seed is empty — seed is never in its own window.
-        seed_key = _pid(seed) << _NODE_SHIFT
-        g_score[seed_key] = 0
-        h0 = heuristic(seed)
-        group = 0 if i < n_start_seeds else 1 + i - n_start_seeds
-        group_best_h[group] = min(group_best_h[group], h0)
-        heapq.heappush(open_heap, (weight * h0, -h0, 0, counter, 0, seed_key, _NO_PARENT, group))
-        counter += 1
+    for node, group in zip(seed_nodes, seed_groups):
+        group_best_h[group] = min(group_best_h[group], h_list[node >> _NODE_SHIFT])
     goal_ids = {_pid(gc) for gc in goal_set}
 
     def node_str(node: int) -> str:
         return str((pos_list[node >> _NODE_SHIFT], node & _SNAP_MASK))
 
-    reached: int | None = None
     best_seed = min(seeds, key=heuristic)
     best_node = _pid(best_seed) << _NODE_SHIFT
     best_h: int = heuristic(best_seed)
     group_max_f: list[int] = [max(gh, 10) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
-    max_f: int = max(group_max_f)
-    explored: set[int] = set()
-    explored_xyz: set[int] = set()  # cell ids
-    stagnation = 0
-    h_radius_pruned = 0
-    early_stop_reason: str | None = None
-    deadline = time.monotonic() + time_limit if time_limit is not None else None
-    pops = 0
-    while open_heap:
-        pops += 1
-        if deadline is not None and pops & 255 == 0 and time.monotonic() > deadline:
-            early_stop_reason = f"timeout ({time_limit}s)"
-            break
-        f, _, g, _, g_wire, current_node, parent, group = heapq.heappop(open_heap)
-        # f-cap: prune nodes whose total estimated cost exceeds their group's budget; stop once
-        # past every group's. Catches runaway detours around impossible obstacles without
-        # burning _ROUTE_MAX_NODES.
-        f_wire = f - g + g_wire
-        if f_wire > group_max_f[group]:
-            if f_wire > max_f:
-                early_stop_reason = f"f-cap exceeded (f={f_wire} > max_f={max_f})"
-                break
-            continue
-        if g > g_score.get(current_node, 10 ** 9):
-            continue
-        # Record parent for path reconstruction. First expansion wins: subsequent
-        # expansions of the same cell (different local_snap) don't overwrite, so
-        # came_from forms a tree with strictly decreasing g toward the seed — no cycles.
-        if current_node not in came_from:
-            came_from[current_node] = parent
-        cid = current_node >> _NODE_SHIFT
-        cur_pos = pos_list[cid]
-        h = heuristic(cur_pos)
-        if h < best_h:
-            best_h = h
-            best_node = current_node
-        if h < group_best_h[group]:
-            group_best_h[group] = h
-        # Stagnation = consecutive re-expansions of already-explored (pos,snap) pairs.
-        # New territory always resets it; detours away from goal don't penalize.
-        if current_node in explored:
-            stagnation += 1
-            if stagnation >= _ROUTE_STAGNATION:
-                early_stop_reason = f"stagnated ({stagnation} re-expansions without new territory)"
-                break
-        else:
-            stagnation = 0
-            explored.add(current_node)
-            explored_xyz.add(cid)
-            # Unique-XYZ cap: more meaningful than (pos,snap) pair count.
-            if len(explored_xyz) >= _ROUTE_MAX_NODES:
-                early_stop_reason = f"node cap ({_ROUTE_MAX_NODES} unique positions)"
-                break
-        if cid in goal_ids:
-            reached = current_node
-            break
-        cur_snap = current_node & _SNAP_MASK
-        par_pos = pos_list[parent >> _NODE_SHIFT] if parent != _NO_PARENT else None
-        came_from_tower = bool(current_node & _TOWER_FLAG)
-        static = move_cache[cid]
-        if static is None:
-            static = move_cache[cid] = _static_moves(cur_pos)
-        moves, m4 = static
-        taken: list[tuple] = []
-        additional_blocked: list[tuple[int, int, int]] = []
-        for move in moves:
-            if cur_snap & move[2]:
-                continue
-            gate = move[3]
-            if gate and (gate == 1) == came_from_tower:
-                continue
-            taken.append(move)
-            if move[4] is not None:
-                additional_blocked.append(move[4])
-        m4_cells: tuple[tuple[int, int, int], ...] = ()
-        if m4 is not None:
-            for forbid, cells in m4[1]:
-                if not cur_snap & forbid:
-                    m4_cells = cells
-                    break
-        # Re-centre the snapshot (plus current itself and the cells this expansion's moves
-        # fill) onto each neighbour's window.
-        cb0, cb1, cb2 = cur_snap & 255, cur_snap >> 8 & 255, cur_snap >> 16
-        in_dir = (cur_pos[0] - par_pos[0], cur_pos[2] - par_pos[2]) if par_pos is not None else None
-        h_limit = group_best_h[group] * _H_RADIUS_FACTOR
-        if m4_cells:
-            taken.append(m4[0])
-        last = len(taken) - 1
-        for i, (nid, cost, _, _, _, (t0, t1, t2, self_bit), flat_dir, h, near, arrive_flag) in enumerate(taken):
-            # Penalise XZ direction change on flat moves only (avoids disrupting slope/tower costs).
-            if in_dir is not None and flat_dir is not None and flat_dir != in_dir:
-                cost += 1
-            new_g_wire = g_wire + cost
-            if congestion_cost is not None:
-                cost += congestion_cost(pos_list[nid])
-            new_g = g + cost
-            neighbor_snap = t0[cb0] | t1[cb1] | t2[cb2] | self_bit
-            move_cells = m4_cells if i == last else ()
-            if additional_blocked or move_cells:
-                nx, ny, nz = pos_list[nid]
-                for c in additional_blocked:
-                    neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
-                for c in move_cells:
-                    neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
-            nkey = nid << _NODE_SHIFT | arrive_flag | neighbor_snap
-            if new_g < g_score.get(nkey, 10 ** 9):
-                g_score[nkey] = new_g
-                if h <= h_limit or near:
-                    heapq.heappush(
-                        open_heap,
-                        (new_g + weight * h, -h, new_g, counter, new_g_wire, nkey, current_node, group),
-                    )
-                    counter += 1
-                else:
-                    h_radius_pruned += 1
+    search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
+                   weight, time_limit, pos_list, h_list, expand, congestion_cost)
+    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -907,3 +781,217 @@ def _check_tower_self_overlap(path: list[tuple[int, int, int]], net_id: str) -> 
         for c in cells:
             if c in path_cells:
                 raise ValueError(f"Tower move {(x, y, z)} -> {(bx, by, bz)} for net {net_id} overlaps its own path at {c}")
+
+
+def _search_py(seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
+               weight, time_limit, pos_list, h_list, expand, congestion_cost):
+    """The A* loop of _find_wire_path; _astar.search is the compiled twin (same arguments, same
+    results). Returns (reached node or None, best node, h_radius_pruned, early stop reason or
+    None, came_from mapping node -> parent node).
+
+    group_best_h is updated in place. expand(cell_id) returns the cell's static moves (see
+    _find_wire_path) and may grow pos_list/h_list.
+    """
+    # came_from is write-only during search (set at expansion, not push) and used
+    # only for final path reconstruction. All history-dependent move checks use
+    # path_snapshot carried per heap entry instead, so different paths to the same
+    # cell don't corrupt each other's move conditions.
+    came_from: dict[int, int] = {}  # node -> parent node
+    # Heap entry: (f, -h, g, counter, g_wire, node, parent_node, group). g_wire excludes conflict
+    # penalties so the f-cap only bounds real wire length, not negotiation cost.
+    # group: the seed group a node descends from (0 = start seeds, then one per tree seed).
+    # f-cap and h-radius budgets are per group: with one shared budget sized to the nearest
+    # tree seed, a boxed-in near branch starves every farther seed (and the start itself).
+    # counter is unique per push so comparison never falls through to node/parent.
+    # Nodes are (cell id << _NODE_SHIFT | tower flag | local_snapshot), so paths with different local histories
+    # coexist — a cheaper path with a restrictive snapshot does not block a more
+    # expensive path whose snapshot enables moves the cheaper one can't make.
+    # A seed's parent is _NO_PARENT.
+    counter = 0
+    open_heap = []
+    g_score: dict[int, int] = {}
+    for seed_key, group in zip(seed_nodes, seed_groups):
+        # Local snap of seed is empty — seed is never in its own window.
+        g_score[seed_key] = 0
+        h0 = h_list[seed_key >> _NODE_SHIFT]
+        heapq.heappush(open_heap, (weight * h0, -h0, 0, counter, 0, seed_key, _NO_PARENT, group))
+        counter += 1
+
+    reached: int | None = None
+    max_f: int = max(group_max_f)
+    explored: set[int] = set()
+    explored_xyz: set[int] = set()  # cell ids
+    stagnation = 0
+    h_radius_pruned = 0
+    early_stop_reason: str | None = None
+    deadline = time.monotonic() + time_limit if time_limit is not None else None
+    pops = 0
+    while open_heap:
+        pops += 1
+        if deadline is not None and pops & 255 == 0 and time.monotonic() > deadline:
+            early_stop_reason = f"timeout ({time_limit}s)"
+            break
+        f, _, g, _, g_wire, current_node, parent, group = heapq.heappop(open_heap)
+        # f-cap: prune nodes whose total estimated cost exceeds their group's budget; stop once
+        # past every group's. Catches runaway detours around impossible obstacles without
+        # burning _ROUTE_MAX_NODES.
+        f_wire = f - g + g_wire
+        if f_wire > group_max_f[group]:
+            if f_wire > max_f:
+                early_stop_reason = f"f-cap exceeded (f={f_wire} > max_f={max_f})"
+                break
+            continue
+        if g > g_score.get(current_node, 10 ** 9):
+            continue
+        # Record parent for path reconstruction. First expansion wins: subsequent
+        # expansions of the same cell (different local_snap) don't overwrite, so
+        # came_from forms a tree with strictly decreasing g toward the seed — no cycles.
+        if current_node not in came_from:
+            came_from[current_node] = parent
+        cid = current_node >> _NODE_SHIFT
+        cur_pos = pos_list[cid]
+        h = h_list[cid]
+        if h < best_h:
+            best_h = h
+            best_node = current_node
+        if h < group_best_h[group]:
+            group_best_h[group] = h
+        # Stagnation = consecutive re-expansions of already-explored (pos,snap) pairs.
+        # New territory always resets it; detours away from goal don't penalize.
+        if current_node in explored:
+            stagnation += 1
+            if stagnation >= _ROUTE_STAGNATION:
+                early_stop_reason = f"stagnated ({stagnation} re-expansions without new territory)"
+                break
+        else:
+            stagnation = 0
+            explored.add(current_node)
+            explored_xyz.add(cid)
+            # Unique-XYZ cap: more meaningful than (pos,snap) pair count.
+            if len(explored_xyz) >= _ROUTE_MAX_NODES:
+                early_stop_reason = f"node cap ({_ROUTE_MAX_NODES} unique positions)"
+                break
+        if cid in goal_ids:
+            reached = current_node
+            break
+        cur_snap = current_node & _SNAP_MASK
+        par_pos = pos_list[parent >> _NODE_SHIFT] if parent != _NO_PARENT else None
+        came_from_tower = bool(current_node & _TOWER_FLAG)
+        moves, m4 = expand(cid)
+        taken: list[tuple] = []
+        additional_blocked: list[tuple[int, int, int]] = []
+        for move in moves:
+            if cur_snap & move[2]:
+                continue
+            gate = move[3]
+            if gate and (gate == 1) == came_from_tower:
+                continue
+            taken.append(move)
+            if move[4] is not None:
+                additional_blocked.append(move[4])
+        m4_cells: tuple[tuple[int, int, int], ...] = ()
+        if m4 is not None:
+            for forbid, cells in m4[1]:
+                if not cur_snap & forbid:
+                    m4_cells = cells
+                    break
+        # Re-centre the snapshot (plus current itself and the cells this expansion's moves
+        # fill) onto each neighbour's window.
+        cb0, cb1, cb2 = cur_snap & 255, cur_snap >> 8 & 255, cur_snap >> 16
+        in_dir = (cur_pos[0] - par_pos[0], cur_pos[2] - par_pos[2]) if par_pos is not None else None
+        h_limit = group_best_h[group] * _H_RADIUS_FACTOR
+        if m4_cells:
+            taken.append(m4[0])
+        last = len(taken) - 1
+        for i, (nid, cost, _, _, _, (t0, t1, t2, self_bit), flat_dir, h, near, arrive_flag) in enumerate(taken):
+            # Penalise XZ direction change on flat moves only (avoids disrupting slope/tower costs).
+            if in_dir is not None and flat_dir is not None and flat_dir != in_dir:
+                cost += 1
+            new_g_wire = g_wire + cost
+            if congestion_cost is not None:
+                cost += congestion_cost(pos_list[nid])
+            new_g = g + cost
+            neighbor_snap = t0[cb0] | t1[cb1] | t2[cb2] | self_bit
+            move_cells = m4_cells if i == last else ()
+            if additional_blocked or move_cells:
+                nx, ny, nz = pos_list[nid]
+                for c in additional_blocked:
+                    neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
+                for c in move_cells:
+                    neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
+            nkey = nid << _NODE_SHIFT | arrive_flag | neighbor_snap
+            if new_g < g_score.get(nkey, 10 ** 9):
+                g_score[nkey] = new_g
+                if h <= h_limit or near:
+                    heapq.heappush(
+                        open_heap,
+                        (new_g + weight * h, -h, new_g, counter, new_g_wire, nkey, current_node, group),
+                    )
+                    counter += 1
+                else:
+                    h_radius_pruned += 1
+
+    return reached, best_node, h_radius_pruned, early_stop_reason, came_from
+
+
+# Which A* loop runs: MINECRAFT_V_ASTAR = kernel (default; the compiled _astar, falling back to
+# Python with a warning when it isn't built), py (_search_py), or check (both on every search;
+# raises on any difference and prints both loops' total time at exit).
+_ASTAR_MODE = os.environ.get("MINECRAFT_V_ASTAR", "kernel")
+if _ASTAR_MODE not in ("kernel", "py", "check"):
+    raise ValueError(f"MINECRAFT_V_ASTAR must be kernel, py or check, not {_ASTAR_MODE!r}")
+try:
+    from . import _astar
+except ImportError as exc:
+    _astar = None
+    if _ASTAR_MODE != "py":
+        print(f"[astar] compiled kernel unavailable ({exc}); using the Python loop", file=sys.stderr)
+else:
+    _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
+                _H_RADIUS_FACTOR)
+
+_check_stats = {"searches": 0, "py": 0.0, "kernel": 0.0}
+
+
+def _report_check_stats() -> None:
+    st = _check_stats
+    if st["searches"]:
+        print(f"[astar-check] {st['searches']} searches identical; loop time py {st['py']:.2f}s, "
+              f"kernel {st['kernel']:.2f}s ({st['py'] / max(st['kernel'], 1e-9):.1f}x)", file=sys.stderr)
+
+
+def _came_from_chain(came_from, node: int) -> list[int]:
+    chain = []
+    while node is not None and node != _NO_PARENT and len(chain) < 10 ** 7:
+        chain.append(node)
+        node = came_from.get(node)
+    return chain
+
+
+def _run_search(args: tuple, net_id: str):
+    if _astar is None or _ASTAR_MODE == "py":
+        return _search_py(*args)
+    if _ASTAR_MODE == "kernel":
+        return _astar.search(*args)
+    # check: both loops from the same start state (group_best_h is updated in place).
+    group_best_h = args[3]
+    t0 = time.perf_counter()
+    ref = _search_py(*args[:3], list(group_best_h), *args[4:])
+    t1 = time.perf_counter()
+    got = _astar.search(*args)
+    t2 = time.perf_counter()
+    timed_out = any(r[3] is not None and r[3].startswith("timeout") for r in (ref, got))
+    if not timed_out:
+        for name, a, b in (("reached", ref[0], got[0]), ("best_node", ref[1], got[1]),
+                           ("h_radius_pruned", ref[2], got[2]), ("stop reason", ref[3], got[3])):
+            if a != b:
+                raise AssertionError(f"A* kernel mismatch on net {net_id}: {name} py={a!r} kernel={b!r}")
+        end = ref[0] if ref[0] is not None else ref[1]
+        if _came_from_chain(ref[4], end) != _came_from_chain(got[4], end):
+            raise AssertionError(f"A* kernel mismatch on net {net_id}: came_from chains differ")
+    if not _check_stats["searches"]:
+        atexit.register(_report_check_stats)
+    _check_stats["searches"] += 1
+    _check_stats["py"] += t1 - t0
+    _check_stats["kernel"] += t2 - t1
+    return got

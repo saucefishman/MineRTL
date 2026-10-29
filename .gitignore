@@ -7,3 +7,7 @@ build/
 .uv-cache/
 .uv-python/
 .pytest_cache/
+
+# Cython A* kernel build outputs
+minecraft_v/placement_engine/_astar.cpp
+minecraft_v/placement_engine/*.so
