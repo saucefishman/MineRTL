@@ -2,9 +2,9 @@ from litemapy import Region
 
 from minecraft_v.placement_engine.constants import STONE
 from minecraft_v.placement_engine.ripup import (
-    Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, invalid_supports,
+    Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback, invalid_supports,
 )
-from minecraft_v.placement_engine.wire import _lay_redstone_path, _lay_dust_cell
+from minecraft_v.placement_engine.wire import LayConflict, _lay_redstone_path, _lay_dust_cell
 
 
 def _state(region: Region, solid, dust_owner, inverted):
@@ -61,3 +61,23 @@ def test_rip_up_keeps_support_used_by_other_net():
     # The kept support now belongs to b and goes away with it.
     rip_up(rec, "b", region, solid, dust_owner)
     assert _state(region, solid, dust_owner, inverted) == before
+
+
+def test_rollback_undoes_only_failed_attempt():
+    rec, region, ws, solid, dust_owner, inverted = _setup()
+    with rec.recording("a"):
+        _lay_redstone_path(ws, solid, dust_owner, [(1, 2, 1), (2, 2, 1)], "a", inverted_cells=inverted)
+    kept = _state(region, solid, dust_owner, inverted)
+    mark = len(rec.journals["a"])
+    # Path that comes back over its own wire: the last cell's support would be (3, 2, 1).
+    bad = [(2, 2, 1), (3, 2, 1), (4, 3, 1), (4, 3, 2), (3, 3, 2), (3, 3, 1)]
+    with rec.recording("a"):
+        try:
+            _lay_redstone_path(ws, solid, dust_owner, bad, "a", inverted_cells=inverted)
+        except LayConflict as e:
+            assert e.cells == ((3, 3, 1), (3, 2, 1))
+        else:
+            raise AssertionError("expected LayConflict")
+        rollback(rec, "a", mark)
+    assert _state(region, solid, dust_owner, inverted) == kept
+    assert len(rec.journals["a"]) == mark
