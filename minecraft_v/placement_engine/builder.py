@@ -1141,7 +1141,7 @@ def build_litematic_from_component_list(
         route_workers: int = 1,
         route_deadline: float | None = None,
         snapshots: bool = False,
-        placer: str = "legacy",
+        placer: str = "sa",
         place_y_moves: bool = True,
         place_z_moves: bool = True,
         place_seed: int = 0,

@@ -136,7 +136,7 @@ def main():
                              "use with --allow-routing-failures True)")
     parser.add_argument("--snapshots", action="store_true",
                         help="Save debug litematic snapshots during routing to <artifacts>/snapshots (slow)")
-    parser.add_argument("--placer", choices=("legacy", "bary", "sa"), default="legacy",
+    parser.add_argument("--placer", choices=("legacy", "bary", "sa"), default="sa",
                         help="Gate placement: legacy list order, barycenter row ordering, or barycenter + "
                              "simulated annealing")
     parser.add_argument("--place-y-moves", action=argparse.BooleanOptionalAction, default=True,
