@@ -24,6 +24,11 @@ _SNAP_OFFSETS: tuple[tuple[int, int, int], ...] = tuple(
     (ox, oy, oz) for oy in (-1, 0, 1) for ox in (-1, 0, 1) for oz in (-1, 0, 1) if ox or oz)
 _SNAP_BIT: dict[tuple[int, int, int], int] = {o: 1 << i for i, o in enumerate(_SNAP_OFFSETS)}
 _SNAP_MASK = (1 << len(_SNAP_OFFSETS)) - 1
+# Node key bit set when the node was entered by a tower move. Tower-gated moves depend on it,
+# and the launch cell is outside the window, so the snapshot alone can't tell a tower arrival
+# from a +1Y arrival at the same cell.
+_TOWER_FLAG = 1 << len(_SNAP_OFFSETS)
+_NODE_SHIFT = len(_SNAP_OFFSETS) + 1  # node = cell id << _NODE_SHIFT | tower flag | snapshot
 _NO_PARENT = -1  # parent node of A* seeds
 
 
@@ -366,14 +371,15 @@ def _find_wire_path(
     # cell was entered by a tower move); everything else reads the static world. A cell is
     # expanded once per distinct snapshot (~15x on mid designs), so each cell's moves are
     # worked out once, recording per move the snapshot bits that would forbid it.
-    # Move entry: (dest_id, cost, forbid_bits, tower_gate, extra_cell, snap_tables, flat_dir, h, near)
+    # Move entry: (dest_id, cost, forbid_bits, tower_gate, extra_cell, snap_tables, flat_dir, h, near, arrive_flag)
     #   tower_gate: 0 always, 1 not right after a tower move, 2 only right after one
     #   extra_cell: 2x-slope intermediate, added to every neighbour's snapshot when the move is taken
     #   flat_dir: (dx, dz) for same-Y moves of at most one XZ step (direction-change penalty), else None
+    #   arrive_flag: _TOWER_FLAG for tower moves, else 0 (part of the destination node key)
     # Powered -4 is one move with alternatives: the first side whose bits are clear wins.
     #
     # Cells get small int ids (pos_list[id] = cell) so a search node is one int,
-    # id << 24 | snapshot, instead of a nested tuple that is re-hashed on every lookup.
+    # id << _NODE_SHIFT | tower flag | snapshot, instead of a nested tuple that is re-hashed on every lookup.
     pos_list: list[tuple[int, int, int]] = []
     pos_ids: dict[tuple[int, int, int], int] = {}
     move_cache: list[tuple[list[tuple], tuple | None] | None] = []  # by cell id
@@ -393,7 +399,8 @@ def _find_wire_path(
         h = heuristic(dest)
         near = ((abs(goal[0] - dest[0]) + abs(goal[2] - dest[2])) < _HORIZ_RADIUS_MIN
                 and abs(goal[1] - dest[1]) < _Y_RADIUS_MIN)
-        return _pid(dest), cost, forbid, gate, extra, _snap_shift_tables((dx, dy, dz)), flat_dir, h, near
+        arrive_flag = _TOWER_FLAG if dy == 4 and (dx, dz) in _TOWER_2BLOCK else 0
+        return _pid(dest), cost, forbid, gate, extra, _snap_shift_tables((dx, dy, dz)), flat_dir, h, near, arrive_flag
 
     def _static_moves(pos: tuple[int, int, int]) -> tuple[list[tuple], tuple | None]:
         if pos in inverted_cells:
@@ -521,7 +528,8 @@ def _find_wire_path(
 
     def _tower_candidates(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
         """Tower-up moves from pos legal against the static world: (tower_top, snapshot bits of
-        the repeater and its support). (The cell below the tower base is outside the snapshot window.)"""
+        the repeater, its support and the cell above it). (The cell below the tower base and the
+        column itself are outside the snapshot window; the finished path is checked for those.)"""
         x, y, z = pos
         out: list[tuple[tuple[int, int, int], int]] = []
         if y + 4 > max_bridge_y:
@@ -578,7 +586,7 @@ def _find_wire_path(
                 # If it's our own connection, we create a loop, if its others', we're interfering
                 if below_base in ix_wire:
                     continue
-            out.append((tower_top, _snap_bit(tdx, 0, tdz) | _snap_bit(tdx, -1, tdz)))
+            out.append((tower_top, _snap_bit(tdx, 0, tdz) | _snap_bit(tdx, -1, tdz) | _snap_bit(tdx, 1, tdz)))
         return out
 
     m4_clear_cache: dict[tuple[int, int, int], bool] = {}
@@ -677,6 +685,7 @@ def _find_wire_path(
             cand = (start[0] + ddx, start[1] + ddy, start[2] + ddz)
             if walkable(cand):
                 seeds.append(cand)
+    n_start_seeds = len(seeds)
     # Fan-out tree routing: existing own-net wire cells are valid branch seeds
     if tree_seeds:
         seed_set = set(seeds)
@@ -696,32 +705,40 @@ def _find_wire_path(
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
     # A* search
-    # Heap entry: (f, -h, g, counter, g_wire, node, parent_node). g_wire excludes conflict
+    # Heap entry: (f, -h, g, counter, g_wire, node, parent_node, group). g_wire excludes conflict
     # penalties so the f-cap only bounds real wire length, not negotiation cost.
+    # group: the seed group a node descends from (0 = start seeds, then one per tree seed).
+    # f-cap and h-radius budgets are per group: with one shared budget sized to the nearest
+    # tree seed, a boxed-in near branch starves every farther seed (and the start itself).
     # counter is unique per push so comparison never falls through to node/parent.
-    # Nodes are (cell id << 24 | local_snapshot), so paths with different local histories
+    # Nodes are (cell id << _NODE_SHIFT | tower flag | local_snapshot), so paths with different local histories
     # coexist — a cheaper path with a restrictive snapshot does not block a more
     # expensive path whose snapshot enables moves the cheaper one can't make.
     # A seed's parent is _NO_PARENT.
     counter = 0
     open_heap = []
     g_score: dict[int, int] = {}
-    for seed in seeds:
+    group_best_h: list[int] = [10 ** 9] * (1 + len(seeds) - n_start_seeds)
+    for i, seed in enumerate(seeds):
         # Local snap of seed is empty — seed is never in its own window.
-        seed_key = _pid(seed) << 24
+        seed_key = _pid(seed) << _NODE_SHIFT
         g_score[seed_key] = 0
         h0 = heuristic(seed)
-        heapq.heappush(open_heap, (weight * h0, -h0, 0, counter, 0, seed_key, _NO_PARENT))
+        group = 0 if i < n_start_seeds else 1 + i - n_start_seeds
+        group_best_h[group] = min(group_best_h[group], h0)
+        heapq.heappush(open_heap, (weight * h0, -h0, 0, counter, 0, seed_key, _NO_PARENT, group))
         counter += 1
     goal_ids = {_pid(gc) for gc in goal_set}
 
     def node_str(node: int) -> str:
-        return str((pos_list[node >> 24], node & _SNAP_MASK))
+        return str((pos_list[node >> _NODE_SHIFT], node & _SNAP_MASK))
 
     reached: int | None = None
-    best_node = _pid(seeds[0]) << 24
-    best_h: int = min(heuristic(s) for s in seeds)
-    max_f: int = max(best_h, 10) * _ROUTE_BUDGET_FACTOR
+    best_seed = min(seeds, key=heuristic)
+    best_node = _pid(best_seed) << _NODE_SHIFT
+    best_h: int = heuristic(best_seed)
+    group_max_f: list[int] = [max(gh, 10) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
+    max_f: int = max(group_max_f)
     explored: set[int] = set()
     explored_xyz: set[int] = set()  # cell ids
     stagnation = 0
@@ -734,13 +751,16 @@ def _find_wire_path(
         if deadline is not None and pops & 255 == 0 and time.monotonic() > deadline:
             early_stop_reason = f"timeout ({time_limit}s)"
             break
-        f, _, g, _, g_wire, current_node, parent = heapq.heappop(open_heap)
-        # f-cap: prune nodes whose total estimated cost exceeds budget.
-        # Catches runaway detours around impossible obstacles without burning _ROUTE_MAX_NODES.
+        f, _, g, _, g_wire, current_node, parent, group = heapq.heappop(open_heap)
+        # f-cap: prune nodes whose total estimated cost exceeds their group's budget; stop once
+        # past every group's. Catches runaway detours around impossible obstacles without
+        # burning _ROUTE_MAX_NODES.
         f_wire = f - g + g_wire
-        if f_wire > max_f:
-            early_stop_reason = f"f-cap exceeded (f={f_wire} > max_f={max_f})"
-            break
+        if f_wire > group_max_f[group]:
+            if f_wire > max_f:
+                early_stop_reason = f"f-cap exceeded (f={f_wire} > max_f={max_f})"
+                break
+            continue
         if g > g_score.get(current_node, 10 ** 9):
             continue
         # Record parent for path reconstruction. First expansion wins: subsequent
@@ -748,12 +768,14 @@ def _find_wire_path(
         # came_from forms a tree with strictly decreasing g toward the seed — no cycles.
         if current_node not in came_from:
             came_from[current_node] = parent
-        cid = current_node >> 24
+        cid = current_node >> _NODE_SHIFT
         cur_pos = pos_list[cid]
         h = heuristic(cur_pos)
         if h < best_h:
             best_h = h
             best_node = current_node
+        if h < group_best_h[group]:
+            group_best_h[group] = h
         # Stagnation = consecutive re-expansions of already-explored (pos,snap) pairs.
         # New territory always resets it; detours away from goal don't penalize.
         if current_node in explored:
@@ -773,12 +795,8 @@ def _find_wire_path(
             reached = current_node
             break
         cur_snap = current_node & _SNAP_MASK
-        par_pos = pos_list[parent >> 24] if parent != _NO_PARENT else None
-        came_from_tower = (
-            par_pos is not None
-            and par_pos[1] + 4 == cur_pos[1]
-            and (cur_pos[0] - par_pos[0], cur_pos[2] - par_pos[2]) in _TOWER_2BLOCK
-        )
+        par_pos = pos_list[parent >> _NODE_SHIFT] if parent != _NO_PARENT else None
+        came_from_tower = bool(current_node & _TOWER_FLAG)
         static = move_cache[cid]
         if static is None:
             static = move_cache[cid] = _static_moves(cur_pos)
@@ -804,11 +822,11 @@ def _find_wire_path(
         # fill) onto each neighbour's window.
         cb0, cb1, cb2 = cur_snap & 255, cur_snap >> 8 & 255, cur_snap >> 16
         in_dir = (cur_pos[0] - par_pos[0], cur_pos[2] - par_pos[2]) if par_pos is not None else None
-        h_limit = best_h * _H_RADIUS_FACTOR
+        h_limit = group_best_h[group] * _H_RADIUS_FACTOR
         if m4_cells:
             taken.append(m4[0])
         last = len(taken) - 1
-        for i, (nid, cost, _, _, _, (t0, t1, t2, self_bit), flat_dir, h, near) in enumerate(taken):
+        for i, (nid, cost, _, _, _, (t0, t1, t2, self_bit), flat_dir, h, near, arrive_flag) in enumerate(taken):
             # Penalise XZ direction change on flat moves only (avoids disrupting slope/tower costs).
             if in_dir is not None and flat_dir is not None and flat_dir != in_dir:
                 cost += 1
@@ -824,13 +842,13 @@ def _find_wire_path(
                     neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
                 for c in move_cells:
                     neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
-            nkey = nid << 24 | neighbor_snap
+            nkey = nid << _NODE_SHIFT | arrive_flag | neighbor_snap
             if new_g < g_score.get(nkey, 10 ** 9):
                 g_score[nkey] = new_g
                 if h <= h_limit or near:
                     heapq.heappush(
                         open_heap,
-                        (new_g + weight * h, -h, new_g, counter, new_g_wire, nkey, current_node),
+                        (new_g + weight * h, -h, new_g, counter, new_g_wire, nkey, current_node, group),
                     )
                     counter += 1
                 else:
@@ -841,7 +859,7 @@ def _find_wire_path(
         cur = best_node
         # Seeds only enter came_from once expanded; an early stop (f-cap) can precede that.
         while cur is not None and cur != _NO_PARENT:
-            cx, cy, cz = pos_list[cur >> 24]
+            cx, cy, cz = pos_list[cur >> _NODE_SHIFT]
             workspace[cx, cy, cz] = lamp
             cur = came_from.get(cur)
         # for prot in sorted(effective_footprint_blocked | effective_protected, key=heuristic)[:100]:
@@ -850,7 +868,7 @@ def _find_wire_path(
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
         error = RouteTimeout if early_stop_reason and early_stop_reason.startswith("timeout") else ValueError
         raise error(f"No route for net {net_id} from {start} to {goal} (closest reached: {node_str(best_node)}{reason}; h_radius_pruned={h_radius_pruned})")
-    if walkable(goal) and pos_list[reached >> 24] != goal:
+    if walkable(goal) and pos_list[reached >> _NODE_SHIFT] != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {node_str(reached)}")
 
     path: list[tuple[int, int, int]] = []
@@ -860,7 +878,7 @@ def _find_wire_path(
     while cur != _NO_PARENT:
         if cur in back_visited:
             raise ValueError("Path tracing resulted in loop")
-        cur_pos = pos_list[cur >> 24]
+        cur_pos = pos_list[cur >> _NODE_SHIFT]
         if cur_pos in path:
             duplicate = True
         path.append(cur_pos)
@@ -872,4 +890,20 @@ def _find_wire_path(
     path.reverse()
     if not tree_seeds and path[0] != start:
         raise ValueError(f"Path for net {net_id} does not begin at start {start}; begins at {path[0]}")
+    _check_tower_self_overlap(path, net_id)
     return path
+
+
+def _check_tower_self_overlap(path: list[tuple[int, int, int]], net_id: str) -> None:
+    """Raise if a tower move's repeater (or the cell above it) or torch/stone column lands on
+    another cell of the same path. The local snapshot can't see the column (2 cells out) or
+    path cells that have left the window, and laying would silently drop the torch."""
+    path_cells = set(path)
+    for (x, y, z), (bx, by, bz) in zip(path, path[1:]):
+        if by - y != 4 or (bx - x, bz - z) not in _TOWER_2BLOCK:
+            continue
+        rx, rz = (x + bx) // 2, (z + bz) // 2
+        cells = [(rx, y, rz), (rx, y + 1, rz)] + [(bx, y + cdy, bz) for cdy in range(4)]
+        for c in cells:
+            if c in path_cells:
+                raise ValueError(f"Tower move {(x, y, z)} -> {(bx, by, bz)} for net {net_id} overlaps its own path at {c}")
