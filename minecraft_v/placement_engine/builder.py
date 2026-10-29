@@ -440,8 +440,9 @@ def _net_sort_key(
 
 def _route_all_nets(
         workspace: Region,
-        solid: set[tuple[int, int, int]],
-        dust_owner: dict[tuple[int, int, int], str],
+        rec: Recorder,
+        solid: JournaledSet,
+        dust_owner: JournaledDict,
         sorted_nets: list[NetConnection],
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         ws_bounds: tuple[int, int, int, int, int, int],
@@ -452,13 +453,51 @@ def _route_all_nets(
         deadline: float | None = None,
         fail_fast: bool = False,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
-    """fail_fast: raise on the first net that fails instead of collecting failures."""
+    """fail_fast: raise on the first net that fails instead of collecting failures.
+
+    Each net's laying is journaled in rec; a net that fails is ripped up so its partial
+    wire / support / repeaters don't block later nets or show up as debris.
+    """
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
-    inverted_cells: set[tuple[int, int, int]] = set()
+    inverted_cells: set[tuple[int, int, int]] = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals)
     region = workspace
-    workspace = IndexedWorkspace(region)  # all writes below go through this, keeping its index current
+    indexed = IndexedWorkspace(region)  # all writes below go through this, keeping its index current
+    workspace = JournalingWorkspace(indexed, rec)
+
+    def route_net(net_idx: int, net: NetConnection) -> None:
+        src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
+        protected = keepouts.for_net(net.net_id)
+        net_ordered_paths: list[list[tuple[int, int, int]]] = []
+        dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
+        sorted_pins = sorted(dst_pins,
+                             key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
+        for dst_pin in sorted_pins:
+            tree_seeds = [
+                pos for _path in net_ordered_paths for pos in _path
+            ]
+            all_terminal_positions = frozenset(pin_terminal.values())
+            path = _find_wire_path(
+                indexed, solid, dust_owner,
+                src_pin, dst_pin, net.net_id,
+                ws_bounds, max_bridge_y,
+                tree_seeds=tree_seeds,
+                protected=protected,
+                footprint_blocked=footprint_blocked,
+                inverted_cells=frozenset(inverted_cells),
+                terminal_positions=all_terminal_positions,
+            )
+            support_block = WOOLS[net_idx % len(WOOLS)]
+
+            _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
+                               opaque_support_block=support_block,
+                               inverted_cells=inverted_cells,
+                               goal=dst_pin,
+                               terminal_positions=all_terminal_positions)
+            net_ordered_paths.append(path)
+        _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
+
     with ProgressBar("[wire]", total_nets) as bar:
         for net_idx, net in enumerate(sorted_nets, 1):
             bar.update(info=net.net_id)
@@ -468,41 +507,14 @@ def _route_all_nets(
                 routing_failures.append((net.net_id, ValueError("route deadline reached")))
                 continue
             try:
-                src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
-                protected = keepouts.for_net(net.net_id)
-                net_ordered_paths: list[list[tuple[int, int, int]]] = []
-                dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
-                sorted_pins = sorted(dst_pins,
-                                     key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
-                for dst_pin in sorted_pins:
-                    tree_seeds = [
-                        pos for _path in net_ordered_paths for pos in _path
-                    ]
-                    all_terminal_positions = frozenset(pin_terminal.values())
-                    path = _find_wire_path(
-                        workspace, solid, dust_owner,
-                        src_pin, dst_pin, net.net_id,
-                        ws_bounds, max_bridge_y,
-                        tree_seeds=tree_seeds,
-                        protected=protected,
-                        footprint_blocked=footprint_blocked,
-                        inverted_cells=frozenset(inverted_cells),
-                        terminal_positions=all_terminal_positions,
-                    )
-                    support_block = WOOLS[net_idx % len(WOOLS)]
-
-                    _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
-                                       opaque_support_block=support_block,
-                                       inverted_cells=inverted_cells,
-                                       goal=dst_pin,
-                                       terminal_positions=all_terminal_positions)
-                    net_ordered_paths.append(path)
-                _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
+                with rec.recording(net.net_id):
+                    route_net(net_idx, net)
             except Exception as e:
                 if fail_fast:
                     raise RuntimeError(f"Routing failed for net {net.net_id}: {e}") from e
                 routing_failures.append((net.net_id, e))
                 log(f"[error] skipped net {net.net_id}: {e}")
+                rip_up(rec, net.net_id, indexed, solid, dust_owner)
             if snapshot_dir is not None and net_idx % 10 == 0:
                 safe_id = net.net_id.replace("/", "_").replace("\\", "_")
                 save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", region, snapshot_dir)
@@ -1080,7 +1092,7 @@ def build_litematic_from_component_list(
         if route_workers > 1:
             print("[wire] --route-workers ignored: needs --route-passes > 1")
         routing_failures, inverted_cells = _route_all_nets(
-            workspace, solid, dust_owner,
+            workspace, rec, solid, dust_owner,
             sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
             footprint_blocked, all_terminals,
             snapshot_dir=snapshot_dir,
