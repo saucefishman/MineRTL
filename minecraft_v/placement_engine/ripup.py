@@ -105,7 +105,9 @@ class JournalingWorkspace:
         return self.region[pos]
 
     def block_index(self):
-        return _BlockIndex(self.region)
+        # Stacked on an IndexedWorkspace: reuse its live index instead of rescanning.
+        inner = getattr(self.region, "block_index", None)
+        return inner() if inner is not None else _BlockIndex(self.region)
 
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
