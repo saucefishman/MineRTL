@@ -65,7 +65,8 @@ fi
 
 yosys -q -p "
 read_verilog -sv ${dir}/*.v
-hierarchy -top main
+hierarchy -check -top main
+flatten -noscopeinfo
 proc
 memory_map
 dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 -cell \$_DLATCH_P_ 0
