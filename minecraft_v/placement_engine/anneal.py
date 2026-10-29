@@ -71,7 +71,9 @@ class _PlaceState:
             routing_gutter: int,
             y_moves: bool,
             clock_pin: str | None = None,
+            output_x_order: dict[str, float] | None = None,
     ):
+        self.output_x_order = output_x_order
         self.components = components
         self.nets = nets
         self.comps = {c.id: c for c in components}
@@ -191,8 +193,9 @@ class _PlaceState:
                             self.y[c.id] = _majority_y(ys)
             gates_placed = [_Placed(component=self.comp(g), origin=self.pos[g]) for g in self.gates]
             self._io_x = {}
-            for group in (self.inputs, self.outputs):
-                self._io_x.update(_assign_io_x_positions(group, gates_placed, self.nets, 0, self.gutter, 0))
+            self._io_x.update(_assign_io_x_positions(self.inputs, gates_placed, self.nets, 0, self.gutter, 0))
+            self._io_x.update(_assign_io_x_positions(self.outputs, gates_placed, self.nets, 0, self.gutter, 0,
+                                                     x_order=self.output_x_order))
         for c in self.outputs:
             self.pos[c.id] = (self._io_x[c.id], self.base_y + self.y[c.id], 1)
         for c in self.inputs:
@@ -621,8 +624,12 @@ def _optimize_placement(
         mirror_moves: bool = True,
         seed: int = 0,
         clock_pin: str | None = None,
+        output_x_order: dict[str, float] | None = None,
 ) -> list[_Placed]:
-    """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``)."""
+    """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``).
+
+    output_x_order: fixed left-to-right order of output pins (see _assign_io_x_positions).
+    """
     gates = [c for c in components if c.type not in _IO_TYPES]
     y_of = {c.id: y_level.get(c.id, 0) for c in components}
     layer_of = _assign_gate_layers(gates, nets, {c.id: y_of[c.id] for c in gates})
@@ -631,7 +638,7 @@ def _optimize_placement(
     state = _PlaceState(
         components, nets, layer_of, y_of,
         base_y=base_y, gutter=gutter, routing_gutter=routing_gutter, y_moves=y_moves,
-        clock_pin=clock_pin,
+        clock_pin=clock_pin, output_x_order=output_x_order,
     )
     seed_cost = state.cost
     if state.gates:
@@ -649,5 +656,5 @@ def _optimize_placement(
 
     return _pack_layout(
         components, nets, state.layer_gates(), comp_y,
-        gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter,
+        gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter, output_x_order=output_x_order,
     )

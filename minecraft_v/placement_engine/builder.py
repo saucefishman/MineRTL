@@ -211,6 +211,9 @@ def _place_io_repeaters(
     return io_repeater_cells, output_repeater_lookup, io_signs
 
 
+_EXT_TUBE_DEPTH = int(__import__("os").environ.get("EXT_TUBE", "3"))
+
+
 def _route_output_pin_extensions(
         workspace: Region,
         solid: set[tuple[int, int, int]],
@@ -277,12 +280,33 @@ def _route_output_pin_extensions(
 
     all_terminal_positions = frozenset(
         pos for ts in (all_terminals or {}).values() for pos in ts) | all_ext_targets
+    net_by_pin: dict[str, str] = {}
+    for pin_name in output_pin_targets:
+        base_net_id = net_id_by_output_endpoint.get(output_repeater_lookup[pin_name][2])
+        if base_net_id is None:
+            raise ValueError(f"Output target '{pin_name}' has no mapped net")
+        net_by_pin[pin_name] = base_net_id
+    # A pin's keepout: every other net's terminal keepout (_compute_net_protected) plus the
+    # zones around every other pin's repeater and target. Counted per cell with one owner per
+    # net (its terminals plus its pins' zones) so each pin gets a lazy view, not a copy.
+    def _target_tube(target: tuple[int, int, int]) -> set[tuple[int, int, int]]:
+        """Straight approach lane in front of a target (+z), so wires don't sweep across it."""
+        tx, ty, tz = target
+        return {(tx + dx, ty + dy, tz + k) for k in range(1, _EXT_TUBE_DEPTH + 1)
+                for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+
+    pin_zone = {pn: _repeater_protection_zone(repeater_cells_by_pin[pn])
+                | _repeater_protection_zone(ext_target_positions[pn])
+                | _target_tube(ext_target_positions[pn]) for pn in output_pin_targets}
+    owner_cells: dict[str, set[tuple[int, int, int]]] = {
+        net_id: _terminal_keepout(ts) for net_id, ts in (all_terminals or {}).items()}
+    for pn, net_id in net_by_pin.items():
+        owner_cells.setdefault(net_id, set()).update(pin_zone[pn])
+    owner_count = _count_cells(owner_cells)
     jobs: list[_RouteJob] = []
     for pin_name in sorted(output_pin_targets, key=lambda pn: ext_target_positions[pn][1]):
         repeater_cell, side_name, endpoint = output_repeater_lookup[pin_name]
-        base_net_id = net_id_by_output_endpoint.get(endpoint)
-        if base_net_id is None:
-            raise ValueError(f"Output target '{pin_name}' has no mapped net")
+        base_net_id = net_by_pin[pin_name]
         nx, ny, nz = _SIDE_NORMAL[side_name]
         launch = (repeater_cell[0] + nx, repeater_cell[1] + ny, repeater_cell[2] + nz)
         if not _in_bounds(launch):
@@ -291,12 +315,10 @@ def _route_output_pin_extensions(
         if not _in_bounds(launch):
             raise ValueError(f"No in-bounds launch cell for output target '{pin_name}'")
         target = ext_target_positions[pin_name]
-        protected = _compute_net_protected(base_net_id, all_terminals) if all_terminals else frozenset()
-        # Other output pin targets and their source repeaters act as foreign terminals.
-        for other_pin, rc in repeater_cells_by_pin.items():
-            if other_pin != pin_name:
-                protected = protected | _repeater_protection_zone(rc) | _repeater_protection_zone(
-                    ext_target_positions[other_pin])
+        # Other pins of this same net are foreign terminals too.
+        same_net = frozenset(c for pn, net_id in net_by_pin.items()
+                             if net_id == base_net_id and pn != pin_name for c in pin_zone[pn])
+        protected = _ForeignKeepout(owner_count, owner_cells[base_net_id], extra=same_net)
         jobs.append(_RouteJob(
             key=f"{base_net_id}>{pin_name}", net_id=base_net_id,
             src=launch, sinks=[target], bounds=ext_bounds,
@@ -1231,11 +1253,14 @@ def build_litematic_from_component_list(
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
     y_stride = max_comp_height + additional_component_height_spacing
     y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride, clock_pin=clock_pin)
+    # Order output pins like their extension targets, so extensions don't have to cross.
+    output_x_order = {pn: float(tx) for pn, (tx, _ty) in (output_pin_targets or {}).items()}
     if placer == "legacy":
         placed = _layout_components(
             comp.components, comp.nets,
             gutter=gutter, base_y=base_y, y_level=y_level,
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
+            output_x_order=output_x_order,
         )
     else:
         placed = _optimize_placement(
@@ -1243,7 +1268,7 @@ def build_litematic_from_component_list(
             placer=placer, base_y=base_y, gutter=gutter,
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
             y_moves=place_y_moves, z_moves=place_z_moves, mirror_moves=place_mirror, seed=place_seed,
-            clock_pin=clock_pin,
+            clock_pin=clock_pin, output_x_order=output_x_order,
         )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
