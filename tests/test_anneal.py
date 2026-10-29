@@ -166,3 +166,41 @@ def test_incremental_cost_matches_full_recompute(monkeypatch, w_cong):
         st.commit() if rng.random() < 0.5 else st.undo()
     incremental = st.cost
     assert incremental == pytest.approx(st.full_recompute(restack=False))
+
+
+def _module_with_scalar_inputs() -> Module:
+    """The adder plus scalar inputs: ``cin`` into bit 0, ``clk`` gating the top sum bit."""
+    m = _adder_like_module()
+    top = m.ports["s"].bits[-1]
+    m.cells["cin_and"] = _cell("$_AND_", {"A": [m.ports["a"].bits[0]], "B": [50], "Y": [60]})
+    m.cells["clk_and"] = _cell("$_AND_", {"A": [top], "B": [51], "Y": [61]})
+    m.ports.update({
+        "cin": Port(direction="input", bits=[50]),
+        "clk": Port(direction="input", bits=[51]),
+        "q0": Port(direction="output", bits=[60]),
+        "q3": Port(direction="output", bits=[61]),
+    })
+    return m
+
+
+@pytest.mark.parametrize("clock_pin", [None, "clk"])
+def test_input_pins_align_by_bit_and_name(clock_pin):
+    comp = _expand_multibit_io(module_to_component_list(_module_with_scalar_inputs()))
+    stride = max(c.footprint.height for c in comp.components) + 4
+    y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=stride, clock_pin=clock_pin)
+    placed = anneal._optimize_placement(
+        comp.components, comp.nets, y_level, placer="sa", clock_pin=clock_pin, **_KW)
+    origin = {p.component.id: p.origin for p in placed}
+
+    # Bit k of every input on one Y level (scalar inputs count as bit 0); bits of one input in one X column.
+    by_name = defaultdict(set)
+    for k in range(4):
+        assert origin[f"a[{k}]"][1] == origin[f"b[{k}]"][1]
+    assert origin["cin"][1] == origin["a[0]"][1]
+    for c in comp.components:
+        if c.type == ComponentType.INPUT_PIN:
+            by_name[_io_base_name(c.id)].add(origin[c.id][0])
+    assert all(len(xs) == 1 for xs in by_name.values())
+
+    clk_gate_y = origin["clk_and"][1]
+    assert origin["clk"][1] == (clk_gate_y if clock_pin else origin["a[0]"][1])

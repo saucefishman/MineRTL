@@ -81,6 +81,19 @@ def _io_bit_index(c: Component) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _io_y_index(c: Component, clock_pin: str | None = None) -> int | None:
+    """Bit index that fixes an IO's Y level, or None if it follows its gates.
+
+    Scalar inputs ('i0') count as bit 0, so bit k of every module input sits on
+    the same Y level.  The generated clock pin (``clock_pin``) is exempt and
+    follows its gates like a scalar output.
+    """
+    idx = _io_bit_index(c)
+    if idx is None and c.type == ComponentType.INPUT_PIN and c.id != clock_pin:
+        return 0
+    return idx
+
+
 def _io_base_name(comp_id: str) -> str:
     """Strip bit-index suffix: 'a[2]' → 'a', 'reset' → 'reset'."""
     m = _BIT_NAME_RE.match(comp_id)
@@ -292,21 +305,23 @@ def _assign_component_y_levels(
         nets: list[NetConnection],
         *,
         y_stride: int,
+        clock_pin: str | None = None,
 ) -> dict[str, int]:
     """Return Y offset per component ID.
 
-    Indexed IO (e.g. ``a[2]``) → bit_index * y_stride (fixed).
+    Indexed IO (e.g. ``a[2]``) → bit_index * y_stride (fixed); scalar inputs
+    other than ``clock_pin`` count as bit 0.
     Gates exclusively in one indexed-output's backward fanin cone → forced to
     that cone's Y level (avoids the heuristic misassigning independent data
     paths that happen to share control/address logic).
     Remaining gates → least-loaded Y among candidates from connected
     already-assigned components; two passes (forward + backward).
-    Non-indexed IO (scalar shared) → majority Y of connected gates.
+    Scalar outputs and ``clock_pin`` → majority Y of connected gates.
     """
     y_level: dict[str, int] = {}
 
     for c in components:
-        idx = _io_bit_index(c)
+        idx = _io_y_index(c, clock_pin)
         if idx is not None:
             y_level[c.id] = idx * y_stride
 

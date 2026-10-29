@@ -28,6 +28,7 @@ from minecraft_v.placement_engine.layout import (
     _assign_io_x_positions,
     _feedforward_nets,
     _io_bit_index,
+    _io_y_index,
     _majority_y,
     _pack_layout,
 )
@@ -66,6 +67,7 @@ class _PlaceState:
             gutter: int,
             routing_gutter: int,
             y_moves: bool,
+            clock_pin: str | None = None,
     ):
         self.components = components
         self.nets = nets
@@ -77,6 +79,7 @@ class _PlaceState:
         self.gutter = gutter
         self.routing_gutter = routing_gutter
         self.y_moves = y_moves
+        self.clock_pin = clock_pin
 
         self.layer = dict(layer_of)
         self.y = dict(y_of)
@@ -89,7 +92,7 @@ class _PlaceState:
 
         self.levels = sorted(
             {self.y[g] for g in self.gates}
-            | {self.y[c.id] for c in components if c.type in _IO_TYPES and _io_bit_index(c) is not None}
+            | {self.y[c.id] for c in components if c.type in _IO_TYPES and _io_y_index(c, clock_pin) is not None}
         )
 
         pin_offset = {(c.id, p.name): p.offset for c in components for p in c.pins}
@@ -161,9 +164,9 @@ class _PlaceState:
         if refresh:
             if self.y_moves:
                 for c in self.inputs + self.outputs:
-                    if _io_bit_index(c) is None:
+                    if _io_y_index(c, self.clock_pin) is None:
                         ys = [self.y[o] for ni in self.comp_nets[c.id] for (o, *_r) in self.net_pins[ni]
-                              if o != c.id and o in self.y and (o in self.layer or _io_bit_index(self.comps[o]) is not None)]
+                              if o != c.id and o in self.y and (o in self.layer or _io_y_index(self.comps[o], self.clock_pin) is not None)]
                         if ys:
                             self.y[c.id] = _majority_y(ys)
             gates_placed = [_Placed(component=self.comps[g], origin=self.pos[g]) for g in self.gates]
@@ -564,6 +567,7 @@ def _optimize_placement(
         y_moves: bool = True,
         z_moves: bool = True,
         seed: int = 0,
+        clock_pin: str | None = None,
 ) -> list[_Placed]:
     """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``)."""
     gates = [c for c in components if c.type not in _IO_TYPES]
@@ -574,6 +578,7 @@ def _optimize_placement(
     state = _PlaceState(
         components, nets, layer_of, y_of,
         base_y=base_y, gutter=gutter, routing_gutter=routing_gutter, y_moves=y_moves,
+        clock_pin=clock_pin,
     )
     seed_cost = state.cost
     if state.gates:
