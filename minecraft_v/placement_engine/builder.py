@@ -37,6 +37,7 @@ from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
+from .cosmetics import apply_dust_shapes, place_io_signs
 from .verify import verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
@@ -177,9 +178,11 @@ def _place_io_repeaters(
         solid: set[tuple[int, int, int]],
         pin_world_map: dict[tuple[str, str], tuple[int, int, int]],
         ws_bounds: tuple[int, int, int, int, int, int],
-) -> tuple[set[tuple[int, int, int]], dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]]]:
-    """Place I/O repeaters and return (all repeater cells, output target lookup)."""
+) -> tuple[set[tuple[int, int, int]], dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]],
+           list[tuple[tuple[int, int, int], tuple[int, int], str]]]:
+    """Place I/O repeaters and return (all repeater cells, output target lookup, sign specs)."""
     io_repeater_cells: set[tuple[int, int, int]] = set()
+    io_signs: list[tuple[tuple[int, int, int], tuple[int, int], str]] = []
     output_repeater_lookup: dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]] = {}
     for item in placed:
         c = item.component
@@ -197,12 +200,14 @@ def _place_io_repeaters(
             # Not added to `solid`: a repeater can't hold dust, and `solid` doubles as "can support".
             _ensure_support(workspace, solid, cell)
             io_repeater_cells.add(cell)
+            nx, _, nz = _SIDE_NORMAL[side.value]
+            io_signs.append((cell, (nx, nz), pin.name))
             if c.type == ComponentType.OUTPUT_PIN:
                 side_name = side.value
                 endpoint = (c.id, pin.name)
                 for key in (c.id, pin.name, f"{c.id}.{pin.name}"):
                     output_repeater_lookup[key] = (cell, side_name, endpoint)
-    return io_repeater_cells, output_repeater_lookup
+    return io_repeater_cells, output_repeater_lookup, io_signs
 
 
 def _route_output_pin_extensions(
@@ -1272,7 +1277,7 @@ def build_litematic_from_component_list(
     const_positions = _place_const_sources(workspace, placed, solid)
     max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
     pin_world_map, pin_terminal, terminal_approach = _compute_pin_maps(placed)
-    io_repeater_cells, output_repeater_lookup = _place_io_repeaters(workspace, placed, solid, pin_world_map, io_bounds)
+    io_repeater_cells, output_repeater_lookup, io_signs = _place_io_repeaters(workspace, placed, solid, pin_world_map, io_bounds)
     output_component_ids = {c.id for c in comp.components if c.type == ComponentType.OUTPUT_PIN}
     net_id_by_output_endpoint: dict[tuple[str, str], str] = {
         (sink.component_id, sink.pin_name): net.net_id
@@ -1378,6 +1383,10 @@ def build_litematic_from_component_list(
     _report_unsupported_blocks(workspace, dust_owner, frozenset(_component_interior(placed)))
 
     critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace)
+
+    # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
+    apply_dust_shapes(workspace)
+    place_io_signs(workspace, io_signs)
 
     regions = {'main': workspace}
 
