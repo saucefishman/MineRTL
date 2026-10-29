@@ -400,6 +400,32 @@ def _assign_component_y_levels(
     return y_level
 
 
+_REGISTER_TYPES = {ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH}
+
+
+def _feedforward_nets(gates: list[Component], nets: list[NetConnection]) -> list[NetConnection]:
+    """Nets driven by combinational gates — register outputs are feedback and impose no layer order."""
+    non_register_ids = {c.id for c in gates if c.type not in _REGISTER_TYPES}
+    return [n for n in nets if n.source.component_id in non_register_ids]
+
+
+def _assign_gate_layers(
+        gates: list[Component],
+        nets: list[NetConnection],
+        gate_y: dict[str, int],
+) -> dict[str, int]:
+    """Depth layer per gate, computed separately within each Y level (0 = nearest the inputs)."""
+    gates_by_y: dict[int, list[Component]] = defaultdict(list)
+    for c in gates:
+        gates_by_y[gate_y[c.id]].append(c)
+
+    ff_nets = _feedforward_nets(gates, nets)
+    local_depth: dict[str, int] = {}
+    for y_gates in gates_by_y.values():
+        local_depth.update(_build_dependency_layers(y_gates, ff_nets))
+    return local_depth
+
+
 def _layout_components(
         components: list[Component],
         nets: list[NetConnection],
@@ -410,8 +436,6 @@ def _layout_components(
         routing_gutter: int = 10,
         y_level: dict[str, int] | None = None,
 ) -> list[_Placed]:
-    inputs = [c for c in components if c.type == ComponentType.INPUT_PIN]
-    outputs = [c for c in components if c.type == ComponentType.OUTPUT_PIN]
     gates = [
         c for c in components
         if c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
@@ -422,30 +446,42 @@ def _layout_components(
             return base_y + y_level[c.id]
         return base_y
 
-    gates_by_y: dict[int, list[Component]] = defaultdict(list)
-    for c in gates:
-        gates_by_y[comp_y(c)].append(c)
-
-    _REGISTER_TYPES = {ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH}
-    _non_register_ids = {c.id for c in gates if c.type not in _REGISTER_TYPES}
-    _feedforward_nets = [n for n in nets if n.source.component_id in _non_register_ids]
-
-    local_depth: dict[str, int] = {}
-    for y_gates in gates_by_y.values():
-        ld = _build_dependency_layers(y_gates, _feedforward_nets)
-        local_depth.update(ld)
-
-    max_depth = max(local_depth.values(), default=0)
+    local_depth = _assign_gate_layers(gates, nets, {c.id: comp_y(c) for c in gates})
 
     layer_gates: dict[int, list[Component]] = defaultdict(list)
     for c in gates:
         layer_gates[local_depth[c.id]].append(c)
 
+    return _pack_layout(
+        components, nets, layer_gates, comp_y,
+        gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter,
+    )
+
+
+def _pack_layout(
+        components: list[Component],
+        nets: list[NetConnection],
+        layer_gates: dict[int, list[Component]],
+        comp_y,
+        *,
+        gutter: int,
+        io_margin: int,
+        routing_gutter: int,
+) -> list[_Placed]:
+    """Pack gates into rows and place IO around them.
+
+    ``layer_gates`` maps layer index → gates in X order (rows are split by Y).
+    Higher layers sit nearer the output row; empty layers take no space.
+    """
+    inputs = [c for c in components if c.type == ComponentType.INPUT_PIN]
+    outputs = [c for c in components if c.type == ComponentType.OUTPUT_PIN]
+    layer_order = sorted((idx for idx, gs in layer_gates.items() if gs), reverse=True)
+
     output_row_z = 1
     z_cursor = output_row_z + routing_gutter
     layer_z: dict[int, int] = {}
     layer_widths = {}
-    for layer_idx in range(max_depth, -1, -1):
+    for layer_idx in layer_order:
         layer_z[layer_idx] = z_cursor
         layer_depth = max((c.footprint.depth for c in layer_gates.get(layer_idx, [])), default=0)
         z_cursor += layer_depth + routing_gutter
@@ -462,7 +498,7 @@ def _layout_components(
     max_layer_width = max(layer_widths.values())
 
     # Place gates first so their X positions are known for IO optimisation.
-    for layer_idx in range(max_depth, -1, -1):
+    for layer_idx in layer_order:
         z = layer_z[layer_idx]
 
         for c in layer_gates.get(layer_idx, []):

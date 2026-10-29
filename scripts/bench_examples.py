@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -22,13 +23,13 @@ ROOT = Path(__file__).resolve().parent.parent
 EXCLUDED_BY_DEFAULT = {"video"}
 
 
-def run_example(example: str, cap: float, extra: list[str], out_root: Path) -> str:
+def run_example(example: str, cap: float, extra: list[str], out_root: Path, hash_seed: int = 0) -> str:
     out_dir = out_root / example
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "log.txt"
     cmd = ["./synth.sh", f"examples/{example}", "--artifacts-dir", str(out_dir),
            "--out-litematic", str(out_dir / "result.litematic"), "--allow-routing-failures", "True", *extra]
-    env = {**os.environ, "PYTHONHASHSEED": "0"}
+    env = {**os.environ, "PYTHONHASHSEED": str(hash_seed)}
     t0 = time.monotonic()
     with open(log_path, "w") as log:
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -63,13 +64,16 @@ def main() -> None:
     parser.add_argument("--cap", type=float, default=60, help="per-build time limit in seconds (default 60)")
     parser.add_argument("--workers", type=int, default=4, help="parallel builds (default 4)")
     parser.add_argument("--out", type=Path, default=ROOT / "build" / "bench", help="output root")
-    args, extra = parser.parse_known_args()
-    if extra and extra[0] == "--":
-        extra = extra[1:]
+    parser.add_argument("--hash-seed", type=int, default=0, help="PYTHONHASHSEED for the builds (default 0)")
+    argv = sys.argv[1:]
+    # Split at "--" ourselves: argparse feeds everything after it to the nargs="*" positional.
+    extra = argv[argv.index("--") + 1:] if "--" in argv else []
+    args, unknown = parser.parse_known_args(argv[:argv.index("--")] if "--" in argv else argv)
+    extra = unknown + extra
     examples = args.examples or sorted(
         p.name for p in (ROOT / "examples").iterdir() if p.is_dir() and p.name not in EXCLUDED_BY_DEFAULT)
     with ThreadPoolExecutor(args.workers) as pool:
-        for line in pool.map(lambda ex: run_example(ex, args.cap, extra, args.out), examples):
+        for line in pool.map(lambda ex: run_example(ex, args.cap, extra, args.out, args.hash_seed), examples):
             print(line, flush=True)
 
 

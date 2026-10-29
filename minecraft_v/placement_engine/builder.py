@@ -25,6 +25,7 @@ from .layout import (
     _Placed, _expand_multibit_io, _assign_component_y_levels,
     _layout_components, _compute_workspace_dims,
 )
+from .anneal import _optimize_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
 from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path
@@ -982,16 +983,28 @@ def build_litematic_from_component_list(
         route_workers: int = 1,
         route_deadline: float | None = None,
         snapshots: bool = False,
+        placer: str = "legacy",
+        place_y_moves: bool = True,
+        place_z_moves: bool = True,
+        place_seed: int = 0,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
     y_stride = max_comp_height + additional_component_height_spacing
     y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride)
-    placed = _layout_components(
-        comp.components, comp.nets,
-        gutter=gutter, base_y=base_y, y_level=y_level,
-        io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
-    )
+    if placer == "legacy":
+        placed = _layout_components(
+            comp.components, comp.nets,
+            gutter=gutter, base_y=base_y, y_level=y_level,
+            io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
+        )
+    else:
+        placed = _optimize_placement(
+            comp.components, comp.nets, y_level,
+            placer=placer, base_y=base_y, gutter=gutter,
+            io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
+            y_moves=place_y_moves, z_moves=place_z_moves, seed=place_seed,
+        )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
         placed = [
