@@ -143,6 +143,8 @@ def main():
                         help="Let --placer sa move gates between Y levels (default: on)")
     parser.add_argument("--place-z-moves", action=argparse.BooleanOptionalAction, default=True,
                         help="Let --placer sa move gates between depth layers within their slack (default: on)")
+    parser.add_argument("--place-mirror", action=argparse.BooleanOptionalAction, default=True,
+                        help="Let --placer bary|sa mirror gates in X (default: on)")
     parser.add_argument("--place-seed", type=int, default=0, help="RNG seed for --placer sa (default 0)")
     args = parser.parse_args()
 
@@ -190,6 +192,7 @@ def main():
                                         placer=args.placer,
                                         place_y_moves=args.place_y_moves,
                                         place_z_moves=args.place_z_moves,
+                                        place_mirror=args.place_mirror,
                                         place_seed=args.place_seed)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")

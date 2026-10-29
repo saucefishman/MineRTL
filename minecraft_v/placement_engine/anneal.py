@@ -10,9 +10,10 @@ Annealing is VPR-style: cost = weighted net bounding boxes + widest row +
 RUDY congestion (each net's wire estimate spread over its XZ bounding box,
 gate footprints as blockage, binned, quadratic penalty — HPWL alone packs
 rows tight and leaves the router no room to detour), moves
-are swaps/shifts inside a row, moves to another Y level, and moves to another
+are swaps/shifts inside a row, moves to another Y level, moves to another
 layer inside the gate's slack window (every same-level feed-forward sink stays
-in a strictly later layer than its driver).
+in a strictly later layer than its driver), and X-mirroring a gate
+(``template._mirror_component_x``: swaps which side its pins sit on).
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ from minecraft_v.placement_engine.layout import (
     _majority_y,
     _pack_layout,
 )
+from minecraft_v.placement_engine.template import _mirror_component_x
 
 _PLACE_WX = 1.0
 _PLACE_WY = 3.0              # Y is expensive to route: tower = cost 8 for +4Y
@@ -48,7 +50,8 @@ _PLACE_MAX_TEMPS = 150       # deterministic stop (time budget is only a safety 
 _PLACE_TIME_BUDGET = 10.0    # seconds, plus _PLACE_TIME_PER_GATE per gate, at most _PLACE_TIME_MAX
 _PLACE_TIME_PER_GATE = 0.02
 _PLACE_TIME_MAX = 30.0       # leave most of a 60s build cap to routing
-_PLACE_MOVE_WEIGHTS = {"swap": 0.35, "shift": 0.25, "ymove": 0.15, "yswap": 0.10, "zmove": 0.15}
+_PLACE_MOVE_WEIGHTS = {"swap": 0.35, "shift": 0.25, "ymove": 0.15, "yswap": 0.10, "zmove": 0.15,
+                       "mirror": 0.10}
 
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
 
@@ -80,6 +83,8 @@ class _PlaceState:
         self.routing_gutter = routing_gutter
         self.y_moves = y_moves
         self.clock_pin = clock_pin
+        self.mirrored: set[str] = set()
+        self._mirror_copy: dict[str, Component] = {}
 
         self.layer = dict(layer_of)
         self.y = dict(y_of)
@@ -130,6 +135,21 @@ class _PlaceState:
         self.full_recompute(refresh_io=True)
 
     # ── geometry ────────────────────────────────────────────────────────
+    def comp(self, gid: str) -> Component:
+        """The component as currently placed (mirrored copy if ``gid`` is mirrored)."""
+        if gid not in self.mirrored:
+            return self.comps[gid]
+        if gid not in self._mirror_copy:
+            self._mirror_copy[gid] = _mirror_component_x(self.comps[gid])
+        return self._mirror_copy[gid]
+
+    def _toggle_mirror(self, gid: str) -> None:
+        self.mirrored ^= {gid}
+        w1 = self.comps[gid].footprint.width - 1
+        for ni in self.comp_nets[gid]:
+            self.net_pins[ni] = [(c, w1 - dx, dy, dz) if c == gid else (c, dx, dy, dz)
+                                 for c, dx, dy, dz in self.net_pins[ni]]
+
     def _row_width(self, row: list[str]) -> int:
         return sum(self.comps[g].footprint.width + self.gutter for g in row)
 
@@ -169,7 +189,7 @@ class _PlaceState:
                               if o != c.id and o in self.y and (o in self.layer or _io_y_index(self.comps[o], self.clock_pin) is not None)]
                         if ys:
                             self.y[c.id] = _majority_y(ys)
-            gates_placed = [_Placed(component=self.comps[g], origin=self.pos[g]) for g in self.gates]
+            gates_placed = [_Placed(component=self.comp(g), origin=self.pos[g]) for g in self.gates]
             self._io_x = {}
             for group in (self.inputs, self.outputs):
                 self._io_x.update(_assign_io_x_positions(group, gates_placed, self.nets, 0, self.gutter, 0))
@@ -269,14 +289,19 @@ class _PlaceState:
         return lo, hi
 
     # ── moves ───────────────────────────────────────────────────────────
-    def apply(self, rows_new: dict[tuple[int, int], list[str]], ly_new: dict[str, tuple[int, int]]) -> float:
-        """Apply a move; returns the cost delta.  ``undo()`` or ``commit()`` must follow."""
+    def apply(self, rows_new: dict[tuple[int, int], list[str]], ly_new: dict[str, tuple[int, int]],
+              mirror: str | None = None) -> float:
+        """Apply a move (``mirror``: toggle that gate's X mirroring); returns the cost delta.
+        ``undo()`` or ``commit()`` must follow."""
         undo: dict = {
             "rows": {k: self.rows.get(k) for k in rows_new},
             "row_w": {k: self.row_w.get(k) for k in rows_new},
             "ly": {c: (self.layer[c], self.y[c]) for c in ly_new},
             "cost": self.cost,
+            "mirror": mirror,
         }
+        if mirror is not None:
+            self._toggle_mirror(mirror)
         old_area = self._area_cost()
         for k, lst in rows_new.items():
             if lst:
@@ -294,6 +319,8 @@ class _PlaceState:
         for key in rows_new:
             self._place_row(key)
         nets = {ni for g in gates_moved for ni in self.comp_nets[g]}
+        if mirror is not None:
+            nets.update(self.comp_nets[mirror])
 
         undo["net"] = {ni: (self.net_cost[ni], self.net_bins[ni]) for ni in nets}
         undo["gate_bins"] = {g: self.gate_bins[g] for g in gates_moved}
@@ -319,6 +346,8 @@ class _PlaceState:
     def undo(self) -> None:
         u = self._undo
         assert u is not None
+        if u["mirror"] is not None:
+            self._toggle_mirror(u["mirror"])
         for k, lst in u["rows"].items():
             if lst is None:
                 self.rows.pop(k, None)
@@ -342,12 +371,14 @@ class _PlaceState:
         self._undo = None
 
     def snapshot(self) -> tuple:
-        return {k: list(r) for k, r in self.rows.items()}, dict(self.layer), dict(self.y)
+        return {k: list(r) for k, r in self.rows.items()}, dict(self.layer), dict(self.y), frozenset(self.mirrored)
 
     def restore(self, snap: tuple) -> None:
-        rows, layer, y = snap
+        rows, layer, y, mirrored = snap
         self.rows = {k: list(r) for k, r in rows.items()}
         self.layer, self.y = dict(layer), dict(y)
+        for g in sorted(self.mirrored ^ mirrored):
+            self._toggle_mirror(g)
         self.full_recompute(refresh_io=True)
 
     def _insert_nearest(self, row: list[str], gid: str) -> list[str]:
@@ -362,6 +393,11 @@ class _PlaceState:
         key = (layer, level)
         row = self.rows[key]
         kind = rng.choices(kinds, weights)[0]
+
+        if kind == "mirror":
+            if self.comps[gid].footprint.width < 2:
+                return None
+            return {}, {}, gid
 
         if kind in ("swap", "shift"):
             if len(row) < 2:
@@ -417,7 +453,7 @@ class _PlaceState:
     def layer_gates(self) -> dict[int, list[Component]]:
         out: dict[int, list[Component]] = defaultdict(list)
         for (layer, _), row in sorted(self.rows.items()):
-            out[layer].extend(self.comps[g] for g in row)
+            out[layer].extend(self.comp(g) for g in row)
         return out
 
 
@@ -466,6 +502,18 @@ def _barycenter(state: _PlaceState) -> None:
         state.restore(best)
 
 
+def _greedy_mirror(state: _PlaceState) -> None:
+    """Mirror each gate whose mirroring lowers the cost (one pass, gate order)."""
+    for g in state.gates:
+        if state.comps[g].footprint.width < 2:
+            continue
+        if state.apply({}, {}, g) < -1e-9:
+            state.commit()
+        else:
+            state.undo()
+    state.full_recompute(refresh_io=True)
+
+
 def _initial_temperature(uphill: list[float]) -> float:
     """Temperature at which the mean Metropolis acceptance of ``uphill`` is ``_PLACE_T0_ACCEPT``."""
     if not uphill:
@@ -480,16 +528,20 @@ def _initial_temperature(uphill: list[float]) -> float:
     return hi
 
 
-def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: bool) -> None:
+def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: bool,
+            mirror_moves: bool = True) -> None:
     n = len(state.gates)
     if n < 2:
         return
     kinds = [k for k in _PLACE_MOVE_WEIGHTS
-             if (k not in ("ymove", "yswap") or y_moves) and (k != "zmove" or z_moves)]
+             if (k not in ("ymove", "yswap") or y_moves) and (k != "zmove" or z_moves)
+             and (k != "mirror" or mirror_moves)]
     weights = [_PLACE_MOVE_WEIGHTS[k] for k in kinds]
     max_rlim = max(max(len(r) for r in state.rows.values()), state.max_layer, 1)
     budget = min(_PLACE_TIME_MAX, _PLACE_TIME_BUDGET + _PLACE_TIME_PER_GATE * n)
     deadline = time.monotonic() + budget
+
+    print(f"[place] annealing with {budget:.0f}s budget")
 
     seed_cost = state.cost
     seed = state.snapshot()
@@ -566,6 +618,7 @@ def _optimize_placement(
         routing_gutter: int,
         y_moves: bool = True,
         z_moves: bool = True,
+        mirror_moves: bool = True,
         seed: int = 0,
         clock_pin: str | None = None,
 ) -> list[_Placed]:
@@ -583,9 +636,11 @@ def _optimize_placement(
     seed_cost = state.cost
     if state.gates:
         _barycenter(state)
+        if mirror_moves:
+            _greedy_mirror(state)
         bary_cost = state.cost
         if placer == "sa":
-            _anneal(state, random.Random(seed), y_moves=y_moves, z_moves=z_moves)
+            _anneal(state, random.Random(seed), y_moves=y_moves, z_moves=z_moves, mirror_moves=mirror_moves)
         print(f"[place] {placer}: cost legacy={seed_cost:.0f} bary={bary_cost:.0f} "
               f"final={state.cost:.0f} ({time.monotonic() - t0:.2f}s)")
 
