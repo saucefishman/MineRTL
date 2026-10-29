@@ -176,8 +176,11 @@ def _wire_walkable(
         exempt_foreign: frozenset[tuple[int, int, int]] = frozenset(),
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
         footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
+        footprint_relief: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> bool:
-    """Pass a _BlockIndex when calling repeatedly against an unchanged workspace."""
+    """Pass a _BlockIndex when calling repeatedly against an unchanged workspace.
+
+    footprint_blocked minus footprint_relief exempts cells from the neighbour wire/torch check."""
     if not isinstance(blocks, _BlockIndex):
         blocks = _BlockIndex(blocks)
     wire, torch, repeater = blocks.wire, blocks.torch, blocks.repeater
@@ -208,7 +211,7 @@ def _wire_walkable(
             owner = dust_owner.get(np)
             if owner is not None and owner != net_id:
                 return False
-            if owner is None and np not in footprint_blocked:
+            if owner is None and (np not in footprint_blocked or np in footprint_relief):
                 if np in torch or np in wire:
                     return False
     # Vertical same-XZ: powered blocks distribute signal on all 6 faces including
@@ -296,7 +299,8 @@ def _find_wire_path(
                 fp_relief.add((sx - _ddx, sy + _ddy, sz))
         fp_relief.add((gx, gy + 2, gz))
         fp_relief.add((gx, gy - 1, gz))
-    effective_footprint_blocked = footprint_blocked - fp_relief
+    # Effective footprint blocking = footprint_blocked minus fp_relief. Kept as the two sets
+    # (footprint_blocked can be ~200k cells; copying it per search dominated big designs).
 
     # Workspace is static during a search, so per-cell walkability is cached. A* asks
     # about the same cell many times (multiple local snapshots, multiple move types).
@@ -314,13 +318,14 @@ def _find_wire_path(
             pos: tuple[int, int, int],
             exempt: frozenset[tuple[int, int, int]] = _no_exempt,
     ) -> bool:
-        if pos in effective_protected or pos in effective_footprint_blocked:
+        if pos in effective_protected or (pos in footprint_blocked and pos not in fp_relief):
             return False
         key = (pos, exempt)
         if key not in walk_cache:
             walk_cache[key] = _wire_walkable(
                 block_index, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt,
-                inverted_cells=inverted_cells, footprint_blocked=effective_footprint_blocked,
+                inverted_cells=inverted_cells, footprint_blocked=footprint_blocked,
+                footprint_relief=fp_relief,
             )
         return walk_cache[key]
 
@@ -726,7 +731,19 @@ def _find_wire_path(
     group_max_f: list[int] = [max(gh, 10) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
                    weight, time_limit, pos_list, h_list, expand, congestion_cost)
-    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id)
+
+    def make_world():
+        """The kernel's own move generation over this search's world (None: use expand)."""
+        eprot, prot = _keepout_spec(effective_protected), _keepout_spec(protected)
+        if eprot is None or prot is None or not isinstance(dust_owner, dict):
+            return None
+        return _astar.World(
+            ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
+            goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,
+            terminal_positions, workspace, GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
+            pos_ids, pos_list, h_list, move_cache)
+
+    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -736,7 +753,7 @@ def _find_wire_path(
             cx, cy, cz = pos_list[cur >> _NODE_SHIFT]
             workspace[cx, cy, cz] = lamp
             cur = came_from.get(cur)
-        # for prot in sorted(effective_footprint_blocked | effective_protected, key=heuristic)[:100]:
+        # for prot in sorted((footprint_blocked - fp_relief) | effective_protected, key=heuristic)[:100]:
         #     if _is_air(workspace[*prot]):
         #         workspace[*prot] = GLASS
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
@@ -947,8 +964,10 @@ except ImportError as exc:
     if _ASTAR_MODE != "py":
         print(f"[astar] compiled kernel unavailable ({exc}); using the Python loop", file=sys.stderr)
 else:
+    if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
+        atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
     _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
-                _H_RADIUS_FACTOR)
+                _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN)
 
 _check_stats = {"searches": 0, "py": 0.0, "kernel": 0.0}
 
@@ -968,17 +987,27 @@ def _came_from_chain(came_from, node: int) -> list[int]:
     return chain
 
 
-def _run_search(args: tuple, net_id: str):
+def _keepout_spec(keepout) -> tuple | None:
+    """A protected-cells container in a form the kernel reads directly, or None if unsupported."""
+    if isinstance(keepout, (set, frozenset)):
+        return ("set", keepout)
+    if hasattr(keepout, "_count"):  # builder._ForeignKeepout
+        return ("keepout", keepout._count, keepout._own, keepout._excluded)
+    return None
+
+
+def _run_search(args: tuple, net_id: str, make_world):
     if _astar is None or _ASTAR_MODE == "py":
         return _search_py(*args)
+    world = make_world()
     if _ASTAR_MODE == "kernel":
-        return _astar.search(*args)
+        return _astar.search(*args, world)
     # check: both loops from the same start state (group_best_h is updated in place).
     group_best_h = args[3]
     t0 = time.perf_counter()
     ref = _search_py(*args[:3], list(group_best_h), *args[4:])
     t1 = time.perf_counter()
-    got = _astar.search(*args)
+    got = _astar.search(*args, world, True)
     t2 = time.perf_counter()
     timed_out = any(r[3] is not None and r[3].startswith("timeout") for r in (ref, got))
     if not timed_out:
