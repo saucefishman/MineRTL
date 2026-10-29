@@ -32,7 +32,7 @@ from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
-from .verify import verify_signals
+from .verify import verify_signals, verify_support
 from .wire import _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -181,7 +181,7 @@ def _place_io_repeaters(
             workspace[cell[0], cell[1], cell[2]] = BlockState(
                 "minecraft:repeater", facing=facing, delay="1",
             )
-            solid.add(cell)
+            # Not added to `solid`: a repeater can't hold dust, and `solid` doubles as "can support".
             _ensure_support(workspace, solid, cell)
             io_repeater_cells.add(cell)
             if c.type == ComponentType.OUTPUT_PIN:
@@ -823,6 +823,19 @@ def _report_signal_violations(
     print(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
 
 
+def _report_unsupported_blocks(
+        workspace: Region,
+        dust_owner: dict[tuple[int, int, int], str],
+        component_cells: frozenset[tuple[int, int, int]],
+) -> None:
+    """Print verify_support hits: dust/repeaters/torches with nothing under (or behind) them."""
+    violations = verify_support(workspace, dust_owner, component_cells)
+    for violation in violations:
+        block = workspace[violation.pos]
+        print(f"[verify] unsupported {block.id} {sorted(violation.nets)} at {violation.pos}")
+    print(f"[verify] {len(violations)} unsupported block(s)")
+
+
 def _compute_critical_path(
         comp: ComponentList,
         dust_owner: dict[tuple[int, int, int], str],
@@ -1119,6 +1132,8 @@ def build_litematic_from_component_list(
         else:
             if snapshot_dir is not None:
                 save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
+
+    _report_unsupported_blocks(workspace, dust_owner, frozenset(_component_interior(placed)))
 
     critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace)
 

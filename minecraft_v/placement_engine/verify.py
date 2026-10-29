@@ -4,6 +4,7 @@ Builds a directed "powers" relation over blocks (Java redstone, simplified to th
 structures the router builds) and searches from each net's source:
 - open:  a sink of the net that its source can't reach;
 - short: a cell reached from two nets' sources, or a cell owned by another net.
+`verify_support` separately flags dust/repeaters/torches with nothing to stand on.
 
 Rules (see tests/test_verify.py):
 - Dust connects to horizontally adjacent dust; diagonally up/down one Y unless an opaque
@@ -20,6 +21,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 
+import numpy as np
 from litemapy import BlockState, Region
 
 from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
@@ -35,7 +37,7 @@ _STRONG, _WEAK = "S", "W"
 
 @dataclass(frozen=True)
 class Violation:
-    kind: str                 # "open" | "short"
+    kind: str                 # "open" | "short" | "unsupported"
     nets: frozenset[str]
     pos: Pos
 
@@ -258,4 +260,53 @@ def verify_signals(
             if other is not None and other != net_id and world.kind(pos) != _OPAQUE:
                 short(net_id, other, pos)
             reached_by.setdefault(pos, net_id)
+    return violations
+
+
+_NEEDS_FLOOR = ("minecraft:redstone_wire", "minecraft:repeater", "minecraft:comparator", "minecraft:redstone_torch")
+_NO_FLOOR_MARKERS = ("air", "redstone_wire", "torch", "repeater", "comparator", "lever", "button", "pressure_plate")
+
+
+def _gives_support(block: BlockState) -> bool:
+    """Whether `block` has a sturdy face to hold dust/repeaters/torches (simplified)."""
+    bid = block.id
+    if any(m in bid for m in _NO_FLOOR_MARKERS):
+        return False
+    if bid.endswith("_slab"):
+        return block["type"] in ("top", "double")
+    if bid.endswith("_trapdoor"):
+        return block["half"] == "top" and block["open"] != "true"
+    return True
+
+
+def verify_support(
+        region: Region,
+        owner: dict[Pos, str],
+        blocked: frozenset[Pos] = frozenset(),
+) -> list[Violation]:
+    """Dust, repeaters, comparators and torches outside `blocked` with no supporting block.
+
+    Floor-standing blocks need a sturdy block below; a wall torch needs one behind it.
+    In-game such blocks pop off (or can't be pasted), so the circuit silently breaks.
+    """
+    palette = region._Region__palette
+    blocks = region._Region__blocks
+    needy = [i for i, b in enumerate(palette) if b.id in _NEEDS_FLOOR or b.id == "minecraft:redstone_wall_torch"]
+    if not needy:
+        return []
+    violations: list[Violation] = []
+    for p in map(tuple, np.argwhere(np.isin(blocks, needy)).tolist()):
+        if p in blocked:
+            continue
+        block = palette[blocks[p]]
+        if block.id == "minecraft:redstone_wall_torch":
+            dx, dz = _FACING_TO_DELTA[block["facing"]]  # faces away from its wall
+            support = (p[0] - dx, p[1], p[2] - dz)
+        else:
+            support = (p[0], p[1] - 1, p[2])
+        in_region = all(0 <= c < n for c, n in zip(support, (region.width, region.height, region.length)))
+        if in_region and _gives_support(palette[blocks[support]]):
+            continue
+        net = owner.get(p)
+        violations.append(Violation("unsupported", frozenset({net} if net else ()), p))
     return violations
