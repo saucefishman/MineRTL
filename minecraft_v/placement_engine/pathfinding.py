@@ -180,7 +180,10 @@ def _wire_walkable(
 ) -> bool:
     """Pass a _BlockIndex when calling repeatedly against an unchanged workspace.
 
-    footprint_blocked minus footprint_relief exempts cells from the neighbour wire/torch check."""
+    footprint_blocked minus footprint_relief exempts cells from the neighbour wire/torch check.
+
+    Still used for _find_wire_path's seed/goal checks; during the search the kernel's
+    World.wire_walkable is the maintained version (change both when the rule changes)."""
     if not isinstance(blocks, _BlockIndex):
         blocks = _BlockIndex(blocks)
     wire, torch, repeater = blocks.wire, blocks.torch, blocks.repeater
@@ -369,6 +372,11 @@ def _find_wire_path(
         dy = abs(pos[1] - goal[1])
         return dx + dy * 4 + dz
 
+    # DEPRECATED (_static_moves and its helpers below, and _wire_walkable): the compiled
+    # _astar.World is the maintained move generation. This Python version only serves the
+    # deprecated MINECRAFT_V_ASTAR=py/check modes and the no-extension fallback; it is not kept
+    # in sync and may drift. (Seed and goal walkability above still use walkable().)
+    #
     # Moves from a cell depend on the path only through the local snapshot (and whether the
     # cell was entered by a tower move); everything else reads the static world. A cell is
     # expanded once per distinct snapshot (~15x on mid designs), so each cell's moves are
@@ -733,7 +741,8 @@ def _find_wire_path(
                    weight, time_limit, pos_list, h_list, expand, congestion_cost)
 
     def make_world():
-        """The kernel's own move generation over this search's world (None: use expand)."""
+        """The kernel's own move generation over this search's world (None: the deprecated
+        Python expand, for container types the kernel can't read)."""
         eprot, prot = _keepout_spec(effective_protected), _keepout_spec(protected)
         if eprot is None or prot is None or not isinstance(dust_owner, dict):
             return None
@@ -802,8 +811,10 @@ def _check_tower_self_overlap(path: list[tuple[int, int, int]], net_id: str) -> 
 
 def _search_py(seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
                weight, time_limit, pos_list, h_list, expand, congestion_cost):
-    """The A* loop of _find_wire_path; _astar.search is the compiled twin (same arguments, same
-    results). Returns (reached node or None, best node, h_radius_pruned, early stop reason or
+    """DEPRECATED: Python version of the A* loop; _astar.search is the maintained one. Used only by
+    MINECRAFT_V_ASTAR=py/check and when the extension isn't built; not kept in sync.
+
+    Same arguments and results as _astar.search. Returns (reached node or None, best node, h_radius_pruned, early stop reason or
     None, came_from mapping node -> parent node).
 
     group_best_h is updated in place. expand(cell_id) returns the cell's static moves (see
@@ -951,18 +962,23 @@ def _search_py(seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, bes
     return reached, best_node, h_radius_pruned, early_stop_reason, came_from
 
 
-# Which A* loop runs: MINECRAFT_V_ASTAR = kernel (default; the compiled _astar, falling back to
-# Python with a warning when it isn't built), py (_search_py), or check (both on every search;
-# raises on any difference and prints both loops' total time at exit).
+# Which A* runs: MINECRAFT_V_ASTAR = kernel (default; the compiled _astar). Deprecated, kept
+# for now and not maintained: py (the Python loop and move generation) and check (both on every
+# search, raising on any difference). Without the extension, the Python version runs with a
+# warning.
 _ASTAR_MODE = os.environ.get("MINECRAFT_V_ASTAR", "kernel")
 if _ASTAR_MODE not in ("kernel", "py", "check"):
     raise ValueError(f"MINECRAFT_V_ASTAR must be kernel, py or check, not {_ASTAR_MODE!r}")
+if _ASTAR_MODE != "kernel":
+    print(f"[astar] MINECRAFT_V_ASTAR={_ASTAR_MODE} is deprecated: the Python A* is no longer "
+          "maintained and may differ from the kernel", file=sys.stderr)
 try:
     from . import _astar
 except ImportError as exc:
     _astar = None
     if _ASTAR_MODE != "py":
-        print(f"[astar] compiled kernel unavailable ({exc}); using the Python loop", file=sys.stderr)
+        print(f"[astar] compiled kernel unavailable ({exc}); falling back to the deprecated Python A* "
+              "(run `uv sync` to build it)", file=sys.stderr)
 else:
     if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
         atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))

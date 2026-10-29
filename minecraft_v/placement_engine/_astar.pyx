@@ -1,9 +1,10 @@
 # distutils: language = c++
-"""Compiled twin of pathfinding._search_py: the A* loop of _find_wire_path.
+"""The A* search of _find_wire_path: the loop (search) and cells' static moves (World).
 
-Same arguments, same results, same pop order. Cells' static moves still come from the Python
-expand() callback (once per cell); this replaces the per-pop work: heap, node table, snapshot
-re-centring, gating, budgets and stop conditions.
+This is the maintained implementation. pathfinding._search_py and _static_moves are deprecated
+Python versions (MINECRAFT_V_ASTAR=py/check, and the fallback when this isn't built); they
+were exact twins when this was written but are no longer kept in sync. Without a World,
+search() falls back to the Python expand() callback for moves.
 
 Floating point: g, f and costs are doubles combined in the same order as the Python loop, so
 every comparison (heap order, f-cap, h-radius) matches it exactly.

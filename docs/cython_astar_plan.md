@@ -2,6 +2,9 @@
 
 ## Status
 
+- **The Python A* is deprecated** (`_search_py`, `_static_moves` and helpers). The kernel is the
+  maintained implementation; `MINECRAFT_V_ASTAR=py|check` print a deprecation warning, and the
+  Python code is no longer kept in sync, so check mode is only meaningful until the two drift.
 - **Phase 1 done** (28133ec): `_astar.pyx` runs the A* loop. Greedy output identical.
 - **Phase 2 done**: the kernel generates cells' static moves itself (`World`, a twin of
   `_static_moves` / `_wire_walkable` / tower and -4 candidates). Greedy output identical on all
