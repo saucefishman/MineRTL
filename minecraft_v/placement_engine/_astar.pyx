@@ -311,7 +311,7 @@ cdef class World:
     cdef object net_id
     cdef int min_x, min_y, min_z, max_x, max_y, max_z, max_bridge_y
     cdef int gx, gy, gz, x_h_factor
-    cdef object eprot, prot  # ("set", s) or ("keepout", count, own, excluded, extra)
+    cdef object eprot, prot  # ("set", s) or ("keepout", count, own, excluded, extra, halo, own_halo)
     cdef object workspace, glass, facing  # facing: per HORIZ direction, the input-facing name
     cdef dict pos_ids
     cdef list pos_list, h_list, move_cache
@@ -356,7 +356,10 @@ cdef class World:
         n = (<dict>spec[1]).get(key, 0)
         if n == 0 or (n == 1 and PySet_Contains(spec[2], key)):
             return False
-        return not PySet_Contains(spec[3], key)
+        if not PySet_Contains(spec[3], key):
+            return True
+        n = (<dict>spec[5]).get(key, 0)
+        return n > 1 or (n == 1 and not PySet_Contains(spec[6], key))
 
     cdef unsigned int probe(self, int x, int y, int z, unsigned int bit) except? 0xFFFFFFFF:
         key = (x, y, z)

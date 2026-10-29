@@ -422,8 +422,9 @@ def _place_repeaters_for_net(
                         reset_idx = j
                         break
                 else:
-                    raise ValueError(
+                    raise LayConflict(
                         f"Net {net_id!r}: cannot place repeater to extend signal at path depth {pos_idx} "
                         f"(signal dist {dist} >= {_REPEATER_INTERVAL}, no viable position in "
-                        f"{path[reset_idx+1:cap+1]})"
+                        f"{path[reset_idx+1:cap+1]})",
+                        tuple(path[reset_idx + 1:pos_idx]),
                     )

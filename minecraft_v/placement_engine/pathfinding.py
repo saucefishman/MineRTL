@@ -1015,7 +1015,8 @@ def _keepout_spec(keepout) -> tuple | None:
     if isinstance(keepout, (set, frozenset)):
         return ("set", keepout)
     if hasattr(keepout, "_count"):  # builder._ForeignKeepout
-        return ("keepout", keepout._count, keepout._own, keepout._excluded, keepout._extra)
+        return ("keepout", keepout._count, keepout._own, keepout._excluded, keepout._extra,
+                keepout._halo, keepout._own_halo)
     return None
 
 
