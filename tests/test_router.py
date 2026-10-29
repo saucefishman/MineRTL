@@ -2,10 +2,11 @@ import pytest
 from litemapy import Region
 
 from minecraft_v.placement_engine.builder import _GreedyRouter, _KeepoutMap, _RouteJob, _terminal_halo
-from minecraft_v.placement_engine.constants import GLASS, STONE
+from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTERVAL
+from minecraft_v.placement_engine.pathfinding import _signal_depths
 from minecraft_v.placement_engine.ripup import Recorder, JournaledDict, JournaledSet
 from minecraft_v.placement_engine.verify import verify_signals
-from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch
+from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch, _place_repeaters_for_net
 
 BOUNDS = (0, 0, 0, 23, 7, 23)
 
@@ -115,3 +116,46 @@ def test_blockers_finds_jobs_near_a_goal():
     goal = (8, 1, 8)  # two cells from a's wire
     assert router.blockers(goal, "b", {"a", "b"}) == ["a"]
     assert router.blockers(goal, "b", {"b"}) == []
+
+
+# --- signal depth (repeater slots) -----------------------------------------------------------
+
+# A stretch net_859 (video) was routed on: every move steps down, so no cell can hold a repeater.
+_ALL_DOWN = [(109, 51, 127), (109, 50, 128), (111, 48, 128), (113, 46, 128), (113, 45, 127),
+             (111, 43, 127), (109, 41, 127), (108, 40, 127), (107, 39, 127), (107, 38, 126)]
+
+
+def test_staircase_has_no_repeater_slot():
+    path = [(109, 51, 126)] + _ALL_DOWN + [(107, 37, 125)]  # from a fresh source, 15 deep at the end
+    region = Region(0, 0, 0, 120, 60, 140)
+    with pytest.raises(LayConflict, match="cannot place repeater"):
+        _place_repeaters_for_net(region, {}, "n", [path])
+    assert max(_signal_depths([path]).values()) >= _REPEATER_INTERVAL  # the search would prune it
+
+
+def test_signal_depth_resets_on_flat_straight_step():
+    # Each cell entered and left flat along +x is a repeater slot; 2x slopes are never slots.
+    depths = _signal_depths([[(0, 5, 0), (1, 5, 0), (2, 5, 0), (3, 5, 0), (5, 3, 0), (7, 1, 0)]])
+    assert [depths[p] for p in ((1, 5, 0), (2, 5, 0), (3, 5, 0), (5, 3, 0), (7, 1, 0))] == [1, 1, 1, 3, 5]
+    # A tower top restarts the count; a branch start keeps the depth of the cell it leaves from.
+    depths = _signal_depths([[(0, 1, 0), (1, 1, 0), (3, 5, 0)], [(1, 1, 0), (1, 1, 1)]])
+    assert depths[(3, 5, 0)] == 1 and depths[(1, 1, 1)] == 2
+
+
+@pytest.mark.parametrize("drop, horiz", [(16, 18), (20, 22)])
+def test_router_breaks_long_descent_for_repeaters(drop, horiz):
+    # A one-cell-wide corridor (keepout planes either side) rules out powered -4 drops, so the
+    # descent has to be slopes; without signal depth in the search the cheapest path was all
+    # 2x slopes with no repeater slot.
+    bounds = (0, 0, 0, horiz + 8, drop + 8, 8)
+    rec = Recorder()
+    region = Region(0, 0, 0, bounds[3] + 1, bounds[4] + 1, bounds[5] + 1)
+    solid, dust_owner = JournaledSet(rec, name="solid"), JournaledDict(rec)
+    router = _GreedyRouter(region, rec, solid, dust_owner, JournaledSet(rec, name="inverted"),
+                           frozenset(), bounds[4], frozenset())
+    walls = frozenset((x, y, z) for x in range(bounds[3] + 1) for y in range(bounds[4] + 1) for z in (3, 5))
+    src, sink = (2, 1 + drop, 4), (2 + horiz, 1, 4)
+    job = _RouteJob(key="n", net_id="n", src=src, sinks=[sink], bounds=bounds, protected=walls,
+                    terminals={src, sink})
+    assert router.run([job], "[test]") == []
+    assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)

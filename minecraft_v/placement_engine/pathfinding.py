@@ -13,7 +13,7 @@ from litemapy import BlockState, Region
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
     _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
-    _Y_RADIUS_MIN
+    _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
 
 class RouteTimeout(ValueError):
@@ -31,7 +31,11 @@ _SNAP_MASK = (1 << len(_SNAP_OFFSETS)) - 1
 # and the launch cell is outside the window, so the snapshot alone can't tell a tower arrival
 # from a +1Y arrival at the same cell.
 _TOWER_FLAG = 1 << len(_SNAP_OFFSETS)
-_NODE_SHIFT = len(_SNAP_OFFSETS) + 1  # node = cell id << _NODE_SHIFT | tower flag | snapshot
+# Signal state (see _signal_depths): 4 bits of signal depth since the last cell a repeater
+# could take, then 3 bits of the repeater-candidate direction (index into _HORIZ_DIRS + 1, 0 none).
+_SIG_SHIFT = len(_SNAP_OFFSETS) + 1
+_SIG_DEPTH_MASK = 15
+_NODE_SHIFT = _SIG_SHIFT + 7  # node = cell id << _NODE_SHIFT | candidate dir | depth | tower flag | snapshot
 _NO_PARENT = -1  # parent node of A* seeds
 
 
@@ -59,6 +63,45 @@ def _snap_shift_tables(d: tuple[int, int, int]) -> tuple[tuple[int, ...], tuple[
                       for k in range(3))
         tables = _snap_shift_cache[d] = (t0, t1, t2, _snap_bit(-dx, -dy, -dz))
     return tables
+
+
+def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, int]:
+    """Signal state after move d from a cell with (depth, cand); the kernel's rule.
+
+    depth: signal distance since the last cell where _place_repeaters_for_net could put a
+    repeater (or a tower / powered -4 reset). cand: 1 + the _HORIZ_DIRS index of the move
+    into the cell when that move lets it hold a repeater (unit step, flat or 1 down), else 0;
+    the cell becomes a repeater slot once the next move is flat in that same direction.
+    The search prunes moves whose depth reaches _REPEATER_INTERVAL, so every stretch of a
+    path has a slot in reach and repeater placement can't fail for want of one.
+    """
+    dx, dy, dz = d
+    if (dy == 4 and (dx, dz) in _TOWER_2BLOCK) or (dy == -4 and dx == 0 and dz == 0):
+        return 1, 0  # laying resets one cell short of the new source, like the repeater walk
+    step = abs(dx) + abs(dz)
+    if cand and dy == 0 and step == 1 and _HORIZ_DIRS[cand - 1] == (dx, dz):
+        depth = 0
+    unit = step == 1 and dy in (0, -1)
+    return depth + step, (_HORIZ_DIRS.index((dx, dz)) + 1) if unit else 0
+
+
+def _signal_depths(
+        paths: list[list[tuple[int, int, int]]],
+        known: dict[tuple[int, int, int], int] | None = None,
+) -> dict[tuple[int, int, int], int]:
+    """Signal depth (_signal_step) at each cell of a net's ordered paths, for tree seeds.
+
+    Each path starts at the source (depth 0) or at a cell of an earlier path or of known
+    (depths of the net's wire routed before). A branch start is never a repeater slot.
+    """
+    depths: dict[tuple[int, int, int], int] = dict(known or {})
+    for path in paths:
+        depth, cand = depths.get(path[0], 0), 0
+        depths.setdefault(path[0], depth)
+        for prev, pos in zip(path, path[1:]):
+            depth, cand = _signal_step(depth, cand, (pos[0] - prev[0], pos[1] - prev[1], pos[2] - prev[2]))
+            depths.setdefault(pos, depth)
+    return depths
 
 
 def _in_bounds(pos: tuple[int, int, int], bounds: tuple[int, int, int, int, int, int]) -> bool:
@@ -265,8 +308,11 @@ def _find_wire_path(
         congestion_cost: Callable[[tuple[int, int, int]], float] | None = None,
         time_limit: float | None = None,
         blocked: frozenset[tuple[int, int, int]] = frozenset(),
+        seed_depths: dict[tuple[int, int, int], int] | None = None,
 ) -> list[tuple[int, int, int]]:
     """A* wire route from start to goal.
+
+    seed_depths: signal depth (_signal_depths) of tree seeds; missing seeds count as 0.
 
     blocked: extra cells the path must not use, even inside the goal's relief zone (a
     retry after a path that couldn't be laid, see wire.LayConflict).
@@ -730,7 +776,10 @@ def _find_wire_path(
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
     # A* search: seeds in order, with their group (0 = start seeds, then one per tree seed).
-    seed_nodes = [_pid(seed) << _NODE_SHIFT for seed in seeds]
+    seed_depths = seed_depths or {}
+    seed_nodes = [_pid(seed) << _NODE_SHIFT
+                  | min(seed_depths.get(seed, 0) if i >= n_start_seeds else 0, _SIG_DEPTH_MASK) << _SIG_SHIFT
+                  for i, seed in enumerate(seeds)]
     seed_groups = [0 if i < n_start_seeds else 1 + i - n_start_seeds for i in range(len(seeds))]
     group_best_h: list[int] = [10 ** 9] * (1 + len(seeds) - n_start_seeds)
     for node, group in zip(seed_nodes, seed_groups):
@@ -984,7 +1033,8 @@ else:
     if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
         atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
     _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
-                _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN)
+                _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN, _SIG_SHIFT,
+                _REPEATER_INTERVAL)
 
 _check_stats = {"searches": 0, "py": 0.0, "kernel": 0.0}
 
