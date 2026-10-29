@@ -317,7 +317,26 @@ def _lay_redstone_path(
                                      inverted_cells, goal, terminal_positions, path_cells)
 
         else:
+            if i > 0:
+                _check_slope_notch(workspace, solid, cells[i - 1], cell)
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
+
+
+def _check_slope_notch(
+        workspace: Region,
+        solid: set[tuple[int, int, int]],
+        prev: tuple[int, int, int],
+        cell: tuple[int, int, int],
+) -> None:
+    """A 1-step slope only links if the cell above its lower end is not opaque. The search
+    checks that against the world, but an earlier part of the same path (outside its local
+    snapshot) may have put a support block there since; the link would silently break."""
+    (ax, ay, az), (bx, by, bz) = prev, cell
+    if (bx - ax, bz - az) not in _HORIZ_DIRS or abs(by - ay) != 1:
+        return
+    notch = (bx, by + 1, bz) if by < ay else (ax, ay + 1, az)
+    if notch in solid and _block_str(workspace[notch]) != "minecraft:glass":
+        raise LayConflict(f"Slope {prev} -> {cell} would be cut by the block at {notch}", (cell, prev))
 
 
 def _place_repeaters_for_net(
