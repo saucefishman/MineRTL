@@ -84,6 +84,43 @@ class _BlockIndex:
                 idx.repeater.add(pos)
         return idx
 
+    def update(self, pos: tuple[int, int, int], old: BlockState, new: BlockState) -> None:
+        """Reflect one block write (old → new); same classification as __init__."""
+        for cells, test in ((self.non_air, lambda b: not _is_air(b)), (self.wire, _is_redstone_wire),
+                            (self.torch, _is_torch), (self.repeater, _is_repeater)):
+            was, now = test(old), test(new)
+            if was and not now:
+                cells.discard(pos)
+            elif now and not was:
+                cells.add(pos)
+
+
+class IndexedWorkspace:
+    """Write-through Region proxy that keeps a _BlockIndex current across searches.
+
+    Building a _BlockIndex scans the whole region; with one search per sink that dominated
+    the greedy pass on big designs. Every write must go through this proxy, or the index
+    goes stale. Searches read the live index, so the region must not change mid-search.
+    """
+
+    def __init__(self, region: Region):
+        self.region = region
+        self._index = _BlockIndex(region)
+
+    def __getitem__(self, pos) -> BlockState:
+        return self.region[pos]
+
+    def __setitem__(self, pos, block: BlockState) -> None:
+        pos = tuple(pos)
+        self._index.update(pos, self.region[pos], block)
+        self.region[pos] = block
+
+    def __getattr__(self, name):
+        return getattr(self.region, name)
+
+    def block_index(self) -> _BlockIndex:
+        return self._index
+
 
 def _wire_walkable(
         blocks: _BlockIndex | Region,
