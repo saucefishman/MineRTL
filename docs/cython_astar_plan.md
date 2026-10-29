@@ -2,21 +2,27 @@
 
 ## Status
 
-- **Phase 1 done.** `_astar.pyx` runs the A* loop and `_static_moves` stays in Python.
-  Greedy output is identical on all examples (`base_ce6164e.json`), and `MINECRAFT_V_ASTAR=check`
-  finds no differences search by search. Sequential builds: regs 7.2s → 3.5s, sevenseg
-  5.7 → 3.8, runner 13.5 → 8.6, sevensegplus 12.5 → 7.8. video at 60s: ~407 → ~488 of 1107
-  nets, so phase 2 is needed.
+- **Phase 1 done** (28133ec): `_astar.pyx` runs the A* loop. Greedy output identical.
+- **Phase 2 done**: the kernel generates cells' static moves itself (`World`, a twin of
+  `_static_moves` / `_wire_walkable` / tower and -4 candidates). Greedy output identical on all
+  examples. `MINECRAFT_V_ASTAR=check` also checks every cell's generated moves against Python.
+  Sequential builds: regs 3.5s → 1.2s, sevenseg 3.8 → 1.5, runner 8.6 → 2.7, sevensegplus
+  7.8 → 2.8. video at 60s: ~488 → ~968 of 1107 nets (still over the cap).
+- Deviation from the grid design below: the search box on video is 8.9M cells, so there are no
+  dense grids. `World` reads the existing Python sets/dicts through the C API and caches each
+  touched cell's flags in a per-search flat hash map (one key tuple per new cell). There's
+  nothing to keep in sync, and it works unchanged over the overlay/journaled views.
+- Also removed a per-search copy of `footprint_blocked` (207k cells on video): the relief
+  cells are now checked as a separate small set, in Python and in the kernel.
+- Where video's time goes now (60s run, `MINECRAFT_V_ASTAR_STATS=1`): ~22M pops / 51M pushes,
+  and ~34s building move tables for ~860k cells (~40µs each, mostly cell-cache lookups and
+  Python set probes). Next levers if needed: fewer cell lookups per move table, or cutting
+  the (cell, snapshot) state blow-up (an algorithm change, output would change).
 - Deviation: instead of the replay harness, `MINECRAFT_V_ASTAR=check` runs both loops on every
-  search of a real build, raises on any difference (result, best node, pruning count, stop
-  reason, came_from chain) and prints both loops' time. In check mode the Python loop runs
-  first and fills the shared move cache, so the kernel's time there excludes move generation.
+  search of a real build and raises on any difference (result, best node, pruning count, stop
+  reason, came_from chain, per-cell moves). It prints both loops' time at exit.
 - Switch: `MINECRAFT_V_ASTAR=kernel|py|check` (default kernel; falls back to Python with a
-  warning if the extension isn't built).
-
-Goal: get `video` under the 60s cap (now ~407/1107 nets by 60s) and cut mid-size builds further,
-with greedy output **byte-identical** to the Python A* at `ce6164e`
-(`scripts/check_same_output.py --compare build/same_output/base_ce6164e.json`).
+  warning if the extension isn't built). `MINECRAFT_V_ASTAR_STATS=1` prints kernel counters.
 
 ## Where the time is (ce6164e structure, video, 60s)
 
