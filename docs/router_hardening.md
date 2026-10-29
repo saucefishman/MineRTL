@@ -113,4 +113,4 @@ After each step, run the 8-seed SA sweep and the legacy check. Record bad builds
 - `wire.py`: `_place_support`, `_lay_dust_cell`, `_lay_slope2_move`, `_lay_tower_move`, `_lay_redstone_path`, `_place_repeaters_for_net`.
 - `ripup.py`: `Recorder`, journaled containers, `rip_up`.
 - `verify.py`: `verify_signals` (opens/shorts), `verify_support`.
-- Tests: `tests/test_ripup.py`, `tests/test_verify.py`, `tests/test_negotiate.py`. `tests/test_placement_litematic.py` currently fails to import (`_io_repeater_facing` isn't exported from `placement_engine/__init__.py`), and 3 tests in `test_module_to_component_list.py` expect old footprint sizes. Both were already broken at HEAD.
+- Tests: `tests/test_router.py` (keepout halo/corridor, slope-notch check, `_GreedyRouter` routing / rip-up / blockers), `tests/test_ripup.py`, `tests/test_verify.py`, `tests/test_negotiate.py`, `tests/test_placement_litematic.py` (end-to-end builds that must print no `[verify]` / `IGNORING` lines; MUX is a strict xfail for the IO-repeater-out-of-bounds layout bug).
