@@ -8,6 +8,7 @@ from litemapy import BlockState, Region, Schematic
 
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import SCHEMATIC_MAP
+from minecraft_v.progress import ProgressBar, log
 from minecraft_v.placement_engine.ir import (
     Component,
     ComponentList,
@@ -448,56 +449,63 @@ def _route_all_nets(
         all_terminals: dict[str, set[tuple[int, int, int]]],
         snapshot_dir: Path | None = None,
         deadline: float | None = None,
+        fail_fast: bool = False,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
+    """fail_fast: raise on the first net that fails instead of collecting failures."""
     total_nets = len(sorted_nets)
     routing_failures: list[tuple[str, Exception]] = []
     inverted_cells: set[tuple[int, int, int]] = set()
     keepouts = _KeepoutMap(all_terminals)
     region = workspace
     workspace = IndexedWorkspace(region)  # all writes below go through this, keeping its index current
-    for net_idx, net in enumerate(sorted_nets, 1):
-        if deadline is not None and time.monotonic() > deadline:
-            routing_failures.append((net.net_id, ValueError("route deadline reached")))
-            continue
-        print(f"[wire] {net_idx}/{total_nets} — {net.net_id:<40}", flush=True)
-        try:
-            src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
-            protected = keepouts.for_net(net.net_id)
-            net_ordered_paths: list[list[tuple[int, int, int]]] = []
-            dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
-            sorted_pins = sorted(dst_pins,
-                                 key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
-            for dst_pin in sorted_pins:
-                tree_seeds = [
-                    pos for _path in net_ordered_paths for pos in _path
-                ]
-                all_terminal_positions = frozenset(pin_terminal.values())
-                path = _find_wire_path(
-                    workspace, solid, dust_owner,
-                    src_pin, dst_pin, net.net_id,
-                    ws_bounds, max_bridge_y,
-                    tree_seeds=tree_seeds,
-                    protected=protected,
-                    footprint_blocked=footprint_blocked,
-                    inverted_cells=frozenset(inverted_cells),
-                    terminal_positions=all_terminal_positions,
-                )
-                support_block = WOOLS[net_idx % len(WOOLS)]
+    with ProgressBar("[wire]", total_nets) as bar:
+        for net_idx, net in enumerate(sorted_nets, 1):
+            bar.update(info=net.net_id)
+            if deadline is not None and time.monotonic() > deadline:
+                if fail_fast:
+                    raise RuntimeError(f"Routing failed for net {net.net_id}: route deadline reached")
+                routing_failures.append((net.net_id, ValueError("route deadline reached")))
+                continue
+            try:
+                src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
+                protected = keepouts.for_net(net.net_id)
+                net_ordered_paths: list[list[tuple[int, int, int]]] = []
+                dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
+                sorted_pins = sorted(dst_pins,
+                                     key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
+                for dst_pin in sorted_pins:
+                    tree_seeds = [
+                        pos for _path in net_ordered_paths for pos in _path
+                    ]
+                    all_terminal_positions = frozenset(pin_terminal.values())
+                    path = _find_wire_path(
+                        workspace, solid, dust_owner,
+                        src_pin, dst_pin, net.net_id,
+                        ws_bounds, max_bridge_y,
+                        tree_seeds=tree_seeds,
+                        protected=protected,
+                        footprint_blocked=footprint_blocked,
+                        inverted_cells=frozenset(inverted_cells),
+                        terminal_positions=all_terminal_positions,
+                    )
+                    support_block = WOOLS[net_idx % len(WOOLS)]
 
-                _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
-                                   opaque_support_block=support_block,
-                                   inverted_cells=inverted_cells,
-                                   goal=dst_pin,
-                                   terminal_positions=all_terminal_positions)
-                net_ordered_paths.append(path)
-            _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
-        except Exception as e:
-            routing_failures.append((net.net_id, e))
-            print(f"\n[error] skipped net {net.net_id}: {e}")
-        if snapshot_dir is not None and net_idx % 10 == 0:
-            safe_id = net.net_id.replace("/", "_").replace("\\", "_")
-            save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", region, snapshot_dir)
-    print(f"\r[wire] done ({total_nets} nets, {len(routing_failures)} failed)        ")
+                    _lay_redstone_path(workspace, solid, dust_owner, path, net.net_id,
+                                       opaque_support_block=support_block,
+                                       inverted_cells=inverted_cells,
+                                       goal=dst_pin,
+                                       terminal_positions=all_terminal_positions)
+                    net_ordered_paths.append(path)
+                _place_repeaters_for_net(workspace, dust_owner, net.net_id, net_ordered_paths)
+            except Exception as e:
+                if fail_fast:
+                    raise RuntimeError(f"Routing failed for net {net.net_id}: {e}") from e
+                routing_failures.append((net.net_id, e))
+                log(f"[error] skipped net {net.net_id}: {e}")
+            if snapshot_dir is not None and net_idx % 10 == 0:
+                safe_id = net.net_id.replace("/", "_").replace("\\", "_")
+                save_schematic_artifact(f"net_{net_idx:03d}_{safe_id}.litematic", region, snapshot_dir)
+    print(f"[wire] done ({total_nets} nets, {len(routing_failures)} failed)")
     return routing_failures, inverted_cells
 
 
@@ -563,6 +571,7 @@ def _route_all_nets_negotiated(
         final_search_timeout: float | None = _ROUTE_FINAL_SEARCH_TIMEOUT,
         route_workers: int = 1,
         deadline: float | None = None,
+        fail_fast: bool = False,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
     """Negotiated-congestion routing (PathFinder), then commit, then a hard cleanup pass.
 
@@ -588,6 +597,9 @@ def _route_all_nets_negotiated(
     deadline (time.monotonic()): past it, no new net/batch is started; the best pass so far
     is committed and the final hard pass skips its remaining nets (reported as failures),
     so a capped build still writes a partial result.
+
+    fail_fast: raise on the first net that fails the final hard pass (negotiation-pass
+    failures are retried, so they don't count).
     """
     base_index = _BlockIndex(workspace)  # static world; unchanged until commit
     inverted_cells = JournaledSet(rec, name="inverted")
@@ -661,11 +673,11 @@ def _route_all_nets_negotiated(
     def past_deadline() -> bool:
         return deadline is not None and time.monotonic() > deadline
 
-    def route_pass_sequential(k: int, pres: float) -> None:
-        for i, net_id in enumerate(to_route, 1):
+    def route_pass_sequential(bar: ProgressBar, pres: float) -> None:
+        for net_id in to_route:
             if past_deadline():
                 return
-            print(f"[wire] p{k} {i}/{len(to_route)} — {net_id:<40}", flush=True)
+            bar.update(info=net_id)
             old = routes.pop(net_id, None)
             if old is not None:
                 cong.remove(net_id, old)
@@ -678,17 +690,14 @@ def _route_all_nets_negotiated(
                 routes[net_id] = route
                 cong.add(net_id, route)
 
-    def route_pass_parallel(k: int, pres: float) -> None:
+    def route_pass_parallel(bar: ProgressBar, pres: float) -> None:
         # Batches of _ROUTE_BATCH_PER_WORKER * workers nets route against the same frozen
         # congestion; within a batch, slowest-last-time nets go out first.
         nonlocal deltas
         batch_size = _ROUTE_BATCH_PER_WORKER * route_workers
-        done = 0
 
         def progress(net_id: str) -> None:
-            nonlocal done
-            done += 1
-            print(f"[wire] p{k} {done}/{len(to_route)} — {net_id:<40}", flush=True)
+            bar.update(info=net_id)
 
         for b in range(0, len(to_route), batch_size):
             if past_deadline():
@@ -721,12 +730,12 @@ def _route_all_nets_negotiated(
     workers = RouteWorkers(route_workers, route_virtual) if route_workers > 1 and passes > 1 else None
     try:
         for k in range(max(passes - 1, 0)):
-            t0 = time.monotonic()
             pres = _PRES_SCHEDULE[min(k, len(_PRES_SCHEDULE) - 1)]
-            if workers is None:
-                route_pass_sequential(k, pres)
-            else:
-                route_pass_parallel(k, pres)
+            with ProgressBar(f"[wire] pass {k}", len(to_route)) as bar:
+                if workers is None:
+                    route_pass_sequential(bar, pres)
+                else:
+                    route_pass_parallel(bar, pres)
             over = cong.overused()
             for pos in over:
                 cong.hist[pos] += 1
@@ -734,9 +743,6 @@ def _route_all_nets_negotiated(
                 deltas.append(("hist", None, list(over)))
             conflicted = cong.nets_at(over) & routes.keys()
             unrouted = [net_id for net_id in order if net_id not in routes]
-            print(f"[wire] pass {k} (pres={pres}): {len(routes)}/{len(order)} routed, "
-                  f"{len(over)} overused cells, {len(conflicted)} conflicting nets, "
-                  f"{time.monotonic() - t0:.1f}s", flush=True)
             score = (len(unrouted) + len(conflicted), len(over))
             if best is None or score < best[0]:
                 best = (score, dict(routes))
@@ -748,7 +754,6 @@ def _route_all_nets_negotiated(
             if stale >= _ROUTE_STAGNATION_PASSES:
                 break
             if past_deadline():
-                print("[wire] route deadline reached; committing best pass", flush=True)
                 break
             to_route = [net_id for net_id in order if net_id in conflicted or net_id not in routes]
     finally:
@@ -778,28 +783,31 @@ def _route_all_nets_negotiated(
         rip_up(rec, net_id, workspace, solid, dust_owner)
         last_error[net_id] = ValueError("open/short after commit (verify_signals)")
         leftovers.append(net_id)
-    print(f"[wire] committed {len(order) - len(leftovers)}/{len(order)} nets "
-          f"({len(bad)} ripped by verifier); {len(leftovers)} to hard-route", flush=True)
     if snapshot_dir is not None:
         save_schematic_artifact("negotiated_commit.litematic", workspace, snapshot_dir)
 
     # Final hard pass in the real workspace: overlaps forbidden, no search timeout.
     ws = JournalingWorkspace(workspace, rec)
     failures: list[tuple[str, Exception]] = []
-    for net_id in sorted(leftovers, key=net_order.get):
-        if past_deadline():
-            failures.append((net_id, ValueError("route deadline reached")))
-            continue
-        print(f"[wire] final — {net_id:<40}", flush=True)
-        try:
-            with rec.recording(net_id):
-                route_net(net_by_id[net_id], ws, solid, dust_owner, inverted_cells, None, final_search_timeout)
-        except Exception as e:
-            rip_up(rec, net_id, workspace, solid, dust_owner)
-            failures.append((net_id, e))
+    with ProgressBar("[wire] final", len(leftovers)) as bar:
+        for net_id in sorted(leftovers, key=net_order.get):
+            bar.update(info=net_id)
+            if past_deadline():
+                if fail_fast:
+                    raise RuntimeError(f"Routing failed for net {net_id}: route deadline reached")
+                failures.append((net_id, ValueError("route deadline reached")))
+                continue
+            try:
+                with rec.recording(net_id):
+                    route_net(net_by_id[net_id], ws, solid, dust_owner, inverted_cells, None, final_search_timeout)
+            except Exception as e:
+                rip_up(rec, net_id, workspace, solid, dust_owner)
+                if fail_fast:
+                    raise RuntimeError(f"Routing failed for net {net_id}: {e}") from e
+                failures.append((net_id, e))
     for net_id, e in failures:
         print(f"[error] unrouted net {net_id}: {e}")
-    print(f"\r[wire] done ({len(order)} nets, {len(failures)} failed)        ")
+    print(f"[wire] done ({len(order)} nets, {len(failures)} failed)")
     return failures, inverted_cells
 
 
@@ -820,7 +828,8 @@ def _report_signal_violations(
     violations = verify_signals(workspace, spec, dust_owner, component_cells)
     for violation in violations:
         print(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
-    print(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
+    if violations:
+        print(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
 
 
 def _report_unsupported_blocks(
@@ -833,7 +842,8 @@ def _report_unsupported_blocks(
     for violation in violations:
         block = workspace[violation.pos]
         print(f"[verify] unsupported {block.id} {sorted(violation.nets)} at {violation.pos}")
-    print(f"[verify] {len(violations)} unsupported block(s)")
+    if violations:
+        print(f"[verify] {len(violations)} unsupported block(s)")
 
 
 def _compute_critical_path(
@@ -841,7 +851,7 @@ def _compute_critical_path(
         dust_owner: dict[tuple[int, int, int], str],
         workspace: Region,
 ) -> int:
-    """Count repeaters/torches per net, topo-sort DP, print critical path in ticks."""
+    """Count repeaters/torches per net, topo-sort DP; returns the critical path in ticks."""
     from collections import deque
 
     # Wire ticks per net: repeaters and torches placed in dust_owner
@@ -883,7 +893,6 @@ def _compute_critical_path(
             in_degree[sid] += 1
 
     arrival: dict[str, int] = {n: 0 for n in all_nodes}
-    best_pred: dict[str, tuple[str, str] | None] = {n: None for n in all_nodes}
 
     queue: deque[str] = deque(n for n, d in in_degree.items() if d == 0)
     processed = 0
@@ -900,7 +909,6 @@ def _compute_critical_path(
             t = out_t + net_ticks[net_id]
             if t > arrival[sink_id]:
                 arrival[sink_id] = t
-                best_pred[sink_id] = (net_id, nid)
             in_degree[sink_id] -= 1
             if in_degree[sink_id] == 0:
                 queue.append(sink_id)
@@ -915,28 +923,7 @@ def _compute_critical_path(
                        if c.type == ComponentType.OUTPUT_PIN or c.type in _SEQUENTIAL
                    ] or [c.id for c in comp.components]
 
-    max_id = max(endpoint_ids, key=lambda n: arrival[n])
-    max_t = arrival[max_id]
-
-    # Trace critical path backwards; Q-source virtual nodes display as "{comp}.Q"
-    def _display(nid: str) -> str:
-        return nid[:-2] + ".Q" if nid.endswith("\x00q") else nid
-
-    trace: list[str] = []
-    cur: str | None = max_id
-    while cur is not None:
-        trace.append(_display(cur))
-        pred = best_pred.get(cur)
-        if pred is None:
-            break
-        net_id, prev_id = pred
-        trace.append(f"[net {net_id}: {net_ticks[net_id]}t]")
-        cur = prev_id
-    trace.reverse()
-
-    print(f"[timing] Critical path: {max_t} ticks")
-    print(f"[timing] Path: {' → '.join(trace)}")
-    return max_t
+    return max(arrival[n] for n in endpoint_ids)
 
 
 def _construct_clock_region(
@@ -1085,6 +1072,7 @@ def build_litematic_from_component_list(
             footprint_blocked, all_terminals,
             snapshot_dir=snapshot_dir,
             deadline=deadline,
+            fail_fast=not allow_routing_failures,
         )
     else:
         routing_failures, inverted_cells = _route_all_nets_negotiated(
@@ -1096,6 +1084,7 @@ def build_litematic_from_component_list(
             search_timeout=wire_timeout,
             route_workers=route_workers,
             deadline=deadline,
+            fail_fast=not allow_routing_failures,
         )
 
     _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
@@ -1141,7 +1130,6 @@ def build_litematic_from_component_list(
 
     for p in placed:
         if p.component.id == clock_pin:
-            print(f'Automatically creating clock for input {p.component.id}')
             target = (p.origin[0], p.origin[1], p.origin[2] + 2)
             clock_region = _construct_clock_region(target, critical_path_ticks)
             regions['clock'] = clock_region

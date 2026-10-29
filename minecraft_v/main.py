@@ -137,7 +137,6 @@ def main():
     parser.add_argument("--snapshots", action="store_true",
                         help="Save debug litematic snapshots during routing to <artifacts>/snapshots (slow)")
     args = parser.parse_args()
-    print(args)
 
     out_litematic = Path(args.out_litematic)
     if out_litematic.suffix != ".litematic":
@@ -157,8 +156,7 @@ def main():
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
 
-    component_list_path = save_build_artifacts(component_list)
-    print(f"Wrote component list: {component_list_path.resolve()}")
+    save_build_artifacts(component_list)
 
     allow_routing_failures = args.allow_routing_failures
     output_pin_targets = (
