@@ -54,7 +54,10 @@ _AUTO_DEMAND_LO = 2.5         # below: loose spacing (6, 6); above DEMAND_HI: de
 _AUTO_DEMAND_HI = 4.0
 _AUTO_LOOSE = (6, 6)
 _AUTO_DENSE = (8, 8)
-_PLACE_BIN = 6               # congestion bin size in X and Z (blocks)
+_PLACE_W_SLICE = 0.0         # bit-slice alignment: w * (|dx| + |dz| + mirror mismatch) between
+                             # gates driving consecutive bits of one vector (bit k sits on Y level k,
+                             # so aligned slices stack straight up); --place-slice-weight
+_PLACE_BIN = 6              # congestion bin size in X and Z (blocks)
 _PLACE_BARY_SWEEPS = 6
 _PLACE_INNER_NUM = 4.0       # moves per temperature = inner_num * N^(4/3), at most _PLACE_MAX_TEMP_MOVES
 _PLACE_MAX_TEMP_MOVES = 1000  # past ~1000 lower cost stops buying routing (halfvideo: 2000/4000 fail more, 2-4x slower)
@@ -86,8 +89,10 @@ class _PlaceState:
             clock_pin: str | None = None,
             flat: bool = False,
             output_x_order: dict[str, float] | None = None,
+            slice_weight: float = _PLACE_W_SLICE,
     ):
         self.output_x_order = output_x_order
+        self.slice_weight = slice_weight
         self.components = components
         self.nets = nets
         self.comps = {c.id: c for c in components}
@@ -139,6 +144,23 @@ class _PlaceState:
                 if s.component_id in gate_set and s.component_id != src:
                     self.succs[src].add(s.component_id)
                     self.preds[s.component_id].add(src)
+
+        # Bit-slice pairs: gates driving bits k and k+1 of the same vector.
+        self.slice_pairs: list[tuple[str, str]] = []
+        self.comp_pairs: dict[str, list[int]] = defaultdict(list)
+        if slice_weight:
+            buses: dict[str, dict[int, str]] = defaultdict(dict)
+            for g in self.gates:
+                bus = self.comps[g].metadata.get("bus")
+                if bus:
+                    buses[bus[0]].setdefault(bus[1], g)
+            for name in sorted(buses):
+                bits = sorted(buses[name].items())
+                for (_, a), (_, b) in zip(bits, bits[1:]):
+                    self.comp_pairs[a].append(len(self.slice_pairs))
+                    self.comp_pairs[b].append(len(self.slice_pairs))
+                    self.slice_pairs.append((a, b))
+        self.pair_cost: list[float] = [0.0] * len(self.slice_pairs)
 
         self.pos: dict[str, tuple[int, int, int]] = {}
         self.layer_z: dict[int, int] = {}
@@ -236,6 +258,12 @@ class _PlaceState:
         w, d = x1 - x0 + 1, z1 - z0 + 1
         return cost, _rect_bins(int(x0), int(z0), int(x1), int(z1), (w + d) / (w * d))
 
+    def _pair_eval(self, pi: int) -> float:
+        a, b = self.slice_pairs[pi]
+        ax, _, az = self.pos[a]
+        bx, _, bz = self.pos[b]
+        return self.slice_weight * (abs(ax - bx) + abs(az - bz) + ((a in self.mirrored) != (b in self.mirrored)))
+
     def _gate_rect_bins(self, gid: str) -> dict:
         if not _PLACE_W_CONG:
             return {}
@@ -282,7 +310,8 @@ class _PlaceState:
         evals = [self._net_eval(ni) for ni in range(len(self.nets))]
         self.net_cost = [c for c, _ in evals]
         self.net_bins = [b for _, b in evals]
-        self.cost = sum(self.net_cost) + self._area_cost() + self._rebuild_bins()
+        self.pair_cost = [self._pair_eval(pi) for pi in range(len(self.slice_pairs))]
+        self.cost = sum(self.net_cost) + sum(self.pair_cost) + self._area_cost() + self._rebuild_bins()
         return self.cost
 
     # ── legality ────────────────────────────────────────────────────────
@@ -358,6 +387,14 @@ class _PlaceState:
             self._shift_bins(self.net_bins[ni], new_bins, changed)
             self.net_bins[ni] = new_bins
         undo["bins"] = changed
+        pairs = {pi for g in gates_moved for pi in self.comp_pairs[g]}
+        if mirror is not None:
+            pairs.update(self.comp_pairs[mirror])
+        undo["pair"] = {pi: self.pair_cost[pi] for pi in pairs}
+        for pi in pairs:
+            new = self._pair_eval(pi)
+            delta += new - self.pair_cost[pi]
+            self.pair_cost[pi] = new
         delta += self._cong_delta(changed)
         delta += self._area_cost() - old_area
         self.cost += delta
@@ -383,6 +420,8 @@ class _PlaceState:
             self.net_cost[ni] = cost
             self.net_bins[ni] = bins
         self.gate_bins.update(u["gate_bins"])
+        for pi, cost in u["pair"].items():
+            self.pair_cost[pi] = cost
         for b, v in u["bins"].items():
             self.bins[b] = v
         self.cost = u["cost"]
@@ -732,6 +771,7 @@ def _optimize_placement(
         workers: int = 1,
         flat: bool = False,
         output_x_order: dict[str, float] | None = None,
+        slice_weight: float = _PLACE_W_SLICE,
 ) -> list[_Placed]:
     """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``).
 
@@ -752,8 +792,10 @@ def _optimize_placement(
     state = _PlaceState(
         components, nets, layer_of, y_of,
         base_y=base_y, gutter=gutter, routing_gutter=routing_gutter, y_moves=y_moves,
-        clock_pin=clock_pin, flat=flat, output_x_order=output_x_order,
+        clock_pin=clock_pin, flat=flat, output_x_order=output_x_order, slice_weight=slice_weight,
     )
+    if state.slice_pairs:
+        print(f"[place] bit-slice alignment: {len(state.slice_pairs)} pairs, weight {slice_weight:g}")
     seed_cost = state.cost
     if state.gates:
         _barycenter(state)

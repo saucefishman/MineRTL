@@ -31,7 +31,7 @@ from .layout import (
 from .anneal import _optimize_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
-from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
+from .pathfinding import _astar, IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -1282,8 +1282,12 @@ def build_litematic_from_component_list(
         place_mirror: bool = True,
         place_seed: int = 0,
         place_workers: int = 1,
+        place_slice_weight: float | None = None,
+        bend_cost: float | None = None,
         flat: bool = False,
 ) -> Path:
+    if bend_cost is not None and _astar is not None:
+        _astar.set_bend_cost(bend_cost)
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
     y_stride = max_comp_height + additional_component_height_spacing
@@ -1308,6 +1312,7 @@ def build_litematic_from_component_list(
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
             y_moves=place_y_moves, z_moves=place_z_moves, mirror_moves=place_mirror, seed=place_seed,
             clock_pin=clock_pin, workers=place_workers, flat=flat, output_x_order=output_x_order,
+            **({"slice_weight": place_slice_weight} if place_slice_weight is not None else {}),
         )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.

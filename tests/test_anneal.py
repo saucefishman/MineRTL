@@ -4,7 +4,7 @@ from collections import defaultdict
 import pytest
 
 from minecraft_v.main import module_to_component_list
-from minecraft_v.models import Cell, Module, Port
+from minecraft_v.models import Cell, Module, NetName, Port
 import minecraft_v.placement_engine.anneal as anneal
 from minecraft_v.placement_engine.ir import ComponentType
 from minecraft_v.placement_engine.layout import (
@@ -306,3 +306,45 @@ def test_parallel_anneal_cost_is_true_cost_and_deterministic():
         assert st.cost == pytest.approx(st.full_recompute(refresh_io=True))
         finals.append(st.snapshot())
     assert finals[0] == finals[1]
+
+
+def _sliced_setup():
+    m = _adder_like_module()
+    m.netnames = {"s": NetName(bits=m.ports["s"].bits), "$auto$tmp": NetName(hide_name=1, bits=m.ports["s"].bits)}
+    comp = _expand_multibit_io(module_to_component_list(m))
+    stride = max(c.footprint.height for c in comp.components) + 4
+    return comp, _assign_component_y_levels(comp.components, comp.nets, y_stride=stride)
+
+
+def test_cells_tagged_with_bus_bit():
+    comp, _ = _sliced_setup()
+    tags = {c.id: c.metadata.get("bus") for c in comp.components if c.type not in _IO}
+    assert tags["x0"] == ["s", 0]  # the user name wins over the Yosys one
+    assert tags["s3"] == ["s", 3]
+    assert tags["g0"] is None
+
+
+def test_slice_alignment_cost_consistent():
+    comp, y_level = _sliced_setup()
+    gates = [c for c in comp.components if c.type not in _IO]
+    layers = _assign_gate_layers(gates, comp.nets, {c.id: y_level[c.id] for c in gates})
+    st = anneal._PlaceState(
+        comp.components, comp.nets, layers, {c.id: y_level.get(c.id, 0) for c in comp.components},
+        base_y=5, gutter=10, routing_gutter=6, y_moves=True, slice_weight=2.0,
+    )
+    assert st.slice_pairs == [("x0", "s1"), ("s1", "s2"), ("s2", "s3")]
+    rng = random.Random(3)
+    kinds = list(anneal._PLACE_MOVE_WEIGHTS)
+    weights = list(anneal._PLACE_MOVE_WEIGHTS.values())
+    for _ in range(2000):
+        mv = st.propose(rng, kinds, weights, 4)
+        if mv is None:
+            continue
+        before = (list(st.pair_cost), st.cost)
+        st.apply(*mv)
+        if rng.random() < 0.5:
+            st.commit()
+        else:
+            st.undo()
+            assert (list(st.pair_cost), st.cost) == before
+    assert st.cost == pytest.approx(st.full_recompute(restack=False))

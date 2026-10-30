@@ -44,8 +44,21 @@ def _load_output_pin_targets(path: str) -> dict[str, tuple[int, int]]:
     return normalized
 
 
+def _bit_bus_index(module: Module) -> dict[int, tuple[str, int]]:
+    """Net bit -> (vector name, index) for bits of multi-bit netnames; user names win over Yosys ones."""
+    out: dict[int, tuple[str, int]] = {}
+    for name, nn in sorted(module.netnames.items(), key=lambda kv: (-kv[1].hide_name, kv[0])):
+        if len(nn.bits) < 2:
+            continue
+        for i, bit in enumerate(nn.bits):
+            if isinstance(bit, int):
+                out[bit] = (name, i)
+    return out
+
+
 def module_to_component_list(module: Module) -> ComponentList:
     components: list[Component] = []
+    bit_bus = _bit_bus_index(module)
     # bit_id -> [(component_id, pin_name, Direction)]
     bit_endpoints: dict[int, list[tuple[str, str, Direction]]] = defaultdict(list)
 
@@ -71,6 +84,7 @@ def module_to_component_list(module: Module) -> ComponentList:
         comp_type = CELL_TYPE_MAP[cell.type]
         schematic = SCHEMATIC_MAP[comp_type]
         pins = []
+        bus: tuple[str, int] | None = None
         for schematic_pin in schematic.pins:
             pin_name = schematic_pin.name
             if pin_name in cell.port_directions:
@@ -82,6 +96,8 @@ def module_to_component_list(module: Module) -> ComponentList:
             for bit in cell.connections.get(pin_name, []):
                 if isinstance(bit, int):
                     bit_endpoints[bit].append((cell_name, pin_name, pin_dir))
+                    if pin_dir == Direction.OUT and bus is None:
+                        bus = bit_bus.get(bit)
                 elif isinstance(bit, str) and bit in ('0', '1', 'x', 'z'):
                     const_val = bit
             if const_val is not None:
@@ -94,6 +110,7 @@ def module_to_component_list(module: Module) -> ComponentList:
             pins=pins,
             params=dict(cell.parameters),
             footprint=schematic.footprint,
+            metadata={"bus": list(bus)} if bus else {},
         ))
 
     nets: list[NetConnection] = []
@@ -152,6 +169,12 @@ def main():
     parser.add_argument("--place-workers", type=int, default=min(4, os.cpu_count() or 1),
                         help="forked chains per annealing temperature for --placer sa (default "
                              "min(4, cpus); the result depends on the count, 1 = serial)")
+    parser.add_argument("--place-slice-weight", type=float, default=None,
+                        help="--placer sa: pull gates driving consecutive bits of a vector into the same X/Z "
+                             "(bit k sits on Y level k, so slices stack straight up); 0 = off (default: "
+                             "_PLACE_W_SLICE)")
+    parser.add_argument("--bend-cost", type=float, default=None,
+                        help="A* extra cost for a flat wire turning (default 1; a flat step costs 1)")
     parser.add_argument("--gutter", type=int, default=None,
                         help="X gap between neighbouring gates in a row (default: auto from routing demand, 6-8)")
     parser.add_argument("--io-margin", type=int, default=None,
@@ -211,6 +234,8 @@ def main():
                                         place_mirror=args.place_mirror,
                                         place_seed=args.place_seed,
                                         place_workers=args.place_workers,
+                                        place_slice_weight=args.place_slice_weight,
+                                        bend_cost=args.bend_cost,
                                         flat=args.flat,
                                         **{k: v for k, v in (
                                             ("gutter", args.gutter),

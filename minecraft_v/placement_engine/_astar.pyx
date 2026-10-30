@@ -153,6 +153,7 @@ cdef double H_RADIUS_FACTOR = 0
 cdef int N_SNAP_BITS = 0
 cdef int HORIZ_RADIUS_MIN = 0
 cdef int Y_RADIUS_MIN = 0
+cdef double BEND_COST = 1       # extra cost of a flat move turning (set_bend_cost)
 cdef object _init_done = False
 
 # Totals across searches in this process (see stats()).
@@ -824,6 +825,11 @@ cdef class World:
         return (self.entry(x, y, z, x, y - 4, z, 8, 0), sides) if sides else None
 
 
+def set_bend_cost(double cost):
+    global BEND_COST
+    BEND_COST = cost
+
+
 def _strip_tables(static):
     """A static-moves result with each entry's snapshot-table slot blanked, for comparison."""
     moves, m4 = static
@@ -1136,7 +1142,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             cost = m.cost
             # Penalise XZ direction change on flat moves only (avoids disrupting slope/tower costs).
             if has_in_dir and m.has_flat and (m.fdx != in_dx or m.fdz != in_dz):
-                cost += 1
+                cost += BEND_COST
             new_g_wire = e.g_wire + cost
             if congestion_cost is not None:
                 cost = cost + m.cong
