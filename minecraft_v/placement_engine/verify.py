@@ -19,6 +19,7 @@ Rules (see tests/test_verify.py):
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -226,11 +227,13 @@ def verify_signals(
         nets: dict[str, tuple[Pos, list[Pos]]],
         owner: dict[Pos, str],
         blocked: frozenset[Pos] = frozenset(),
+        on_net: Callable[[str], None] | None = None,
 ) -> list[Violation]:
     """Opens (unreached sinks) and shorts (cross-net reach) for the given nets.
 
     nets: net_id -> (source cell, sink cells). owner: cell -> owning net (e.g. dust_owner).
     blocked: component-internal cells, treated as air unless they are a terminal.
+    on_net: called with each net id once it has been checked.
     """
     terminals = frozenset(p for src, sinks in nets.values() for p in (src, *sinks))
     world = _World(region, blocked, terminals)
@@ -260,6 +263,8 @@ def verify_signals(
             if other is not None and other != net_id and world.kind(pos) != _OPAQUE:
                 short(net_id, other, pos)
             reached_by.setdefault(pos, net_id)
+        if on_net is not None:
+            on_net(net_id)
     return violations
 
 
