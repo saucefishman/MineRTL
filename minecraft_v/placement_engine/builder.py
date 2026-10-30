@@ -29,6 +29,7 @@ from .layout import (
     _layout_components, _compute_workspace_dims,
 )
 from .anneal import _optimize_placement
+from .poisson import _poisson_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
 from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
@@ -1301,6 +1302,13 @@ def build_litematic_from_component_list(
             io_margin=component_width_spacing,
             routing_gutter=6 if component_depth_spacing is None else component_depth_spacing, flat=flat,
             output_x_order=output_x_order,
+        )
+    elif placer == "poisson":
+        placed = _poisson_placement(
+            comp.components, comp.nets, y_level,
+            base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
+            routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
+            seed=place_seed, clock_pin=clock_pin, flat=flat, output_x_order=output_x_order,
         )
     else:
         placed = _optimize_placement(
