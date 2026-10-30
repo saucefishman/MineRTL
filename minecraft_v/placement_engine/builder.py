@@ -1548,6 +1548,12 @@ def build_litematic_from_component_list(
             target = (p.origin[0], p.origin[1], p.origin[2] + 2)
             clock_region = _construct_clock_region(target, critical_path_ticks)
             regions['clock'] = clock_region
+            # The first clock row is inside main, and loaders paste regions in no fixed order (air included).
+            for x in range(clock_region.width):
+                for y in range(clock_region.height):
+                    wx, wy = clock_region.x + x, clock_region.y + y
+                    if wx < width and target[2] < depth and clock_region[x, y, 0].id != "minecraft:air":
+                        workspace[wx, wy, target[2]] = clock_region[x, y, 0]
             break
 
     schematic = Schematic(
