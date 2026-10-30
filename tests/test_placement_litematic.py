@@ -119,8 +119,9 @@ def test_output_pin_target_layer_wiring(tmp_path: Path, capsys):
         ("$_XOR_", {"has_b": True}),
         ("$_NOT_", {"has_b": False}),
         pytest.param("$_MUX_", {"has_b": True, "has_s": True}, marks=pytest.mark.xfail(
-            raises=ValueError, strict=True,
-            reason="known layout bug (also examples/mux): IO repeater cell lands outside the workspace")),
+            raises=ValueError, strict=False,
+            reason="known layout bug (also examples/mux): IO repeater cell lands outside the workspace; "
+                   "not strict because sa's auto spacing happens not to trigger it for a single gate")),
     ],
 )
 def test_single_gate_routes_clean(tmp_path: Path, capsys, gate_type, kwargs, placer):

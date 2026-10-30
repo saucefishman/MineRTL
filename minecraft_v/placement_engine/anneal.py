@@ -43,6 +43,17 @@ _PLACE_WZ = 1.0
 _PLACE_W_AREA = 0.5          # per block of the widest row (workspace width)
 _PLACE_W_CONG = 0.0          # RUDY congestion: w * sum(bin demand^2) / bin area; off — spreads
                              # layouts and slows routing without fewer failures (see bench in git log)
+# Auto spacing (gutter / routing_gutter left unset): sampled ~400 builds over 5 small designs plus
+# halfvideo, regsbig and video. Small and mid designs route clean from gutter>=5, routing_gutter>=5;
+# the dense ones (regsbig, video) need routing_gutter 8 (6 fails or is flaky and ~1.5-2.5x slower).
+# The switch is the busiest layer gap's X-track demand per Y level (_routing_demand): ~0.4-2.6 on the
+# small designs and halfvideo, 3.6-3.9 regsbig, ~4.1 video.
+_AUTO_NOMINAL_GUTTER = 8      # spacing the SA runs at before the final repack
+_AUTO_NOMINAL_ROUTING = 7
+_AUTO_DEMAND_LO = 2.5         # below: loose spacing (6, 6); above DEMAND_HI: dense (8, 8)
+_AUTO_DEMAND_HI = 4.0
+_AUTO_LOOSE = (6, 6)
+_AUTO_DENSE = (8, 8)
 _PLACE_BIN = 6               # congestion bin size in X and Z (blocks)
 _PLACE_BARY_SWEEPS = 6
 _PLACE_INNER_NUM = 4.0       # moves per temperature = inner_num * N^(4/3), at most _PLACE_MAX_TEMP_MOVES
@@ -671,6 +682,38 @@ def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: b
         state.restore(seed)
 
 
+def _routing_demand(state: _PlaceState, io_margin: int) -> float:
+    """X tracks needed at the busiest gap between gate layers, per Y level.
+
+    Every net crossing a gap needs about its X span of track there; divided by the workspace width
+    that is the average number of tracks stacked per X column, shared among the Y levels.
+    """
+    if not state.gates or not state.nets:
+        return 0.0
+    gate_z = sorted({state.pos[g][2] for g in state.gates})
+    width = (max(state.pos[g][0] + state.comps[g].footprint.width for g in state.gates)
+             - min(state.pos[g][0] for g in state.gates) + 2 * io_margin)
+    levels = len({state.y[g] for g in state.gates})
+    spans = []
+    for pins in state.net_pins:
+        xs = [state.pos[c][0] + dx for c, dx, _, _ in pins]
+        zs = [state.pos[c][2] + dz for c, _, _, dz in pins]
+        spans.append((min(zs), max(zs), max(xs) - min(xs) + 1))
+    demand = 0.0
+    for lo, hi in zip(gate_z, gate_z[1:]):
+        line = hi - 1
+        occ = sum(w for z0, z1, w in spans if z0 <= line < z1)
+        demand = max(demand, occ / width / levels)
+    return demand
+
+
+def _auto_spacing(demand: float) -> tuple[int, int]:
+    """(gutter, routing_gutter) interpolated between loose and dense spacing by demand."""
+    t = min(1.0, max(0.0, (demand - _AUTO_DEMAND_LO) / (_AUTO_DEMAND_HI - _AUTO_DEMAND_LO)))
+    return (round(_AUTO_LOOSE[0] + t * (_AUTO_DENSE[0] - _AUTO_LOOSE[0])),
+            round(_AUTO_LOOSE[1] + t * (_AUTO_DENSE[1] - _AUTO_LOOSE[1])))
+
+
 def _optimize_placement(
         components: list[Component],
         nets: list[NetConnection],
@@ -678,9 +721,9 @@ def _optimize_placement(
         *,
         placer: str,
         base_y: int,
-        gutter: int,
+        gutter: int | None,
         io_margin: int,
-        routing_gutter: int,
+        routing_gutter: int | None,
         y_moves: bool = True,
         z_moves: bool = True,
         mirror_moves: bool = True,
@@ -693,7 +736,14 @@ def _optimize_placement(
     """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``).
 
     output_x_order: fixed left-to-right order of output pins (see _assign_io_x_positions).
+    gutter / routing_gutter: None picks it from the placed design's routing demand (_auto_spacing); the
+    placement itself runs at nominal spacing and is repacked.
     """
+    auto_gutter, auto_routing = gutter is None, routing_gutter is None
+    if gutter is None:
+        gutter = _AUTO_NOMINAL_GUTTER
+    if routing_gutter is None:
+        routing_gutter = _AUTO_NOMINAL_ROUTING
     gates = [c for c in components if c.type not in _IO_TYPES]
     y_of = {c.id: y_level.get(c.id, 0) for c in components}
     layer_of = _assign_gate_layers(gates, nets, {c.id: y_of[c.id] for c in gates})
@@ -715,6 +765,13 @@ def _optimize_placement(
                     workers=workers)
         print(f"[place] {placer}: cost legacy={seed_cost:.0f} bary={bary_cost:.0f} "
               f"final={state.cost:.0f} ({time.monotonic() - t0:.2f}s)")
+
+    if auto_gutter or auto_routing:
+        demand = _routing_demand(state, io_margin)
+        want_gutter, want_routing = _auto_spacing(demand)
+        gutter = want_gutter if auto_gutter else gutter
+        routing_gutter = want_routing if auto_routing else routing_gutter
+        print(f"[place] auto spacing: routing demand {demand:.2f} -> gutter {gutter}, routing_gutter {routing_gutter}")
 
     def comp_y(c: Component) -> int:
         return base_y + state.y[c.id]
