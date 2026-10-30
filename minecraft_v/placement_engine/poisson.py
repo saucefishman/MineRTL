@@ -624,6 +624,23 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
     pos_all[outputs, 2] = output_z
 
 
+def _front_macros(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], routing_gutter: int) -> None:
+    """Line macros up at the front, gates behind them, in place: a macro array is a wall nothing should cross."""
+    macros = [i for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM]
+    if not macros:
+        return
+    rest = [i for i in range(len(gates)) if gates[i].type != ComponentType.CUSTOM]
+    x = 0.0
+    for i in macros:
+        pos[i] = (x, 0.0, 0.0)
+        x += sizes[i, 0]
+    if rest:
+        depth = float((sizes[macros, 2]).max()) + routing_gutter
+        pos[rest, 2] += depth - pos[rest, 2].min()
+        pos[rest, 0] += (x - sizes[rest, 0].max()) / 2 - pos[rest, 0].mean()
+        pos[rest, 0] -= min(0.0, pos[rest, 0].min())
+
+
 def _poisson_placement(
         components: list[Component],
         nets: list[NetConnection],
@@ -681,6 +698,7 @@ def _poisson_placement(
     pos = pos_all[:len(gates)]
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)
+    _front_macros(pos, sizes, gates_final, routing_gutter)
     pos_all[len(gates):] = io_rows()
     _io_rows(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order), flat)
     print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")

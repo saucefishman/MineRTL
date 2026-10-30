@@ -337,6 +337,8 @@ def load_macro(name: str, directory: Path) -> Macro | None:
 _LANE_FLOOR = BlockState("minecraft:smooth_quartz")
 _LANE_DUST = BlockState("minecraft:redstone_wire")
 _LANE_REACH = 13   # dust cells between lane repeaters
+_TAP_COLUMNS = 8   # shared pins step through this many X positions, so neighbours in Y don't touch
+_TAP_PITCH = 3
 _TILE_GAP = 3      # X between tiles, so that wires at their edges can't couple
 
 
@@ -349,15 +351,15 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
 
     A port every instance ties to one net runs as a straight lane along the input faces, on the port's own Y
     (tiles are built with one input pin per Y, see poisson._IoPlacer), so it never crosses another. Its only
-    pin is at an end of the row; ends alternate, so end pins sit two lane pitches apart. Other ports stay per tile.
+    pin taps the middle of the lane. Other ports stay per tile.
     """
     fp = tile.footprint
     n = len(cls.instances)
-    x0 = 2  # row end: pin repeater, then lane
+    x0 = 0
     pitch = fp.width + _TILE_GAP
-    width = x0 + n * pitch - _TILE_GAP + 2
-    spacer_z, lane_z = fp.depth, fp.depth + 1
-    depth = fp.depth + 2
+    width = n * pitch - _TILE_GAP
+    spacer_z, lane_z, pin_z = fp.depth, fp.depth + 1, fp.depth + 2
+    depth = fp.depth + 3
     blocks: dict[Pos, BlockState] = {}
     owner: dict[Pos, str] = {}
     terminals: dict[str, Pos] = {}
@@ -415,43 +417,44 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
         if len(rel_nets) == 1 and n > 1:
             net = rel_nets.pop()
             xs = [tile_x + x0 + k * pitch for k in range(n)]
-            west = n_lanes % 2 == 0
+            # Tap the middle: pins sit near each other on the face and the lane runs both ways from there.
+            tap = width // 2 + (n_lanes % _TAP_COLUMNS - _TAP_COLUMNS // 2) * _TAP_PITCH
             n_lanes += 1
-            pin_x = 0 if west else width - 1
-            lane = range(1, xs[-1] + 1) if west else range(width - 2, xs[0] - 1, -1)
-            lay((pin_x, y, lane_z), _lane_repeater("west" if west else "east"), net)
-            since, ticks = 0, 1
-            ticks_at: dict[int, int] = {}
+            lay((tap, y, pin_z), _lane_repeater("south"), net)
+            lay((tap, y, lane_z), _LANE_DUST, net)
+            ticks_at: dict[int, int] = {tap: 1}
             taps = set(xs)
-            for x in lane:
-                if since >= _LANE_REACH and x not in taps:
-                    lay((x, y, lane_z), _lane_repeater("west" if west else "east"), net)
-                    since, ticks = 0, ticks + 1
-                else:
-                    lay((x, y, lane_z), _LANE_DUST, net)
-                    since += 1
-                ticks_at[x] = ticks
-            name = port.name
-            pins.append(PinRef(name=name, direction=Direction.IN,
-                               side=CardinalDirection.WEST if west else CardinalDirection.EAST,
-                               offset=(pin_x, y, depth - 1 - lane_z)))
-            pin_net[name] = net
-            port_net[name] = net
-            nets[net] = (f"{name}:{name}", nets[net][1])
+            for step, facing, end in ((-1, "east", min(xs)), (1, "west", max(xs))):
+                since, ticks = 0, 1
+                for x in range(tap + step, end + step, step) if (end - tap) * step > 0 else ():
+                    if since >= _LANE_REACH and x not in taps:
+                        lay((x, y, lane_z), _lane_repeater(facing), net)
+                        since, ticks = 0, ticks + 1
+                    else:
+                        lay((x, y, lane_z), _LANE_DUST, net)
+                        since += 1
+                    ticks_at[x] = ticks
+            pin_name = port.name
+            pins.append(PinRef(name=pin_name, direction=Direction.IN, side=CardinalDirection.SOUTH,
+                               offset=(tap, y, depth - 1 - pin_z)))
+            pin_net[pin_name] = net
+            port_net[pin_name] = net
+            nets[net] = (f"{pin_name}:{pin_name}", nets[net][1])
             for k, x in enumerate(xs):
-                extra[(k, port.name)] = (name, ticks_at[x] + 1)
+                extra[(k, port.name)] = (pin_name, ticks_at[x] + 1)
         else:
             for k in range(n):
                 net = cls.instances[k][inner_of[port.name]]
                 x = tile_x + x0 + k * pitch
                 name = f"t{k}_{port.name}"
                 lay((x, y, lane_z), _lane_repeater("south"), net)
+                lay((x, y, pin_z), _lane_repeater("south"), net)
                 pins.append(PinRef(name=name, direction=Direction.IN, side=CardinalDirection.SOUTH,
-                                   offset=(x, y, depth - 1 - lane_z)))
+                                   offset=(x, y, depth - 1 - pin_z)))
                 pin_net[name] = net
                 port_net[name] = net
                 nets[net] = (f"{name}:{name}", nets[net][1])
-                extra[(k, port.name)] = (name, 2)
+                extra[(k, port.name)] = (name, 3)
     for k, mapping in enumerate(cls.instances):
         for port in outputs:
             net = mapping[inner_of[port.name]]
