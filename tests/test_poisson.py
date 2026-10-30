@@ -42,7 +42,8 @@ def test_no_gate_behind_input_or_ahead_of_output():
     for pin in (p for p in placed if p.component.type in _IO):
         x, _, z = pin.origin
         for g in gates:
-            if g.origin[0] - 1 <= x <= g.origin[0] + g.component.footprint.width:
+            clear = poisson._IO_COLUMN_CLEAR
+            if g.origin[0] - clear <= x <= g.origin[0] + g.component.footprint.width - 1 + clear:
                 if pin.component.type == ComponentType.INPUT_PIN:
                     assert g.origin[2] + g.component.footprint.depth <= z, (pin.component.id, g.component.id)
                 else:

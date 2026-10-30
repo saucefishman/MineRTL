@@ -39,7 +39,8 @@ _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
 _REFINE_PASSES = 3
 _REFINE_POPS = 60
-_IO_COLUMN_CLEAR = 2         # a gate within this many blocks in X of an IO column counts as in its way
+_IO_COLUMN_CLEAR = 4         # a gate this close in X is in an IO column's way: nearer, a pin lands in the
+                             # keepout of the gate's terminal and its wire can't start
 _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENSE), regsbig and video
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
