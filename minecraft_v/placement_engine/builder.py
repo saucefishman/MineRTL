@@ -1280,16 +1280,20 @@ def build_litematic_from_component_list(
         place_mirror: bool = True,
         place_seed: int = 0,
         place_workers: int = 1,
+        flat: bool = False,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
     y_stride = max_comp_height + additional_component_height_spacing
     y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride, clock_pin=clock_pin)
+    if flat:
+        y_level = {cid: 0 for cid in y_level}
+        place_y_moves = False
     if placer == "legacy":
         placed = _layout_components(
             comp.components, comp.nets,
             gutter=gutter, base_y=base_y, y_level=y_level,
-            io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
+            io_margin=component_width_spacing, routing_gutter=component_depth_spacing, flat=flat,
         )
     else:
         placed = _optimize_placement(
@@ -1297,7 +1301,7 @@ def build_litematic_from_component_list(
             placer=placer, base_y=base_y, gutter=gutter,
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
             y_moves=place_y_moves, z_moves=place_z_moves, mirror_moves=place_mirror, seed=place_seed,
-            clock_pin=clock_pin, workers=place_workers,
+            clock_pin=clock_pin, workers=place_workers, flat=flat,
         )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.

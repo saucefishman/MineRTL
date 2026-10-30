@@ -146,6 +146,8 @@ def main():
                         help="Let --placer sa move gates between depth layers within their slack (default: on)")
     parser.add_argument("--place-mirror", action=argparse.BooleanOptionalAction, default=True,
                         help="Let --placer bary|sa mirror gates in X (default: on)")
+    parser.add_argument("--flat", action="store_true",
+                        help="Put every component on the same Y level (for small projects)")
     parser.add_argument("--place-seed", type=int, default=0, help="RNG seed for --placer sa (default 0)")
     parser.add_argument("--place-workers", type=int, default=min(4, os.cpu_count() or 1),
                         help="forked chains per annealing temperature for --placer sa (default "
@@ -198,7 +200,8 @@ def main():
                                         place_z_moves=args.place_z_moves,
                                         place_mirror=args.place_mirror,
                                         place_seed=args.place_seed,
-                                        place_workers=args.place_workers)
+                                        place_workers=args.place_workers,
+                                        flat=args.flat)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 

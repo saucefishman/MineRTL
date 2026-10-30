@@ -73,6 +73,7 @@ class _PlaceState:
             routing_gutter: int,
             y_moves: bool,
             clock_pin: str | None = None,
+            flat: bool = False,
     ):
         self.components = components
         self.nets = nets
@@ -84,6 +85,7 @@ class _PlaceState:
         self.gutter = gutter
         self.routing_gutter = routing_gutter
         self.y_moves = y_moves
+        self.flat = flat
         self.clock_pin = clock_pin
         self.mirrored: set[str] = set()
         self._mirror_copy: dict[str, Component] = {}
@@ -194,7 +196,7 @@ class _PlaceState:
             gates_placed = [_Placed(component=self.comp(g), origin=self.pos[g]) for g in self.gates]
             self._io_x = {}
             for group in (self.inputs, self.outputs):
-                self._io_x.update(_assign_io_x_positions(group, gates_placed, self.nets, 0, self.gutter, 0))
+                self._io_x.update(_assign_io_x_positions(group, gates_placed, self.nets, 0, self.gutter, 0, self.flat))
         for c in self.outputs:
             self.pos[c.id] = (self._io_x[c.id], self.base_y + self.y[c.id], 1)
         for c in self.inputs:
@@ -679,6 +681,7 @@ def _optimize_placement(
         seed: int = 0,
         clock_pin: str | None = None,
         workers: int = 1,
+        flat: bool = False,
 ) -> list[_Placed]:
     """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``)."""
     gates = [c for c in components if c.type not in _IO_TYPES]
@@ -689,7 +692,7 @@ def _optimize_placement(
     state = _PlaceState(
         components, nets, layer_of, y_of,
         base_y=base_y, gutter=gutter, routing_gutter=routing_gutter, y_moves=y_moves,
-        clock_pin=clock_pin,
+        clock_pin=clock_pin, flat=flat,
     )
     seed_cost = state.cost
     if state.gates:
@@ -708,5 +711,5 @@ def _optimize_placement(
 
     return _pack_layout(
         components, nets, state.layer_gates(), comp_y,
-        gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter,
+        gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter, flat=flat,
     )

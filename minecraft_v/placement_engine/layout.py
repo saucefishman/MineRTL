@@ -106,14 +106,16 @@ def _assign_io_x_positions(
         nets: list[NetConnection],
         io_margin: int,
         gutter: int,
-        ws_width: int
+        ws_width: int,
+        flat: bool = False,
 ) -> dict[str, int]:
     """
     Assign X positions to IO components to minimise total net distance.
 
     Multi-bit groups (same base name, e.g. 'a[0]'/'a[1]') share one X column
     so their bits are vertically aligned.  Groups are ordered by the median
-    world-X of the gate pins they connect to.
+    world-X of the gate pins they connect to.  With ``flat`` every IO is on one
+    Y level, so each gets its own column (bits of a group stay adjacent, in order).
     """
     if not io_components:
         return {}
@@ -156,20 +158,26 @@ def _assign_io_x_positions(
     groups: dict[str, list[str]] = defaultdict(list)
     for c in io_components:
         groups[_io_base_name(c.id)].append(c.id)
+    if flat:
+        for ids in groups.values():
+            ids.sort(key=lambda cid: (_io_bit_index(next(c for c in io_components if c.id == cid)) or 0, cid))
 
     sorted_groups = sorted(
         (_median([individual_x[cid] for cid in ids]), base)
         for base, ids in groups.items()
     )
 
-    io_layer_width = (1 + gutter) * len(sorted_groups)
+    io_layer_width = (1 + gutter) * (len(io_components) if flat else len(sorted_groups))
 
     result: dict[str, int] = {}
     x = io_margin + (ws_width - io_layer_width) // 2
     for _, base in sorted_groups:
         for cid in groups[base]:
             result[cid] = x
-        x += 1 + gutter  # expanded IO footprint is always 1 wide
+            if flat:
+                x += 1 + gutter
+        if not flat:
+            x += 1 + gutter  # expanded IO footprint is always 1 wide
 
     return result
 
@@ -450,6 +458,7 @@ def _layout_components(
         io_margin: int = 4,
         routing_gutter: int = 10,
         y_level: dict[str, int] | None = None,
+        flat: bool = False,
 ) -> list[_Placed]:
     gates = [
         c for c in components
@@ -469,7 +478,7 @@ def _layout_components(
 
     return _pack_layout(
         components, nets, layer_gates, comp_y,
-        gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter,
+        gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter, flat=flat,
     )
 
 
@@ -482,6 +491,7 @@ def _pack_layout(
         gutter: int,
         io_margin: int,
         routing_gutter: int,
+        flat: bool = False,
 ) -> list[_Placed]:
     """Pack gates into rows and place IO around them.
 
@@ -524,8 +534,8 @@ def _pack_layout(
             x_cursors[key] = cursor_x + c.footprint.width + gutter
 
     # Assign IO X positions: minimise net distance, same X per multi-bit group.
-    input_xs = _assign_io_x_positions(inputs, placed, nets, io_margin, gutter, max_layer_width)
-    output_xs = _assign_io_x_positions(outputs, placed, nets, io_margin, gutter, max_layer_width)
+    input_xs = _assign_io_x_positions(inputs, placed, nets, io_margin, gutter, max_layer_width, flat)
+    output_xs = _assign_io_x_positions(outputs, placed, nets, io_margin, gutter, max_layer_width, flat)
 
     for c in outputs:
         y = comp_y(c)
