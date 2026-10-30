@@ -187,8 +187,8 @@ class _IoPlacer:
     """IO positions in domain coordinates, free but for the alignment rules.
 
     All bits of a signal share an X, signals keep at least a gutter between columns, and pins in a
-    column keep ``y_gap`` in Y; each signal's X and each pin's Y follow the gate pins on its nets.
-    Rows sit just outside the Z range here; _io_rows picks their final depth after placement.
+    column rise with bit index, ``y_gap`` or more apart; each signal's X and each pin's Y otherwise
+    follow the gate pins on its nets. Rows sit just outside the Z range here; _io_rows picks their final depth after placement.
     """
 
     def __init__(self, inputs: list[Component], outputs: list[Component], nets: list[NetConnection],
@@ -226,8 +226,7 @@ class _IoPlacer:
         out = {}
         for (_, base, _), x in zip(keyed, columns):
             ys = {i: wanted(i, 1) or 0.0 for i in groups[base]}
-            # Extension targets rise with bit index, so reversed bits would make extensions cross.
-            order = sorted(ys, key=lambda i: (_bit_index(i), i) if i in x_order else (ys[i], i))
+            order = sorted(ys, key=lambda i: (_bit_index(i), i))  # Y rises with bit index
             spread = _spread([ys[i] for i in order], self.y_gap)
             lift = max(0, -spread[0])
             out.update({i: (x, y + lift) for i, y in zip(order, spread)})
