@@ -86,6 +86,7 @@ class _PlaceState:
             clock_pin: str | None = None,
             flat: bool = False,
             output_x_order: dict[str, float] | None = None,
+            flow_rule: bool = True,
     ):
         self.output_x_order = output_x_order
         self.components = components
@@ -133,7 +134,8 @@ class _PlaceState:
         self.preds: dict[str, set[str]] = defaultdict(set)
         self.succs: dict[str, set[str]] = defaultdict(set)
         gate_comps = [self.comps[g] for g in self.gates]
-        for net in _feedforward_nets(gate_comps, nets):
+        # Without the flow rule preds/succs stay empty, so legal() and layer_window() allow anything.
+        for net in _feedforward_nets(gate_comps, nets) if flow_rule else []:
             src = net.source.component_id
             for s in net.sinks:
                 if s.component_id in gate_set and s.component_id != src:
@@ -726,6 +728,7 @@ def _optimize_placement(
         routing_gutter: int | None,
         y_moves: bool = True,
         z_moves: bool = True,
+        flow_rule: bool = True,
         mirror_moves: bool = True,
         seed: int = 0,
         clock_pin: str | None = None,
@@ -752,7 +755,7 @@ def _optimize_placement(
     state = _PlaceState(
         components, nets, layer_of, y_of,
         base_y=base_y, gutter=gutter, routing_gutter=routing_gutter, y_moves=y_moves,
-        clock_pin=clock_pin, flat=flat, output_x_order=output_x_order,
+        clock_pin=clock_pin, flat=flat, output_x_order=output_x_order, flow_rule=flow_rule,
     )
     seed_cost = state.cost
     if state.gates:

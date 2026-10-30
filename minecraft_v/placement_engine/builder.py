@@ -1279,6 +1279,7 @@ def build_litematic_from_component_list(
         placer: str = "sa",
         place_y_moves: bool = True,
         place_z_moves: bool = True,
+        place_flow_rule: bool = True,
         place_mirror: bool = True,
         place_seed: int = 0,
         place_workers: int = 1,
@@ -1306,7 +1307,8 @@ def build_litematic_from_component_list(
             comp.components, comp.nets, y_level,
             placer=placer, base_y=base_y, gutter=gutter,
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
-            y_moves=place_y_moves, z_moves=place_z_moves, mirror_moves=place_mirror, seed=place_seed,
+            y_moves=place_y_moves, z_moves=place_z_moves, flow_rule=place_flow_rule,
+            mirror_moves=place_mirror, seed=place_seed,
             clock_pin=clock_pin, workers=place_workers, flat=flat, output_x_order=output_x_order,
         )
     if output_pin_targets:
