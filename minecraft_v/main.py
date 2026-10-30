@@ -144,6 +144,8 @@ def main():
                         help="Let --placer sa move gates between Y levels (default: on)")
     parser.add_argument("--place-z-moves", action=argparse.BooleanOptionalAction, default=True,
                         help="Let --placer sa move gates between depth layers within their slack (default: on)")
+    parser.add_argument("--place-flow-rule", action=argparse.BooleanOptionalAction, default=True,
+                        help="Keep same-level sinks in later layers than their driver in --placer sa (default: on)")
     parser.add_argument("--place-mirror", action=argparse.BooleanOptionalAction, default=True,
                         help="Let --placer bary|sa mirror gates in X (default: on)")
     parser.add_argument("--flat", action="store_true",
@@ -208,6 +210,7 @@ def main():
                                         placer=args.placer,
                                         place_y_moves=args.place_y_moves,
                                         place_z_moves=args.place_z_moves,
+                                        place_flow_rule=args.place_flow_rule,
                                         place_mirror=args.place_mirror,
                                         place_seed=args.place_seed,
                                         place_workers=args.place_workers,
