@@ -1185,7 +1185,9 @@ def _report_signal_violations(
                      [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks])
         for net in nets if net.net_id not in failed
     }
-    violations = verify_signals(workspace, spec, dust_owner, component_cells)
+    with ProgressBar("[verify] signals", len(spec)) as bar:
+        violations = verify_signals(workspace, spec, dust_owner, component_cells,
+                                    on_net=lambda net_id: bar.update(info=net_id))
     for violation in violations:
         print(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
     if violations:
