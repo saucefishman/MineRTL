@@ -108,14 +108,17 @@ def _assign_io_x_positions(
         gutter: int,
         ws_width: int,
         flat: bool = False,
+        x_order: dict[str, float] | None = None,
 ) -> dict[str, int]:
     """
     Assign X positions to IO components to minimise total net distance.
 
     Multi-bit groups (same base name, e.g. 'a[0]'/'a[1]') share one X column
     so their bits are vertically aligned.  Groups are ordered by the median
-    world-X of the gate pins they connect to.  With ``flat`` every IO is on one
-    Y level, so each gets its own column (bits of a group stay adjacent, in order).
+    world-X of the gate pins they connect to, or by the median x_order of their
+    members (component id -> sort key, e.g. output pin target X) where given.
+    With ``flat`` every IO is on one Y level, so each gets its own column (bits
+    of a group stay adjacent, in order).
     """
     if not io_components:
         return {}
@@ -162,10 +165,13 @@ def _assign_io_x_positions(
         for ids in groups.values():
             ids.sort(key=lambda cid: (_io_bit_index(next(c for c in io_components if c.id == cid)) or 0, cid))
 
-    sorted_groups = sorted(
-        (_median([individual_x[cid] for cid in ids]), base)
-        for base, ids in groups.items()
-    )
+    x_order = x_order or {}
+
+    def _group_key(ids: list[str]) -> float:
+        fixed = [x_order[cid] for cid in ids if cid in x_order]
+        return _median(fixed) if fixed else _median([individual_x[cid] for cid in ids])
+
+    sorted_groups = sorted((_group_key(ids), base) for base, ids in groups.items())
 
     io_layer_width = (1 + gutter) * (len(io_components) if flat else len(sorted_groups))
 
@@ -459,6 +465,7 @@ def _layout_components(
         routing_gutter: int = 10,
         y_level: dict[str, int] | None = None,
         flat: bool = False,
+        output_x_order: dict[str, float] | None = None,
 ) -> list[_Placed]:
     gates = [
         c for c in components
@@ -479,6 +486,7 @@ def _layout_components(
     return _pack_layout(
         components, nets, layer_gates, comp_y,
         gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter, flat=flat,
+        output_x_order=output_x_order,
     )
 
 
@@ -492,11 +500,13 @@ def _pack_layout(
         io_margin: int,
         routing_gutter: int,
         flat: bool = False,
+        output_x_order: dict[str, float] | None = None,
 ) -> list[_Placed]:
     """Pack gates into rows and place IO around them.
 
     ``layer_gates`` maps layer index → gates in X order (rows are split by Y).
     Higher layers sit nearer the output row; empty layers take no space.
+    ``output_x_order``: fixed left-to-right order of output pins (see _assign_io_x_positions).
     """
     inputs = [c for c in components if c.type == ComponentType.INPUT_PIN]
     outputs = [c for c in components if c.type == ComponentType.OUTPUT_PIN]
@@ -535,7 +545,8 @@ def _pack_layout(
 
     # Assign IO X positions: minimise net distance, same X per multi-bit group.
     input_xs = _assign_io_x_positions(inputs, placed, nets, io_margin, gutter, max_layer_width, flat)
-    output_xs = _assign_io_x_positions(outputs, placed, nets, io_margin, gutter, max_layer_width, flat)
+    output_xs = _assign_io_x_positions(outputs, placed, nets, io_margin, gutter, max_layer_width, flat,
+                                       x_order=output_x_order)
 
     for c in outputs:
         y = comp_y(c)
