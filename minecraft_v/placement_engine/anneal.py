@@ -46,7 +46,7 @@ _PLACE_W_CONG = 0.0          # RUDY congestion: w * sum(bin demand^2) / bin area
 _PLACE_BIN = 6               # congestion bin size in X and Z (blocks)
 _PLACE_BARY_SWEEPS = 6
 _PLACE_INNER_NUM = 4.0       # moves per temperature = inner_num * N^(4/3), at most _PLACE_MAX_TEMP_MOVES
-_PLACE_MAX_TEMP_MOVES = 4000  # keeps enough temperatures inside the budget on big designs (video)
+_PLACE_MAX_TEMP_MOVES = 1000  # past ~1000 lower cost stops buying routing (halfvideo: 2000/4000 fail more, 2-4x slower)
 _PLACE_T0_ACCEPT = 0.3       # T0 accepts this fraction of uphill random moves; low — we start from a good seed
 _PLACE_MAX_TEMPS = 150       # deterministic stop (time budget is only a safety net)
 _PLACE_TIME_BUDGET = 10.0    # seconds, plus _PLACE_TIME_PER_GATE per gate, at most _PLACE_TIME_MAX
@@ -74,7 +74,9 @@ class _PlaceState:
             y_moves: bool,
             clock_pin: str | None = None,
             flat: bool = False,
+            output_x_order: dict[str, float] | None = None,
     ):
+        self.output_x_order = output_x_order
         self.components = components
         self.nets = nets
         self.comps = {c.id: c for c in components}
@@ -195,8 +197,10 @@ class _PlaceState:
                             self.y[c.id] = _majority_y(ys)
             gates_placed = [_Placed(component=self.comp(g), origin=self.pos[g]) for g in self.gates]
             self._io_x = {}
-            for group in (self.inputs, self.outputs):
-                self._io_x.update(_assign_io_x_positions(group, gates_placed, self.nets, 0, self.gutter, 0, self.flat))
+            self._io_x.update(_assign_io_x_positions(self.inputs, gates_placed, self.nets, 0, self.gutter, 0,
+                                                     self.flat))
+            self._io_x.update(_assign_io_x_positions(self.outputs, gates_placed, self.nets, 0, self.gutter, 0,
+                                                     self.flat, x_order=self.output_x_order))
         for c in self.outputs:
             self.pos[c.id] = (self._io_x[c.id], self.base_y + self.y[c.id], 1)
         for c in self.inputs:
@@ -318,10 +322,12 @@ class _PlaceState:
             self.layer[c], self.y[c] = layer, level
 
         # Layer Z stays frozen until the next full_recompute, so every move is local.
-        gates_moved = [g for lst in rows_new.values() for g in lst]
-        undo["pos"] = {g: self.pos[g] for g in gates_moved}
+        gates_in_rows = [g for lst in rows_new.values() for g in lst]
+        undo["pos"] = {g: self.pos[g] for g in gates_in_rows}
         for key in rows_new:
             self._place_row(key)
+        # Only gates that actually shifted touch their nets (a swap of equal-width gates moves just those two).
+        gates_moved = [g for g in gates_in_rows if self.pos[g] != undo["pos"][g]]
         nets = {ni for g in gates_moved for ni in self.comp_nets[g]}
         if mirror is not None:
             nets.update(self.comp_nets[mirror])
@@ -682,8 +688,12 @@ def _optimize_placement(
         clock_pin: str | None = None,
         workers: int = 1,
         flat: bool = False,
+        output_x_order: dict[str, float] | None = None,
 ) -> list[_Placed]:
-    """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``)."""
+    """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``).
+
+    output_x_order: fixed left-to-right order of output pins (see _assign_io_x_positions).
+    """
     gates = [c for c in components if c.type not in _IO_TYPES]
     y_of = {c.id: y_level.get(c.id, 0) for c in components}
     layer_of = _assign_gate_layers(gates, nets, {c.id: y_of[c.id] for c in gates})
@@ -692,7 +702,7 @@ def _optimize_placement(
     state = _PlaceState(
         components, nets, layer_of, y_of,
         base_y=base_y, gutter=gutter, routing_gutter=routing_gutter, y_moves=y_moves,
-        clock_pin=clock_pin, flat=flat,
+        clock_pin=clock_pin, flat=flat, output_x_order=output_x_order,
     )
     seed_cost = state.cost
     if state.gates:
@@ -712,4 +722,5 @@ def _optimize_placement(
     return _pack_layout(
         components, nets, state.layer_gates(), comp_y,
         gutter=gutter, io_margin=io_margin, routing_gutter=routing_gutter, flat=flat,
+        output_x_order=output_x_order,
     )
