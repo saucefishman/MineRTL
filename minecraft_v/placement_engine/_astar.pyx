@@ -148,6 +148,7 @@ cdef int SIG_LIMIT = 0           # _REPEATER_INTERVAL
 cdef long long SNAP_MASK = 0
 cdef int STAGNATION = 0
 cdef int MAX_NODES = 0
+cdef long long MAX_EXPANSIONS = 0
 cdef double H_RADIUS_FACTOR = 0
 cdef int N_SNAP_BITS = 0
 cdef int HORIZ_RADIUS_MIN = 0
@@ -157,6 +158,9 @@ cdef object _init_done = False
 # Totals across searches in this process (see stats()).
 cdef long long STAT_SEARCHES = 0, STAT_POPS = 0, STAT_PUSHES = 0, STAT_CELLS = 0
 cdef double STAT_LOAD_TIME = 0
+
+
+LAST = {}  # counters of the most recent search (debugging / tuning)
 
 
 def stats():
@@ -174,9 +178,9 @@ cdef bint SHIFT_READY[N_SHIFTS]
 cdef int SNAP_OFF[32][3]
 
 
-def init(snap_offsets, tower_flag, node_shift, stagnation, max_nodes, h_radius_factor,
+def init(snap_offsets, tower_flag, node_shift, stagnation, max_nodes, max_expansions, h_radius_factor,
          horiz_dirs, horiz_radius_min, y_radius_min, sig_shift, sig_limit):
-    global TOWER_FLAG, NODE_SHIFT, SNAP_MASK, STAGNATION, MAX_NODES, H_RADIUS_FACTOR, N_SNAP_BITS, _init_done
+    global TOWER_FLAG, NODE_SHIFT, SNAP_MASK, STAGNATION, MAX_NODES, MAX_EXPANSIONS, H_RADIUS_FACTOR, N_SNAP_BITS, _init_done
     global HORIZ_RADIUS_MIN, Y_RADIUS_MIN, SIG_SHIFT, SIG_LIMIT
     cdef int i
     assert len(horiz_dirs) == 4
@@ -204,6 +208,7 @@ def init(snap_offsets, tower_flag, node_shift, stagnation, max_nodes, h_radius_f
     SNAP_MASK = (1 << N_SNAP_BITS) - 1
     STAGNATION = stagnation
     MAX_NODES = max_nodes
+    MAX_EXPANSIONS = max_expansions
     H_RADIUS_FACTOR = h_radius_factor
     _init_done = True
 
@@ -725,6 +730,8 @@ cdef class World:
                     break
             if not col_clear:
                 continue
+            if self.next_to_terminal(cx, y + 1, cz) or self.next_to_terminal(cx, y + 2, cz):
+                continue
             if self.inb(cx, y - 1, cz):
                 if self.owner(cx, y - 1, cz) >= 2:
                     continue
@@ -733,6 +740,16 @@ cdef class World:
             moves.append(self.entry(x, y, z, cx, y + 4, cz, 8,
                                     snap_bit(tdx, 0, tdz) | snap_bit(tdx, -1, tdz) | snap_bit(tdx, 1, tdz)))
         return 0
+
+    cdef bint next_to_terminal(self, int x, int y, int z) except -1:
+        """Whether an inverted cell here would make a pin terminal unwalkable (wire_walkable
+        rejects cells beside inverted ones); own-net terminals of later sinks aren't keepout."""
+        cdef int k, ddy
+        for k in range(4):
+            for ddy in range(-1, 2):
+                if self.flag(x + HORIZ[k][0], y + ddy, z + HORIZ[k][1], F_TERM):
+                    return True
+        return False
 
     cdef bint m4_cell_clear(self, int x, int y, int z) except -1:
         cdef int k, ddy, sx, sy, sz
@@ -789,6 +806,9 @@ cdef class World:
                     if not self.m4_cell_clear(cells[i][0], cells[i][1], cells[i][2]):
                         ok = False
                         break
+            if ok and (self.next_to_terminal(cells[0][0], cells[0][1], cells[0][2])
+                       or self.next_to_terminal(cells[1][0], cells[1][1], cells[1][2])):
+                ok = False
             if not ok:
                 continue
             for k in range(4):
@@ -925,9 +945,11 @@ cdef inline bint dominated(FlatMap[NodeInfo]* nodes, long long node, double g):
 
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
-           list h_list, expand, congestion_cost, World world=None, bint verify=False):
+           list h_list, expand, congestion_cost, World world=None, bint verify=False,
+           double h_radius_factor=-1):
     """See pathfinding._search_py. With world, cells' static moves are generated here instead of
-    by expand(); verify additionally checks each against expand()."""
+    by expand(); verify additionally checks each against expand(). h_radius_factor: the h-radius
+    cull for this search (0: off; negative: _H_RADIUS_FACTOR)."""
     global STAT_SEARCHES, STAT_POPS, STAT_PUSHES, STAT_CELLS, STAT_LOAD_TIME
     if not _init_done:
         raise RuntimeError("_astar.init() was not called")
@@ -950,8 +972,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef CellMoves* cmv
     cdef M4Side* side
     cdef long long counter = 0, h, node, nkey, cur_snap, h_radius_pruned = 0
-    cdef long long n_explored_xyz = 0, pops = 0
-    cdef int stagnation = 0, cid, i, k, last, m4_side = -1
+    cdef long long n_explored_xyz = 0, pops = 0, n_exp = 0, n_reexp = 0, last_new_pos = 0, max_gap = 0
+    cdef int cid, i, k, last, m4_side = -1
     cdef int in_dx = 0, in_dz = 0, nx, ny, nz
     cdef int cur_depth, cur_cand, ndepth, ncand, step
     cdef bint has_in_dir, came_from_tower, has_reached = False
@@ -961,6 +983,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef bint has_deadline = time_limit is not None
     cdef double deadline = 0
     early_stop_reason = None
+    cdef double radius = H_RADIUS_FACTOR if h_radius_factor < 0 else h_radius_factor
     py_max_f = max(group_max_f)
     max_f = py_max_f
 
@@ -1017,26 +1040,34 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             best_node = e.node
         if h < gbest[e.group]:
             gbest[e.group] = h
+        n_exp += 1
         if ni.expanded:
-            stagnation += 1
-            if stagnation >= STAGNATION:
-                early_stop_reason = f"stagnated ({stagnation} re-expansions without new territory)"
-                break
+            n_reexp += 1
         else:
             ni.expanded = True
             ni.parent = e.parent
-            stagnation = 0
             if <Py_ssize_t>explored_xyz.size() <= cid:
                 explored_xyz.resize(cid + 1, 0)
             if not explored_xyz[cid]:
                 explored_xyz[cid] = 1
                 n_explored_xyz += 1
+                if n_exp - last_new_pos > max_gap:
+                    max_gap = n_exp - last_new_pos
+                last_new_pos = n_exp
             if n_explored_xyz >= MAX_NODES:
                 early_stop_reason = f"node cap ({MAX_NODES} unique positions)"
                 break
         if cid < <int>is_goal.size() and is_goal[cid]:
             reached = e.node
             has_reached = True
+            break
+        # Stagnation: the frontier keeps churning states (snapshots, signal depths, cheaper
+        # re-expansions) over cells it has already reached.
+        if n_exp - last_new_pos >= STAGNATION:
+            early_stop_reason = f"stagnated ({STAGNATION} expansions without a new position)"
+            break
+        if n_exp >= MAX_EXPANSIONS:
+            early_stop_reason = f"expansion cap ({MAX_EXPANSIONS})"
             break
 
         cur_snap = e.node & SNAP_MASK
@@ -1077,7 +1108,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             k = <int>(e.parent >> NODE_SHIFT)
             in_dx = cells.x[cid] - cells.x[k]
             in_dz = cells.z[cid] - cells.z[k]
-        h_limit = gbest[e.group] * H_RADIUS_FACTOR
+        h_limit = gbest[e.group] * radius if radius > 0 else 1e18
         if m4_side >= 0:
             taken.push_back(cmv.m4_move)
         last = <int>taken.size() - 1
@@ -1152,6 +1183,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
 
     STAT_SEARCHES += 1
     STAT_POPS += pops
+    LAST.update(pops=pops, exp=n_exp, reexp=n_reexp, pos=n_explored_xyz, max_gap=max_gap, ok=has_reached,
+                pruned=h_radius_pruned, seeds=len(seed_nodes))
     for i in range(<int>gbest.size()):
         group_best_h[i] = gbest[i]
     return (reached if has_reached else None), best_node, h_radius_pruned, early_stop_reason, came_from
