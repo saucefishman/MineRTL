@@ -21,6 +21,7 @@ class Cell(BaseModel):
     parameters: dict[str, str]
     port_directions: dict[str, Literal["input", "output", "inout"]] = Field(default_factory=dict)
     connections: dict[str, Bits]
+    attributes: dict[str, str] = Field(default_factory=dict)
 
 
 class NetName(BaseModel):

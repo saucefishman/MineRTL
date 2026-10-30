@@ -348,3 +348,78 @@ def test_slice_alignment_cost_consistent():
             st.undo()
             assert (list(st.pair_cost), st.cost) == before
     assert st.cost == pytest.approx(st.full_recompute(restack=False))
+
+
+# Pre-flatten JSON: main instantiates cpu (main.v:3), cpu instantiates alu (cpu.v:40), alu instantiates fa (alu.v:7).
+_HIERARCHY = {"modules": {
+    "main": {"cells": {"cpu": {"type": "cpu", "attributes": {"src": "main.v:3.1-3.9"}},
+                       "$and$1": {"type": "$and", "attributes": {"src": "main.v:22.1-22.9"}}}},
+    "cpu": {"cells": {"alu": {"type": "alu", "attributes": {"src": "cpu.v:40.1-40.9"}}}},
+    "alu": {"cells": {"fa": {"type": "fa", "attributes": {"src": "alu.v:7.1-7.9"}}}},
+    "fa": {"cells": {}},
+}}
+
+
+@pytest.mark.parametrize("src, path", [
+    ("main.v:22.1-22.9", []),
+    ("main.v:3.1-3.9|cpu.v:12.1-12.9", ["cpu"]),
+    ("main.v:3.1-3.9|cpu.v:40.1-40.9|alu.v:7.1-7.9|fa.v:3.1-3.9|techmap/x.v:1.1-1.2", ["cpu", "alu", "fa"]),
+    ("main.v:3.1-3.9|cpu.v:40.1-40.9|alu.v:9.1-9.9", ["cpu", "alu"]),
+    ("main.v:3.1-3.9", ["cpu"]),  # e.g. a DFF whose own src was dropped
+    ("main.v:3.1-3.9|fa.v:3.1-3.9|alu.v:7.1-7.9|cpu.v:40.1-40.9", ["cpu", "alu", "fa"]),  # pool order
+    ("main.v:22.1-22.9|main.v:24.1-24.9", []),  # opt-merged srcs of the top module
+])
+def test_instance_path(src, path):
+    from minecraft_v.main import _instance_path, _scope_index
+    assert _instance_path(src, _scope_index(_HIERARCHY, "main")) == path
+
+
+def _hier_state(weight):
+    m = _adder_like_module()
+    for name, cell in m.cells.items():
+        bit = name[1:]
+        cell.attributes["src"] = f"main.v:{bit}.1-{bit}.9|main.v:3.1-3.9"
+    scopes = {(f"main.v:{b}.1-{b}.9",): [f"fa{b}"] for b in range(4)}
+    comp = _expand_multibit_io(module_to_component_list(m, scopes))
+    stride = max(c.footprint.height for c in comp.components) + 4
+    y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=stride)
+    gates = [c for c in comp.components if c.type not in _IO]
+    layers = _assign_gate_layers(gates, comp.nets, {c.id: y_level[c.id] for c in gates})
+    return anneal._PlaceState(
+        comp.components, comp.nets, layers, {c.id: y_level.get(c.id, 0) for c in comp.components},
+        base_y=5, gutter=10, routing_gutter=6, y_moves=True, hier_weight=weight,
+    )
+
+
+def test_hier_groups_and_cost_consistent():
+    st = _hier_state(0.5)
+    assert sorted(map(sorted, st.inst_members)) == [["c1", "g1", "p1", "s1", "x1"], ["c2", "g2", "p2", "s2", "x2"],
+                                                     ["c3", "g3", "p3", "s3", "x3"], ["g0", "x0"]]
+    rng = random.Random(7)
+    kinds = list(anneal._PLACE_MOVE_WEIGHTS)
+    weights = list(anneal._PLACE_MOVE_WEIGHTS.values())
+    for _ in range(2000):
+        mv = st.propose(rng, kinds, weights, 4)
+        if mv is None:
+            continue
+        before = (dict(st.hier_cost), st.cost)
+        st.apply(*mv)
+        if rng.random() < 0.5:
+            st.commit()
+        else:
+            st.undo()
+            assert (dict(st.hier_cost), st.cost) == before
+    assert st.cost == pytest.approx(st.full_recompute(restack=False))
+
+
+def test_hier_barycenter_keeps_instances_contiguous():
+    st = _hier_state(0.5)
+    anneal._barycenter(st)
+    for row in st.rows.values():
+        seen, last = set(), None
+        for g in row:
+            inst = tuple(st.comp_inst.get(g, ()))
+            if inst != last:
+                assert inst not in seen, row
+                seen.add(inst)
+                last = inst

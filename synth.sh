@@ -66,6 +66,10 @@ fi
 yosys -q -p "
 read_verilog -sv ${dir}/*.v
 hierarchy -check -top main
+design -save pre_flatten
+proc
+write_json ${artifacts_dir}/hierarchy.json
+design -load pre_flatten
 flatten -noscopeinfo
 proc
 memory_map

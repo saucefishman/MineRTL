@@ -57,6 +57,9 @@ _AUTO_DENSE = (8, 8)
 _PLACE_W_SLICE = 0.0         # bit-slice alignment: w * (|dx| + |dz| + mirror mismatch) between
                              # gates driving consecutive bits of one vector (bit k sits on Y level k,
                              # so aligned slices stack straight up); --place-slice-weight
+_PLACE_W_HIER = 0.0          # hierarchy: w * (|x - cx| + |z - cz|) per gate per enclosing instance (from the
+                             # src stack), centroid frozen within a temperature; also groups rows by
+                             # instance in _barycenter. --place-hier-weight
 _PLACE_BIN = 6              # congestion bin size in X and Z (blocks)
 _PLACE_BARY_SWEEPS = 6
 _PLACE_INNER_NUM = 4.0       # moves per temperature = inner_num * N^(4/3), at most _PLACE_MAX_TEMP_MOVES
@@ -90,9 +93,11 @@ class _PlaceState:
             flat: bool = False,
             output_x_order: dict[str, float] | None = None,
             slice_weight: float = _PLACE_W_SLICE,
+            hier_weight: float = _PLACE_W_HIER,
     ):
         self.output_x_order = output_x_order
         self.slice_weight = slice_weight
+        self.hier_weight = hier_weight
         self.components = components
         self.nets = nets
         self.comps = {c.id: c for c in components}
@@ -161,6 +166,21 @@ class _PlaceState:
                     self.comp_pairs[b].append(len(self.slice_pairs))
                     self.slice_pairs.append((a, b))
         self.pair_cost: list[float] = [0.0] * len(self.slice_pairs)
+        # Hierarchy: one group per instance path prefix (gates inside fa3 of alu: [alu], [alu, fa3]).
+        self.comp_inst: dict[str, list[int]] = {}
+        by_path: dict[tuple[str, ...], list[str]] = defaultdict(list)
+        if hier_weight:
+            for g in self.gates:
+                path = self.comps[g].metadata.get("instance") or []
+                for i in range(1, len(path) + 1):
+                    by_path[tuple(path[:i])].append(g)
+        # A one-gate instance would only pin the gate to its own frozen centroid.
+        self.inst_members: list[list[str]] = [m for _, m in sorted(by_path.items()) if len(m) > 1]
+        for gi, members in enumerate(self.inst_members):
+            for g in members:
+                self.comp_inst.setdefault(g, []).append(gi)
+        self.inst_centroid: list[tuple[float, float]] = [(0.0, 0.0)] * len(self.inst_members)
+        self.hier_cost: dict[str, float] = {}
 
         self.pos: dict[str, tuple[int, int, int]] = {}
         self.layer_z: dict[int, int] = {}
@@ -264,6 +284,19 @@ class _PlaceState:
         bx, _, bz = self.pos[b]
         return self.slice_weight * (abs(ax - bx) + abs(az - bz) + ((a in self.mirrored) != (b in self.mirrored)))
 
+    def _center(self, gid: str) -> tuple[float, float]:
+        x, _, z = self.pos[gid]
+        fp = self.comps[gid].footprint
+        return x + fp.width / 2, z + fp.depth / 2
+
+    def _hier_eval(self, gid: str) -> float:
+        gis = self.comp_inst.get(gid)
+        if not gis:
+            return 0.0
+        x, z = self._center(gid)
+        return self.hier_weight * sum(abs(x - self.inst_centroid[gi][0]) + abs(z - self.inst_centroid[gi][1])
+                                      for gi in gis)
+
     def _gate_rect_bins(self, gid: str) -> dict:
         if not _PLACE_W_CONG:
             return {}
@@ -311,7 +344,14 @@ class _PlaceState:
         self.net_cost = [c for c, _ in evals]
         self.net_bins = [b for _, b in evals]
         self.pair_cost = [self._pair_eval(pi) for pi in range(len(self.slice_pairs))]
-        self.cost = sum(self.net_cost) + sum(self.pair_cost) + self._area_cost() + self._rebuild_bins()
+        if refresh_io:
+            # Instance centroids move with the IO, once per temperature, so moves stay local.
+            for gi, members in enumerate(self.inst_members):
+                cs = [self._center(g) for g in members]
+                self.inst_centroid[gi] = (sum(c[0] for c in cs) / len(cs), sum(c[1] for c in cs) / len(cs))
+        self.hier_cost = {g: self._hier_eval(g) for g in self.comp_inst}
+        self.cost = (sum(self.net_cost) + sum(self.pair_cost) + sum(self.hier_cost.values()) + self._area_cost()
+                     + self._rebuild_bins())
         return self.cost
 
     # ── legality ────────────────────────────────────────────────────────
@@ -391,6 +431,11 @@ class _PlaceState:
         if mirror is not None:
             pairs.update(self.comp_pairs[mirror])
         undo["pair"] = {pi: self.pair_cost[pi] for pi in pairs}
+        undo["hier"] = {g: self.hier_cost[g] for g in gates_moved if g in self.hier_cost}
+        for g in undo["hier"]:
+            new = self._hier_eval(g)
+            delta += new - self.hier_cost[g]
+            self.hier_cost[g] = new
         for pi in pairs:
             new = self._pair_eval(pi)
             delta += new - self.pair_cost[pi]
@@ -422,6 +467,7 @@ class _PlaceState:
         self.gate_bins.update(u["gate_bins"])
         for pi, cost in u["pair"].items():
             self.pair_cost[pi] = cost
+        self.hier_cost.update(u["hier"])
         for b, v in u["bins"].items():
             self.bins[b] = v
         self.cost = u["cost"]
@@ -548,7 +594,17 @@ def _barycenter(state: _PlaceState) -> None:
                     xs = [state.pos[c][0] + dx - own_dx[(g, ni)]
                           for ni in state.comp_nets[g] for c, dx, _, _ in state.net_pins[ni] if c != g]
                     bc[g] = (sum(xs) / len(xs) if xs else state.pos[g][0], i)
-                new = sorted(row, key=bc.__getitem__)
+                if state.comp_inst:
+                    # Keep instances contiguous: sort by each enclosing instance's mean, then own.
+                    inst_bc: dict[int, list[float]] = defaultdict(list)
+                    for g in row:
+                        for gi in state.comp_inst.get(g, ()):
+                            inst_bc[gi].append(bc[g][0])
+                    sort_key = {g: (*(sum(inst_bc[gi]) / len(inst_bc[gi]) for gi in state.comp_inst.get(g, ())), bc[g][0],
+                               bc[g][1]) for g in row}
+                    new = sorted(row, key=sort_key.__getitem__)
+                else:
+                    new = sorted(row, key=bc.__getitem__)
                 if new != row:
                     changed = True
                     state.rows[key] = new
@@ -772,6 +828,7 @@ def _optimize_placement(
         flat: bool = False,
         output_x_order: dict[str, float] | None = None,
         slice_weight: float = _PLACE_W_SLICE,
+        hier_weight: float = _PLACE_W_HIER,
 ) -> list[_Placed]:
     """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``).
 
@@ -793,9 +850,13 @@ def _optimize_placement(
         components, nets, layer_of, y_of,
         base_y=base_y, gutter=gutter, routing_gutter=routing_gutter, y_moves=y_moves,
         clock_pin=clock_pin, flat=flat, output_x_order=output_x_order, slice_weight=slice_weight,
+        hier_weight=hier_weight,
     )
     if state.slice_pairs:
         print(f"[place] bit-slice alignment: {len(state.slice_pairs)} pairs, weight {slice_weight:g}")
+    if state.inst_members:
+        print(f"[place] hierarchy: {len(state.inst_members)} instances over {len(state.comp_inst)} gates, "
+              f"weight {hier_weight:g}")
     seed_cost = state.cost
     if state.gates:
         _barycenter(state)

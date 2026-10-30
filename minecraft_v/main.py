@@ -56,9 +56,44 @@ def _bit_bus_index(module: Module) -> dict[int, tuple[str, int]]:
     return out
 
 
-def module_to_component_list(module: Module) -> ComponentList:
+def _scope_index(hierarchy: dict, top: str) -> dict[tuple[str, ...], list[str]]:
+    """Instantiation-site chain -> instance path (['ad', 'f0']), from the pre-flatten JSON (``hierarchy.json``):
+    ``flatten -noscopeinfo`` adds the site of every instance a cell sits in to its ``src``."""
+    modules = hierarchy.get("modules", {})
+    out: dict[tuple[str, ...], list[str]] = {}
+
+    def walk(mod: str, sites: tuple[str, ...], path: list[str], depth: int) -> None:
+        if depth > 32:
+            return
+        for name, cell in modules.get(mod, {}).get("cells", {}).items():
+            if cell.get("type") in modules:
+                site = cell.get("attributes", {}).get("src", "")
+                if site:
+                    sub_sites, sub_path = (*sites, site), [*path, name.lstrip("\\")]
+                    out[sub_sites] = sub_path
+                    walk(cell["type"], sub_sites, sub_path, depth + 1)
+
+    walk(top, (), [], 0)
+    return out
+
+
+def _instance_path(src: str, scopes: dict[tuple[str, ...], list[str]]) -> list[str]:
+    """Instance path of a flattened cell: the deepest instance whose whole site chain is in its ``src``.
+    ``src`` is a Yosys string pool ('|'-joined, not in hierarchy order: outer site, own line, inner site).
+    [] = top module."""
+    entries = set(src.split("|"))
+    best: list[str] = []
+    for sites, path in scopes.items():
+        if len(path) > len(best) and entries.issuperset(sites):
+            best = path
+    return best
+
+
+def module_to_component_list(module: Module, scopes: dict[tuple[str, ...], list[str]] | None = None) -> ComponentList:
+    """scopes: see _scope_index; tags cells with metadata['instance']."""
     components: list[Component] = []
     bit_bus = _bit_bus_index(module)
+    scopes = scopes or {}
     # bit_id -> [(component_id, pin_name, Direction)]
     bit_endpoints: dict[int, list[tuple[str, str, Direction]]] = defaultdict(list)
 
@@ -110,7 +145,10 @@ def module_to_component_list(module: Module) -> ComponentList:
             pins=pins,
             params=dict(cell.parameters),
             footprint=schematic.footprint,
-            metadata={"bus": list(bus)} if bus else {},
+            metadata={k: v for k, v in (
+                ("bus", list(bus) if bus else None),
+                ("instance", _instance_path(cell.attributes.get("src", ""), scopes)),
+            ) if v},
         ))
 
     nets: list[NetConnection] = []
@@ -173,6 +211,9 @@ def main():
                         help="--placer sa: pull gates driving consecutive bits of a vector into the same X/Z "
                              "(bit k sits on Y level k, so slices stack straight up); 0 = off (default: "
                              "_PLACE_W_SLICE)")
+    parser.add_argument("--place-hier-weight", type=float, default=None,
+                        help="--placer bary|sa: keep each module instance's gates together (pull to the "
+                             "instance centroid, rows grouped by instance); 0 = off (default: _PLACE_W_HIER)")
     parser.add_argument("--bend-cost", type=float, default=None,
                         help="A* extra cost for a flat wire turning (default 1; a flat step costs 1)")
     parser.add_argument("--gutter", type=int, default=None,
@@ -203,7 +244,10 @@ def main():
     if module is None:
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
-    component_list = module_to_component_list(module)
+    hierarchy_path = Path(args.netlist).with_name("hierarchy.json")
+    scopes = (_scope_index(json.loads(hierarchy_path.read_text()), args.module)
+              if hierarchy_path.exists() else {})
+    component_list = module_to_component_list(module, scopes)
 
     save_build_artifacts(component_list)
 
@@ -235,6 +279,7 @@ def main():
                                         place_seed=args.place_seed,
                                         place_workers=args.place_workers,
                                         place_slice_weight=args.place_slice_weight,
+                                        place_hier_weight=args.place_hier_weight,
                                         bend_cost=args.bend_cost,
                                         flat=args.flat,
                                         **{k: v for k, v in (

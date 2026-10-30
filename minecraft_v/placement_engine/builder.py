@@ -1283,6 +1283,7 @@ def build_litematic_from_component_list(
         place_seed: int = 0,
         place_workers: int = 1,
         place_slice_weight: float | None = None,
+        place_hier_weight: float | None = None,
         bend_cost: float | None = None,
         flat: bool = False,
 ) -> Path:
@@ -1313,6 +1314,7 @@ def build_litematic_from_component_list(
             y_moves=place_y_moves, z_moves=place_z_moves, mirror_moves=place_mirror, seed=place_seed,
             clock_pin=clock_pin, workers=place_workers, flat=flat, output_x_order=output_x_order,
             **({"slice_weight": place_slice_weight} if place_slice_weight is not None else {}),
+            **({"hier_weight": place_hier_weight} if place_hier_weight is not None else {}),
         )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
