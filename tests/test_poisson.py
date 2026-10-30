@@ -2,6 +2,7 @@ import numpy as np
 from scipy import fft
 
 import minecraft_v.placement_engine.poisson as poisson
+from minecraft_v.placement_engine.builder import _io_barrier
 from minecraft_v.placement_engine.ir import ComponentType
 from tests.test_anneal import _KW, _setup
 
@@ -35,12 +36,35 @@ def test_gates_keep_their_spacing():
             assert apart, (a.component.id, b.component.id)
 
 
-def test_io_rows_outside_gates():
+def test_no_gate_behind_input_or_ahead_of_output():
     _, placed = _place()
-    gate_z = [p.origin[2] for p in placed if p.component.type not in _IO]
-    gate_end = [p.origin[2] + p.component.footprint.depth for p in placed if p.component.type not in _IO]
-    assert all(p.origin[2] < min(gate_z) for p in placed if p.component.type == ComponentType.OUTPUT_PIN)
-    assert all(p.origin[2] >= max(gate_end) for p in placed if p.component.type == ComponentType.INPUT_PIN)
+    gates = [p for p in placed if p.component.type not in _IO]
+    for pin in (p for p in placed if p.component.type in _IO):
+        x, _, z = pin.origin
+        for g in gates:
+            if g.origin[0] - 1 <= x <= g.origin[0] + g.component.footprint.width:
+                if pin.component.type == ComponentType.INPUT_PIN:
+                    assert g.origin[2] + g.component.footprint.depth <= z, (pin.component.id, g.component.id)
+                else:
+                    assert z < g.origin[2], (pin.component.id, g.component.id)
+
+
+def test_outputs_stay_in_row_with_extension_targets():
+    comp, y_level, _ = _setup()
+    order = {c.id: float(i) for i, c in enumerate(comp.components) if c.type == ComponentType.OUTPUT_PIN}
+    placed = poisson._poisson_placement(comp.components, comp.nets, y_level, **dict(_KW, y_spacing=3),
+                                        output_x_order=order)
+    assert len({p.origin[2] for p in placed if p.component.type == ComponentType.OUTPUT_PIN}) == 1
+
+
+def test_io_barrier_closes_pockets_and_clears_gates():
+    cells = set(_io_barrier({5: 20, 12: 30}, [(14, 18, 40)], 25))
+    for z in range(21, 24):
+        assert (5, z) in cells  # right behind the shallow pin, and beside it
+        assert (6, z) in cells
+    assert (8, 31) in cells and (8, 30) not in cells  # between columns: limit of the deeper one
+    assert (12, 31) in cells and (12, 30) not in cells
+    assert (16, 46) not in cells and (16, 47) in cells  # past a gate, its pins keep room
 
 
 def test_deterministic():

@@ -7,8 +7,8 @@ energy with Nesterov's method; the potential comes from Poisson's equation with 
 boundaries, solved exactly on a uniform bin grid by a 3D DCT. An order-preserving 3D legalizer then
 removes what overlap is left, and a compaction + reposition pass tightens the result.
 
-IO stays organised as in the row placers: output row in front, input row behind, Y by bit index,
-shared columns per multibit group.
+IO keeps Y by bit index and shared columns per multibit group, but each column has its own depth:
+inputs sit just behind and outputs just ahead of their gates (_stagger_io).
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
 _REFINE_PASSES = 3
 _REFINE_POPS = 60
+_IO_COLUMN_CLEAR = 2         # a gate within this many blocks in X of an IO column counts as in its way
 _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENSE), regsbig and video
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
@@ -505,6 +506,57 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
     return out
 
 
+def _stagger_io(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], routing_gutter: int,
+                keep_output_row: bool) -> None:
+    """Move each IO column along Z to just outside its connected gates, in place.
+
+    Pins of one X column share a Z. Nothing may be behind an input or ahead of an output (the builder
+    keeps wires out, see builder._io_envelope_blocked), so a column stops short of any gate in its way.
+    keep_output_row: outputs stay in the front row, because extensions run ahead of them.
+    """
+    n = len(gates)
+    x0 = pos_all[:n, 0]
+    x1 = x0 + np.array([c.footprint.width for c in gates], dtype=float)
+    z0 = pos_all[:n, 2]
+    z1 = z0 + np.array([c.footprint.depth for c in gates], dtype=float)
+
+    pin_z = pos_all[netlist.pin_comp, 2] + netlist.pin_offset[:, 2]
+    net_gate_z: dict[int, list[float]] = defaultdict(list)
+    net_io: dict[int, list[int]] = defaultdict(list)
+    for c, ni, z in zip(netlist.pin_comp.tolist(), netlist.pin_net.tolist(), pin_z.tolist()):
+        (net_gate_z[ni].append(z) if c < n else net_io[ni].append(c))
+    connected: dict[int, list[float]] = defaultdict(list)
+    for ni, ios in net_io.items():
+        for i in ios:
+            connected[i] += net_gate_z[ni]
+
+    inputs: dict[int, list[int]] = defaultdict(list)
+    outputs: dict[int, list[int]] = defaultdict(list)
+    for i in range(n, len(netlist.comps)):
+        col = inputs if netlist.comps[i].type == ComponentType.INPUT_PIN else outputs
+        col[int(pos_all[i, 0])].append(i)
+
+    def in_way(x: int) -> np.ndarray:
+        return (x0 - _IO_COLUMN_CLEAR <= x) & (x <= x1 - 1 + _IO_COLUMN_CLEAR)
+
+    input_z: dict[int, float] = {}
+    for x, ids in inputs.items():
+        blocked = z1[in_way(x)]
+        wanted = [z + 1 for i in ids for z in connected[i]]
+        input_z[x] = max([*blocked, *wanted, 0.0]) + routing_gutter
+        pos_all[ids, 2] = input_z[x]
+    for x, ids in outputs.items():
+        z = -routing_gutter - 1.0
+        if not keep_output_row:
+            blocked = z0[in_way(x)]
+            wanted = [z_ for i in ids for z_ in connected[i]]
+            z = min([*blocked, *wanted], default=0.0) - routing_gutter - 1
+            for dx in (-1, 0, 1):  # neither pin may sit in the other's clear lane
+                if x + dx in input_z:
+                    z = min(z, input_z[x + dx] - routing_gutter - 2)
+        pos_all[ids, 2] = z
+
+
 def _poisson_placement(
         components: list[Component],
         nets: list[NetConnection],
@@ -565,10 +617,13 @@ def _poisson_placement(
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)
     pos_all[len(gates):] = io_rows()
+    _stagger_io(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order))
     print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
 
-    # World frame: margin in X, output row at z=1, gates behind it (as in layout._pack_layout).
-    shift = np.array([io_margin - min(0.0, float(pos_all[:, 0].min())), base_y, routing_gutter + 2])
+    # World frame: margin in X, frontmost output at z=1 (as in layout._pack_layout).
+    front = [p[2] for c, p in zip(netlist.comps, pos_all) if c.type == ComponentType.OUTPUT_PIN]
+    z_shift = 1 - min(front) if front else routing_gutter + 2 - float(pos_all[:, 2].min(initial=0.0))
+    shift = np.array([io_margin - min(0.0, float(pos_all[:, 0].min())), base_y, z_shift])
     placed = []
     for c, p in zip(gates_final + inputs + outputs, pos_all + shift):
         placed.append(_Placed(component=c, origin=(int(p[0]), int(p[1]), int(p[2]))))

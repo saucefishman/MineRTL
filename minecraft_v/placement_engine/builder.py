@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -374,6 +375,7 @@ def _build_footprint_blocked(
         const_positions: set[tuple[int, int, int]],
         io_fixtures: list[tuple[tuple[int, int, int], tuple[int, int], bool]] = (),
         block_output_lamps: bool = True,
+        envelope: set[tuple[int, int, int]] = frozenset(),
 ) -> frozenset[tuple[int, int, int]]:
     """Hard-block zone: footprint interiors + expanded borders + IO repeater tops + const air-gaps
     + the lever/lamp cells (and their neighbours) behind input / in front of output repeaters."""
@@ -401,8 +403,71 @@ def _build_footprint_blocked(
     for rbx, rby, rbz in const_positions:
         for ddx, ddy, ddz in _DIRS_6:
             fp_expanded.add((rbx + ddx, rby + ddy, rbz + ddz))
+    fp_expanded |= envelope
     fp_expanded -= set(pin_terminal.values())
     return frozenset(fp_expanded)
+
+
+_ENVELOPE_GATE_GAP = 6   # room kept past a gate's far face, where its pins may need wire
+_ENVELOPE_THICKNESS = 3  # thicker than any single routing step, so no move hops the barrier
+
+
+def _io_barrier(
+        columns: dict[int, int],
+        gate_far: list[tuple[int, int, int]],
+        width: int,
+) -> list[tuple[int, int]]:
+    """(x, z) cells of a barrier past IO ``columns`` (x -> z of the pin's outer cell), far side = higher z.
+
+    A column and its neighbours end at the pin. Between columns the limit is the farther of the two
+    nearest, so no pocket opens behind a pin, and gates (x0, x1, far z) push it out only where they are.
+    """
+    if not columns:
+        return []
+    xs = sorted(columns)
+    limit = []
+    for x in range(width):
+        lane = [columns[c] for c in (x - 1, x, x + 1) if c in columns]
+        if lane:
+            limit.append(max(lane))
+            continue
+        i = bisect.bisect(xs, x)
+        near = max(columns[c] for c in xs[max(i - 1, 0):i + 1])
+        limit.append(max([near, *(far + _ENVELOPE_GATE_GAP for x0, x1, far in gate_far if x0 <= x <= x1)]))
+    cells = []
+    for x, z in enumerate(limit):
+        top = max(limit[max(x - 1, 0):x + 2]) + _ENVELOPE_THICKNESS
+        cells.extend((x, far) for far in range(z + 1, top + 1))
+    return cells
+
+
+def _io_envelope_blocked(
+        placed: list[_Placed],
+        bounds: tuple[int, int, int, int, int, int],
+        block_outputs: bool,
+) -> set[tuple[int, int, int]]:
+    """Wire keepout: nothing routes behind an input (+Z) or ahead of an output (-Z), at any Y.
+
+    The barrier starts just past each pin's repeater; lever and lamp are placed after routing.
+    """
+    _, _, min_z, max_x, max_y, max_z = bounds
+    inputs: dict[int, int] = {}
+    outputs: dict[int, int] = {}
+    gates = []
+    for item in placed:
+        x, _, z = item.origin
+        if item.component.type == ComponentType.INPUT_PIN:
+            inputs[x] = max(inputs.get(x, z + 1), z + 1)
+        elif item.component.type == ComponentType.OUTPUT_PIN:
+            outputs[x] = min(outputs.get(x, z - 1), z - 1)
+        else:
+            gates.append((x, x + item.component.footprint.width - 1, z, z + item.component.footprint.depth - 1))
+    width = max_x + 1
+    columns = [(x, z) for x, z in _io_barrier(inputs, [(x0, x1, z1) for x0, x1, _, z1 in gates], width)]
+    if block_outputs:  # outputs mirrored: far side = lower z
+        columns += [(x, -z) for x, z in _io_barrier({x: -z for x, z in outputs.items()},
+                                                    [(x0, x1, -z0) for x0, x1, z0, _ in gates], width)]
+    return {(x, y, z) for x, z in columns if min_z <= z <= max_z for y in range(max_y + 1)}
 
 
 def _build_terminal_map(
@@ -1371,6 +1436,7 @@ def build_litematic_from_component_list(
     }
     footprint_blocked = _build_footprint_blocked(
         placed, pin_terminal, io_repeater_cells, const_positions, io_fixtures, block_output_lamps=not output_pin_targets,
+        envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
     )
     all_terminals = _build_terminal_map(work_nets, pin_terminal)
 
