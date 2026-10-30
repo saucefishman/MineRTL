@@ -1279,6 +1279,7 @@ def build_litematic_from_component_list(
         place_z_moves: bool = True,
         place_mirror: bool = True,
         place_seed: int = 0,
+        place_workers: int = 1,
 ) -> Path:
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
@@ -1296,7 +1297,7 @@ def build_litematic_from_component_list(
             placer=placer, base_y=base_y, gutter=gutter,
             io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
             y_moves=place_y_moves, z_moves=place_z_moves, mirror_moves=place_mirror, seed=place_seed,
-            clock_pin=clock_pin,
+            clock_pin=clock_pin, workers=place_workers,
         )
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
