@@ -564,12 +564,13 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
 
 
 def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], routing_gutter: int,
-             keep_output_row: bool) -> None:
+             keep_output_row: bool, flat: bool = False) -> None:
     """Move the input row and the output row along Z to just outside their gates, in place.
 
     Nothing may be behind an input or ahead of an output (the builder keeps wires out, see
     builder._io_envelope_blocked), so a row stops short of any gate in one of its columns.
     keep_output_row: outputs stay in the front row, because extensions run ahead of them.
+    flat: a row clears every gate, since it's all one plane and the clock region runs behind the inputs.
     """
     n = len(gates)
     x0 = pos_all[:n, 0]
@@ -588,7 +589,7 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
             connected[i] += net_gate_z[ni]
 
     def in_way(x: float) -> np.ndarray:
-        return (x0 - _IO_COLUMN_CLEAR <= x) & (x <= x1 - 1 + _IO_COLUMN_CLEAR)
+        return flat | ((x0 - _IO_COLUMN_CLEAR <= x) & (x <= x1 - 1 + _IO_COLUMN_CLEAR))
 
     is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps[n:]]
     inputs = [i + n for i, flag in enumerate(is_input) if flag]
@@ -665,7 +666,7 @@ def _poisson_placement(
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)
     pos_all[len(gates):] = io_rows()
-    _io_rows(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order))
+    _io_rows(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order), flat)
     print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
 
     # World frame: margin in X, frontmost output at z=1 (as in layout._pack_layout).
