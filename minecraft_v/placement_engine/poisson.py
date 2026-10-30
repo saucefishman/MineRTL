@@ -7,8 +7,9 @@ energy with Nesterov's method; the potential comes from Poisson's equation with 
 boundaries, solved exactly on a uniform bin grid by a 3D DCT. An order-preserving 3D legalizer then
 removes what overlap is left, and a compaction + reposition pass tightens the result.
 
-IO keeps Y by bit index and shared columns per multibit group, but each column has its own depth:
-inputs sit just behind and outputs just ahead of their gates (_stagger_io).
+IO is free too, within three rules: all bits of a signal share an X, all inputs share a Z and all
+outputs share a Z. Each signal's X and each pin's Y follow its gates (_IoPlacer), and the two rows sit
+just outside the gates (_io_rows).
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from scipy import fft, sparse
 from scipy.sparse.linalg import cg
 
 from minecraft_v.placement_engine.ir import Component, ComponentType, NetConnection
-from minecraft_v.placement_engine.layout import _Placed, _assign_io_x_positions, _io_y_index, _majority_y
+from minecraft_v.placement_engine.layout import _BIT_INDEX_RE, _Placed, _assign_io_x_positions, _io_base_name
 from minecraft_v.placement_engine.template import _mirror_component_x
 
 _WEIGHTS = np.array([1.0, 2.0, 1.0])  # wirelength per block in X, Y, Z: Y needs slopes and towers
@@ -159,39 +160,95 @@ class _Field:
         return force, overflow
 
 
+def _bit_index(comp_id: str) -> int:
+    m = _BIT_INDEX_RE.search(comp_id)
+    return int(m.group(1)) if m else 0
+
+
+def _spread(targets: list[float], gap: int) -> list[int]:
+    """Integers at least ``gap`` apart, in the given order, as close to ``targets`` as possible.
+
+    Least squares: pool adjacent violators on the targets with the gaps taken out.
+    """
+    blocks: list[list[float]] = []  # [mean, count]
+    for i, t in enumerate(targets):
+        blocks.append([t - i * gap, 1])
+        while len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
+            mean, count = blocks.pop()
+            blocks[-1][0] = (blocks[-1][0] * blocks[-1][1] + mean * count) / (blocks[-1][1] + count)
+            blocks[-1][1] += count
+    out: list[int] = []
+    for mean, count in blocks:
+        out += [int(round(mean)) + (len(out) + k) * gap for k in range(int(count))]
+    return out
+
+
 class _IoPlacer:
-    """IO positions in domain coordinates: rows just outside the Z range, X by connected gates."""
+    """IO positions in domain coordinates, free but for the alignment rules.
+
+    All bits of a signal share an X, signals keep at least a gutter between columns, and pins in a
+    column keep ``y_gap`` in Y; each signal's X and each pin's Y follow the gate pins on its nets.
+    Rows sit just outside the Z range here; _io_rows picks their final depth after placement.
+    """
 
     def __init__(self, inputs: list[Component], outputs: list[Component], nets: list[NetConnection],
-                 y_level: dict[str, int], clock_pin: str | None, gutter: int, routing_gutter: int, flat: bool,
+                 gutter: int, routing_gutter: int, y_gap: int, flat: bool,
                  output_x_order: dict[str, float] | None):
         self.inputs, self.outputs, self.nets = inputs, outputs, nets
-        self.y_level, self.clock_pin = y_level, clock_pin
-        self.gutter, self.routing_gutter = gutter, routing_gutter
-        self.flat, self.output_x_order = flat, output_x_order
-        self.neighbours: dict[str, list[str]] = defaultdict(list)
+        self.gutter, self.routing_gutter, self.y_gap = gutter, routing_gutter, y_gap
+        self.flat, self.output_x_order = flat, output_x_order or {}
+        self.neighbours: dict[str, list[tuple[str, str]]] = defaultdict(list)
         io_ids = {c.id for c in inputs + outputs}
         for net in nets:
-            ends = [net.source.component_id, *(s.component_id for s in net.sinks)]
-            for e in ends:
-                if e in io_ids:
-                    self.neighbours[e].extend(o for o in ends if o != e and o not in io_ids)
+            ends = [(e.component_id, e.pin_name) for e in (net.source, *net.sinks)]
+            for cid, _ in ends:
+                if cid in io_ids:
+                    self.neighbours[cid].extend(e for e in ends if e[0] not in io_ids)
+
+    def _side(self, comps: list[Component], pins: dict[tuple[str, str], tuple[float, float]],
+              centre: float, x_order: dict[str, float]) -> dict[str, tuple[int, int]]:
+        def wanted(cid: str, axis: int) -> float | None:
+            vals = [pins[e][axis] for e in self.neighbours[cid] if e in pins]
+            return float(np.median(vals)) if vals else None
+
+        groups: dict[str, list[str]] = defaultdict(list)
+        for c in comps:
+            groups[_io_base_name(c.id)].append(c.id)
+        keyed = []
+        for base, ids in groups.items():
+            xs = [v for v in (wanted(i, 0) for i in ids) if v is not None]
+            target = float(np.median(xs)) if xs else centre
+            fixed = [x_order[i] for i in ids if i in x_order]
+            keyed.append((float(np.median(fixed)) if fixed else target, base, target))
+        keyed.sort()
+        columns = _spread([k[2] for k in keyed], self.gutter + 1)
+
+        out = {}
+        for (_, base, _), x in zip(keyed, columns):
+            ys = {i: wanted(i, 1) or 0.0 for i in groups[base]}
+            # Extension targets rise with bit index, so reversed bits would make extensions cross.
+            order = sorted(ys, key=lambda i: (_bit_index(i), i) if i in x_order else (ys[i], i))
+            spread = _spread([ys[i] for i in order], self.y_gap)
+            lift = max(0, -spread[0])
+            out.update({i: (x, y + lift) for i, y in zip(order, spread)})
+        return out
 
     def place(self, gates: list[Component], pos: np.ndarray, width: float, z_max: float
               ) -> dict[str, tuple[int, int, int]]:
-        placed = [_Placed(component=c, origin=(int(p[0]), int(p[1]), int(p[2]))) for c, p in zip(gates, pos)]
-        y_of = {c.id: int(p[1]) for c, p in zip(gates, pos)}
-        xs = _assign_io_x_positions(self.inputs, placed, self.nets, 0, self.gutter, int(width), self.flat)
-        xs.update(_assign_io_x_positions(self.outputs, placed, self.nets, 0, self.gutter, int(width), self.flat,
-                                         x_order=self.output_x_order))
+        output_z, input_z = -self.routing_gutter - 1, int(z_max) + self.routing_gutter
+        if self.flat:  # one Y level, so every pin needs its own column
+            placed = [_Placed(component=c, origin=(int(p[0]), int(p[1]), int(p[2]))) for c, p in zip(gates, pos)]
+            xs = _assign_io_x_positions(self.inputs, placed, self.nets, 0, self.gutter, int(width), True)
+            xs.update(_assign_io_x_positions(self.outputs, placed, self.nets, 0, self.gutter, int(width), True,
+                                             x_order=self.output_x_order))
+            return {**{c.id: (xs[c.id], 0, input_z) for c in self.inputs},
+                    **{c.id: (xs[c.id], 0, output_z) for c in self.outputs}}
+        pins = {(c.id, pin.name): (p[0] + pin.offset[0], p[1] + pin.offset[1])
+                for c, p in zip(gates, pos) for pin in c.pins}
+        centre = width / 2
         out = {}
-        for c, z in [(c, -self.routing_gutter - 1) for c in self.outputs] + \
-                    [(c, int(z_max) + self.routing_gutter) for c in self.inputs]:
-            y = self.y_level.get(c.id, 0)
-            if _io_y_index(c, self.clock_pin) is None and not self.flat:
-                ys = [y_of[o] for o in self.neighbours[c.id] if o in y_of]
-                y = _majority_y(ys) if ys else y
-            out[c.id] = (xs[c.id], y, z)
+        for comps, z, order in ((self.inputs, input_z, {}), (self.outputs, output_z, self.output_x_order)):
+            out.update({i: (x, y, z) for i, (x, y) in self._side(comps, pins, centre, order).items()})
         return out
 
 
@@ -507,12 +564,12 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
     return out
 
 
-def _stagger_io(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], routing_gutter: int,
-                keep_output_row: bool) -> None:
-    """Move each IO column along Z to just outside its connected gates, in place.
+def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], routing_gutter: int,
+             keep_output_row: bool) -> None:
+    """Move the input row and the output row along Z to just outside their gates, in place.
 
-    Pins of one X column share a Z. Nothing may be behind an input or ahead of an output (the builder
-    keeps wires out, see builder._io_envelope_blocked), so a column stops short of any gate in its way.
+    Nothing may be behind an input or ahead of an output (the builder keeps wires out, see
+    builder._io_envelope_blocked), so a row stops short of any gate in one of its columns.
     keep_output_row: outputs stay in the front row, because extensions run ahead of them.
     """
     n = len(gates)
@@ -531,37 +588,30 @@ def _stagger_io(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], 
         for i in ios:
             connected[i] += net_gate_z[ni]
 
-    inputs: dict[int, list[int]] = defaultdict(list)
-    outputs: dict[int, list[int]] = defaultdict(list)
-    for i in range(n, len(netlist.comps)):
-        col = inputs if netlist.comps[i].type == ComponentType.INPUT_PIN else outputs
-        col[int(pos_all[i, 0])].append(i)
-
-    def in_way(x: int) -> np.ndarray:
+    def in_way(x: float) -> np.ndarray:
         return (x0 - _IO_COLUMN_CLEAR <= x) & (x <= x1 - 1 + _IO_COLUMN_CLEAR)
 
-    input_z: dict[int, float] = {}
-    for x, ids in inputs.items():
-        blocked = z1[in_way(x)]
-        wanted = [z + 1 for i in ids for z in connected[i]]
-        input_z[x] = max([*blocked, *wanted, 0.0]) + routing_gutter
-        pos_all[ids, 2] = input_z[x]
-    for x, ids in outputs.items():
-        z = -routing_gutter - 1.0
-        if not keep_output_row:
-            blocked = z0[in_way(x)]
-            wanted = [z_ for i in ids for z_ in connected[i]]
-            z = min([*blocked, *wanted], default=0.0) - routing_gutter - 1
-            for dx in (-1, 0, 1):  # neither pin may sit in the other's clear lane
-                if x + dx in input_z:
-                    z = min(z, input_z[x + dx] - routing_gutter - 2)
-        pos_all[ids, 2] = z
+    is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps[n:]]
+    inputs = [i + n for i, flag in enumerate(is_input) if flag]
+    outputs = [i + n for i, flag in enumerate(is_input) if not flag]
+
+    limits = [0.0]
+    for i in inputs:
+        limits += [*z1[in_way(pos_all[i, 0])], *(z + 1 for z in connected[i])]
+    input_z = max(limits) + routing_gutter
+    pos_all[inputs, 2] = input_z
+    output_z = -routing_gutter - 1.0
+    if not keep_output_row:
+        limits = [input_z - 1]  # outputs stay in front of the input row
+        for i in outputs:
+            limits += [*z0[in_way(pos_all[i, 0])], *connected[i]]
+        output_z = min(limits) - routing_gutter - 1
+    pos_all[outputs, 2] = output_z
 
 
 def _poisson_placement(
         components: list[Component],
         nets: list[NetConnection],
-        y_level: dict[str, int],
         *,
         base_y: int,
         gutter: int | None,
@@ -569,7 +619,6 @@ def _poisson_placement(
         routing_gutter: int | None,
         y_spacing: int,
         seed: int = 0,
-        clock_pin: str | None = None,
         flat: bool = False,
         output_x_order: dict[str, float] | None = None,
 ) -> list[_Placed]:
@@ -583,14 +632,13 @@ def _poisson_placement(
     routing_gutter = loose[1] if routing_gutter is None else routing_gutter
 
     netlist = _Netlist(gates, inputs + outputs, nets)
-    io = _IoPlacer(inputs, outputs, nets, y_level, clock_pin, gutter, routing_gutter, flat, output_x_order)
+    io = _IoPlacer(inputs, outputs, nets, gutter, routing_gutter, 1 + y_spacing, flat, output_x_order)
     if gates:
         sizes = np.array([[c.footprint.width + gutter,
                            1 if flat else c.footprint.height + y_spacing,
                            c.footprint.depth + routing_gutter] for c in gates], dtype=float)
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
-        io_top = max((y_level.get(c.id, 0) + 1 for c in inputs + outputs), default=1)
-        height = 1.0 if flat else float(max(io_top, sizes[:, 1].max(), volume ** (1 / 3)))
+        height = 1.0 if flat else float(max(sizes[:, 1].max(), volume ** (1 / 3)))
         side = max(math.sqrt(volume / height), float(sizes[:, [0, 2]].max()))
         dims = np.array([side, height, side])
 
@@ -618,7 +666,7 @@ def _poisson_placement(
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)
     pos_all[len(gates):] = io_rows()
-    _stagger_io(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order))
+    _io_rows(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order))
     print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
 
     # World frame: margin in X, frontmost output at z=1 (as in layout._pack_layout).
