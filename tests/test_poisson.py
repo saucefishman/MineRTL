@@ -4,15 +4,16 @@ from scipy import fft
 import minecraft_v.placement_engine.poisson as poisson
 from minecraft_v.placement_engine.builder import _io_barrier
 from minecraft_v.placement_engine.ir import ComponentType
+from minecraft_v.placement_engine.layout import _io_base_name
 from tests.test_anneal import _KW, _setup
 
 _IO = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
 
 
 def _place(seed=0, **kw):
-    comp, y_level, _ = _setup()
+    comp, _, _ = _setup()
     args = dict(_KW, y_spacing=3, seed=seed, **kw)
-    return comp, poisson._poisson_placement(comp.components, comp.nets, y_level, **args)
+    return comp, poisson._poisson_placement(comp.components, comp.nets, **args)
 
 
 def test_every_component_placed_once():
@@ -50,10 +51,33 @@ def test_no_gate_behind_input_or_ahead_of_output():
                     assert z < g.origin[2], (pin.component.id, g.component.id)
 
 
+def test_io_alignment_rules():
+    _, placed = _place()
+    pins = [p for p in placed if p.component.type in _IO]
+    for kind in _IO:
+        assert len({p.origin[2] for p in pins if p.component.type == kind}) == 1
+    columns = {}
+    for p in pins:
+        columns.setdefault((p.component.type, _io_base_name(p.component.id)), []).append(p.origin)
+    for origins in columns.values():
+        assert len({o[0] for o in origins}) == 1
+        ys = sorted(o[1] for o in origins)
+        assert all(b - a >= 4 for a, b in zip(ys, ys[1:]))
+    for kind in _IO:
+        xs = sorted({o[0][0] for (k, _), o in columns.items() if k == kind})
+        assert all(b - a >= _KW["gutter"] + 1 for a, b in zip(xs, xs[1:]))
+
+
+def test_spread_keeps_order_and_gap():
+    assert poisson._spread([10.0, 10.0, 10.0], 4) == [6, 10, 14]
+    assert poisson._spread([0.0, 50.0], 4) == [0, 50]
+    assert poisson._spread([], 4) == []
+
+
 def test_outputs_stay_in_row_with_extension_targets():
-    comp, y_level, _ = _setup()
+    comp, _, _ = _setup()
     order = {c.id: float(i) for i, c in enumerate(comp.components) if c.type == ComponentType.OUTPUT_PIN}
-    placed = poisson._poisson_placement(comp.components, comp.nets, y_level, **dict(_KW, y_spacing=3),
+    placed = poisson._poisson_placement(comp.components, comp.nets, **dict(_KW, y_spacing=3),
                                         output_x_order=order)
     assert len({p.origin[2] for p in placed if p.component.type == ComponentType.OUTPUT_PIN}) == 1
 
@@ -74,9 +98,8 @@ def test_deterministic():
 
 
 def test_flat_uses_one_level():
-    comp, y_level, _ = _setup()
-    y_level = {k: 0 for k in y_level}
-    placed = poisson._poisson_placement(comp.components, comp.nets, y_level, **dict(_KW, y_spacing=3), flat=True)
+    comp, _, _ = _setup()
+    placed = poisson._poisson_placement(comp.components, comp.nets, **dict(_KW, y_spacing=3), flat=True)
     assert len({p.origin[1] for p in placed}) == 1
 
 
