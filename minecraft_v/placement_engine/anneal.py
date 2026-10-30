@@ -18,6 +18,7 @@ in a strictly later layer than its driver), and X-mirroring a gate
 from __future__ import annotations
 
 import math
+import multiprocessing
 import random
 import time
 from collections import defaultdict
@@ -528,8 +529,50 @@ def _initial_temperature(uphill: list[float]) -> float:
     return hi
 
 
+class _ChainCtx:
+    """What forked chain workers inherit: set before the pool forks, read-only afterwards."""
+    state: _PlaceState
+    kinds: list[str]
+    weights: list[float]
+
+
+def _run_chain(state: _PlaceState, rng: random.Random, kinds: list[str], weights: list[float],
+               temp: float, rlim: float, moves: int, deadline: float | None,
+               best_cost: float, best: tuple) -> tuple[int, int, float, tuple]:
+    """One temperature of Metropolis moves; returns (tried, accepted, best_cost, best)."""
+    tried = accepted = 0
+    for i in range(moves):
+        if deadline is not None and i % 256 == 255 and time.monotonic() >= deadline:
+            break
+        mv = state.propose(rng, kinds, weights, max(1, int(rlim)))
+        if mv is None:
+            continue
+        tried += 1
+        delta = state.apply(*mv)
+        if delta <= 0 or rng.random() < math.exp(-delta / temp):
+            accepted += 1
+            state.commit()
+            if state.cost < best_cost - 1e-9:
+                best_cost, best = state.cost, state.snapshot()
+        else:
+            state.undo()
+    return tried, accepted, best_cost, best
+
+
+def _chain_task(job: tuple) -> tuple[tuple, float, int, int]:
+    """Worker: run one chain from ``snap``; returns (final snapshot, true cost, tried, accepted)."""
+    snap, temp, rlim, moves, seed = job
+    ctx = _ChainCtx
+    ctx.state.restore(snap)
+    tried, accepted, _, _ = _run_chain(
+        ctx.state, random.Random(seed), ctx.kinds, ctx.weights, temp, rlim, moves, None,
+        math.inf, snap)
+    ctx.state.full_recompute(refresh_io=True)
+    return ctx.state.snapshot(), ctx.state.cost, tried, accepted
+
+
 def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: bool,
-            mirror_moves: bool = True) -> None:
+            mirror_moves: bool = True, workers: int = 1) -> None:
     n = len(state.gates)
     if n < 2:
         return
@@ -562,26 +605,28 @@ def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: b
     moves_per_temp = min(_PLACE_MAX_TEMP_MOVES, max(n, int(_PLACE_INNER_NUM * n ** (4 / 3))))
     num_nets = max(1, len(state.nets))
     timed_out = False
+    pool = None
+    if workers > 1:
+        # Parallel chains: every worker anneals a share of the temperature's moves from the same
+        # state, the cheapest end state wins. Forked workers inherit the state copy-on-write.
+        _ChainCtx.state, _ChainCtx.kinds, _ChainCtx.weights = state, kinds, weights
+        pool = multiprocessing.get_context("fork").Pool(workers)
+    chain_moves = max(1, -(-moves_per_temp // workers))
     for _ in range(_PLACE_MAX_TEMPS):
         if time.monotonic() >= deadline:
             timed_out = True
             break
-        tried = accepted = 0
-        for i in range(moves_per_temp):
-            if i % 256 == 255 and time.monotonic() >= deadline:
-                break
-            mv = state.propose(rng, kinds, weights, max(1, int(rlim)))
-            if mv is None:
-                continue
-            tried += 1
-            delta = state.apply(*mv)
-            if delta <= 0 or rng.random() < math.exp(-delta / temp):
-                accepted += 1
-                state.commit()
-                if state.cost < best_cost - 1e-9:
-                    best_cost, best = state.cost, state.snapshot()
-            else:
-                state.undo()
+        if pool is None:
+            tried, accepted, best_cost, best = _run_chain(
+                state, rng, kinds, weights, temp, rlim, moves_per_temp, deadline, best_cost, best)
+        else:
+            snap = state.snapshot()
+            jobs = [(snap, temp, rlim, chain_moves, rng.getrandbits(62)) for _ in range(workers)]
+            results = pool.map(_chain_task, jobs)
+            tried = sum(r[2] for r in results)
+            accepted = sum(r[3] for r in results)
+            winner = min(range(workers), key=lambda k: (results[k][1], k))
+            state.restore(results[winner][0])
         alpha = accepted / tried if tried else 0.0
         if alpha > 0.96:
             temp *= 0.5
@@ -598,6 +643,8 @@ def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: b
             best_cost, best = state.cost, state.snapshot()
         if temp < 0.005 * state.cost / num_nets:
             break
+    if pool is not None:
+        pool.terminate()
     if timed_out:
         print(f"[place] annealing hit the {budget:.0f}s safety budget")
 
@@ -621,6 +668,7 @@ def _optimize_placement(
         mirror_moves: bool = True,
         seed: int = 0,
         clock_pin: str | None = None,
+        workers: int = 1,
 ) -> list[_Placed]:
     """Place gates with barycenter ordering (``placer='bary'``) or barycenter + annealing (``'sa'``)."""
     gates = [c for c in components if c.type not in _IO_TYPES]
@@ -640,7 +688,8 @@ def _optimize_placement(
             _greedy_mirror(state)
         bary_cost = state.cost
         if placer == "sa":
-            _anneal(state, random.Random(seed), y_moves=y_moves, z_moves=z_moves, mirror_moves=mirror_moves)
+            _anneal(state, random.Random(seed), y_moves=y_moves, z_moves=z_moves, mirror_moves=mirror_moves,
+                    workers=workers)
         print(f"[place] {placer}: cost legacy={seed_cost:.0f} bary={bary_cost:.0f} "
               f"final={state.cost:.0f} ({time.monotonic() - t0:.2f}s)")
 

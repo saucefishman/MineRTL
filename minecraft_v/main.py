@@ -146,6 +146,9 @@ def main():
     parser.add_argument("--place-mirror", action=argparse.BooleanOptionalAction, default=True,
                         help="Let --placer bary|sa mirror gates in X (default: on)")
     parser.add_argument("--place-seed", type=int, default=0, help="RNG seed for --placer sa (default 0)")
+    parser.add_argument("--place-workers", type=int, default=1,
+                        help="forked chains per annealing temperature for --placer sa (default 1; "
+                             "result depends on the count)")
     args = parser.parse_args()
 
     out_litematic = Path(args.out_litematic)
@@ -193,7 +196,8 @@ def main():
                                         place_y_moves=args.place_y_moves,
                                         place_z_moves=args.place_z_moves,
                                         place_mirror=args.place_mirror,
-                                        place_seed=args.place_seed)
+                                        place_seed=args.place_seed,
+                                        place_workers=args.place_workers)
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 

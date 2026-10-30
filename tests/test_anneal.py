@@ -291,3 +291,18 @@ def test_anneal_cost_is_true_cost(seed):
     final = st.cost
     assert final <= seed_cost + 1e-9
     assert final == pytest.approx(st.full_recompute(refresh_io=True))
+
+
+def test_parallel_anneal_cost_is_true_cost_and_deterministic():
+    """Forked chains: final cost is the recomputed cost, no worse than the seed, repeatable."""
+    comp, y_level, _ = _setup()
+    finals = []
+    for _ in range(2):
+        st = _state(comp, y_level)
+        anneal._barycenter(st)
+        seed_cost = st.cost
+        anneal._anneal(st, random.Random(0), y_moves=True, z_moves=True, workers=2)
+        assert st.cost <= seed_cost + 1e-9
+        assert st.cost == pytest.approx(st.full_recompute(refresh_io=True))
+        finals.append(st.snapshot())
+    assert finals[0] == finals[1]
