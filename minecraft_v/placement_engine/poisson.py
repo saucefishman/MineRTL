@@ -46,6 +46,7 @@ _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENS
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+_LANE_PITCH = 2              # Y between macro entry pins: dust, then the floor of the next lane
 
 
 class _Netlist:
@@ -212,6 +213,13 @@ class _IoPlacer:
             vals = [pins[e][axis] for e in self.neighbours[cid] if e in pins]
             return float(np.median(vals)) if vals else None
 
+        if self.column_pins is not None and comps is self.inputs:
+            # Macro entry pins: every one gets its own Y, so straight lanes can run along the face (macro.build_array).
+            n_columns = max(2, math.ceil(len(comps) / self.column_pins))
+            xs = _spread([centre] * n_columns, self.gutter + 1)
+            lift = max(0, -xs[0])
+            by_y = sorted((c.id for c in comps), key=lambda i: (wanted(i, 1) or 0.0, i))
+            return {i: (xs[k % n_columns] + lift, _LANE_PITCH * k) for k, i in enumerate(by_y)}
         groups: dict[str, list[str]] = defaultdict(list)
         if self.column_pins is None:
             for c in comps:
@@ -680,6 +688,8 @@ def _poisson_placement(
     # World frame: margin in X, frontmost output at z=1 (as in layout._pack_layout).
     front = [p[2] for c, p in zip(netlist.comps, pos_all) if c.type == ComponentType.OUTPUT_PIN]
     z_shift = 1 - min(front) if front else routing_gutter + 2 - float(pos_all[:, 2].min(initial=0.0))
+    if len(gates_final):  # a gate outside every output column can sit ahead of the output row
+        z_shift = max(z_shift, routing_gutter + 2 - float(pos_all[:len(gates_final), 2].min()))
     shift = np.array([io_margin - min(0.0, float(pos_all[:, 0].min())), base_y, z_shift])
     placed = []
     for c, p in zip(gates_final + inputs + outputs, pos_all + shift):

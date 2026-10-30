@@ -49,6 +49,7 @@ from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
 BARREL = BlockState("minecraft:barrel")
+_MACRO_HEADROOM = 16  # layers kept above the tallest macro
 _MACRO_SEEDS = 4  # placement seeds to try before giving up on a macro
 
 
@@ -1520,6 +1521,9 @@ def build_litematic_from_component_list(
         io_columns: int | None = None,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""
+    if macros:  # an array is a wall across the layout: wires get past it overhead
+        routing_headroom = max(routing_headroom, _MACRO_HEADROOM)
+        bridge_height = max(bridge_height, _MACRO_HEADROOM - 4)
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
     y_stride = max_comp_height + additional_component_height_spacing
