@@ -414,7 +414,12 @@ def _place_repeaters_for_net(
                     (dy == 4 and dxz in _TOWER_2BLOCK)
                     or (dy == -4 and dxz == (0, 0))
                 )
-                if is_special_reset or _is_repeater(cell_block) or _is_torch(cell_block):
+                if _is_repeater(cell_block):
+                    # Same reset as placing it below (and as the search's slot reset): a
+                    # repeater laid by an earlier walk must not cost the stretch after it a cell.
+                    reset_depth = depth
+                    reset_idx = pos_idx
+                elif is_special_reset or _is_torch(cell_block):
                     reset_depth = depth - 1
                     reset_idx = pos_idx
 
