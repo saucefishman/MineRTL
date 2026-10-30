@@ -153,13 +153,13 @@ def main():
                         help="forked chains per annealing temperature for --placer sa (default "
                              "min(4, cpus); the result depends on the count, 1 = serial)")
     parser.add_argument("--gutter", type=int, default=None,
-                        help="X gap between neighbouring gates in a row (default 10)")
+                        help="X gap between neighbouring gates in a row (default: auto from routing demand, 6-8)")
     parser.add_argument("--io-margin", type=int, default=None,
                         help="margin around the layout / IO rows (default 7)")
     parser.add_argument("--routing-gutter", type=int, default=None,
-                        help="Z gap between layer rows, the routing channel depth (default 6)")
+                        help="Z gap between layer rows, the routing channel depth (default: auto, 6-8)")
     parser.add_argument("--y-spacing", type=int, default=None,
-                        help="extra Y between levels beyond the tallest component (default 4)")
+                        help="extra Y between levels beyond the tallest component (default 3)")
     parser.add_argument("--no-pin-extensions", action="store_true",
                         help="ignore --output-pin-targets-json (no output pin extensions)")
     args = parser.parse_args()

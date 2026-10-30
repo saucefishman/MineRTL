@@ -1258,13 +1258,13 @@ def build_litematic_from_component_list(
         schematics_dir: Path,
         out_path: Path,
         *,
-        gutter: int = 10,
+        gutter: int | None = None,
         workspace_size: tuple[int, int, int] | None = None,
         base_y: int = 5,
         schematic_name: str = "build",
         component_width_spacing: int = 7,
-        component_depth_spacing: int = 6,
-        additional_component_height_spacing: int = 4,
+        component_depth_spacing: int | None = None,
+        additional_component_height_spacing: int = 3,
         routing_headroom: int = 5,
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
@@ -1296,8 +1296,9 @@ def build_litematic_from_component_list(
     if placer == "legacy":
         placed = _layout_components(
             comp.components, comp.nets,
-            gutter=gutter, base_y=base_y, y_level=y_level,
-            io_margin=component_width_spacing, routing_gutter=component_depth_spacing, flat=flat,
+            gutter=10 if gutter is None else gutter, base_y=base_y, y_level=y_level,
+            io_margin=component_width_spacing,
+            routing_gutter=6 if component_depth_spacing is None else component_depth_spacing, flat=flat,
             output_x_order=output_x_order,
         )
     else:
