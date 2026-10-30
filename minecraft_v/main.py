@@ -137,7 +137,7 @@ def main():
                              "use with --allow-routing-failures True)")
     parser.add_argument("--snapshots", action="store_true",
                         help="Save debug litematic snapshots during routing to <artifacts>/snapshots (slow)")
-    parser.add_argument("--placer", choices=("legacy", "bary", "sa", "poisson"), default="sa",
+    parser.add_argument("--placer", choices=("legacy", "bary", "sa", "poisson"), default="poisson",
                         help="Gate placement: legacy list order, barycenter row ordering, barycenter + "
                              "simulated annealing, or electrostatic 3D placement without rows")
     parser.add_argument("--place-y-moves", action=argparse.BooleanOptionalAction, default=True,
