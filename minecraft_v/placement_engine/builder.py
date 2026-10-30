@@ -1323,6 +1323,7 @@ def build_litematic_from_component_list(
         )
     else:
         width, height, depth = workspace_size
+    print(f"[layout] workspace {width}x{height}x{depth}")
 
     output_layer_z = 0
     workspace_depth = depth

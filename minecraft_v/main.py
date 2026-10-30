@@ -152,6 +152,16 @@ def main():
     parser.add_argument("--place-workers", type=int, default=min(4, os.cpu_count() or 1),
                         help="forked chains per annealing temperature for --placer sa (default "
                              "min(4, cpus); the result depends on the count, 1 = serial)")
+    parser.add_argument("--gutter", type=int, default=None,
+                        help="X gap between neighbouring gates in a row (default 10)")
+    parser.add_argument("--io-margin", type=int, default=None,
+                        help="margin around the layout / IO rows (default 7)")
+    parser.add_argument("--routing-gutter", type=int, default=None,
+                        help="Z gap between layer rows, the routing channel depth (default 6)")
+    parser.add_argument("--y-spacing", type=int, default=None,
+                        help="extra Y between levels beyond the tallest component (default 4)")
+    parser.add_argument("--no-pin-extensions", action="store_true",
+                        help="ignore --output-pin-targets-json (no output pin extensions)")
     args = parser.parse_args()
 
     out_litematic = Path(args.out_litematic)
@@ -177,7 +187,7 @@ def main():
     allow_routing_failures = args.allow_routing_failures
     output_pin_targets = (
         _load_output_pin_targets(args.output_pin_targets_json)
-        if args.output_pin_targets_json
+        if args.output_pin_targets_json and not args.no_pin_extensions
         else None
     )
     generate_clock_pin = args.generate_clock
@@ -201,7 +211,13 @@ def main():
                                         place_mirror=args.place_mirror,
                                         place_seed=args.place_seed,
                                         place_workers=args.place_workers,
-                                        flat=args.flat)
+                                        flat=args.flat,
+                                        **{k: v for k, v in (
+                                            ("gutter", args.gutter),
+                                            ("component_width_spacing", args.io_margin),
+                                            ("component_depth_spacing", args.routing_gutter),
+                                            ("additional_component_height_spacing", args.y_spacing),
+                                        ) if v is not None})
 
     print(f"Wrote litematic: {out_litematic.resolve()}")
 
