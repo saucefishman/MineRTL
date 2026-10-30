@@ -1,0 +1,438 @@
+"""Macro flow: find repeated subcircuits, place and route one instance, stamp the rest.
+
+mine_repeated cuts high-fanout nets and groups the remaining connected components by isomorphism
+(cell type, pin role and which nets leave the instance all count). build_macro runs the normal
+placer and router on one instance, with its external nets as IO pins, and keeps the routed blocks as
+a component: an input pin is its entry repeater, an output pin its exit repeater, so the top level
+routes to them like to any gate pin. extract_macros swaps the instances for CUSTOM components.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from itertools import islice
+from pathlib import Path
+
+import networkx as nx
+from litemapy import BlockState, Region, Schematic
+from networkx.algorithms.isomorphism import DiGraphMatcher
+
+from minecraft_v.placement_engine.ir import (
+    CURRENT_SCHEMA_VERSION, CardinalDirection, Component, ComponentList, ComponentType, Direction, Footprint,
+    NetConnection, NetEndpoint, PinRef,
+)
+from .block_utils import _is_air
+from .template import _mirror_block_x
+
+Pos = tuple[int, int, int]
+_IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+_MATCH_TRIES = 200  # isomorphisms of an instance to try against its shared nets
+
+
+@dataclass
+class Macro:
+    name: str
+    footprint: Footprint
+    pins: list[PinRef]
+    blocks: list[tuple[Pos, BlockState]]             # relative to the footprint origin
+    arcs: dict[str, dict[str, int]]                  # input pin -> output pin -> longest comb path, ticks
+    q_out: dict[str, int]                            # output pin -> ticks from an inner register
+    setup: dict[str, int]                            # input pin -> ticks to an inner register
+    terminals: dict[str, Pos] = field(default_factory=dict)  # "cell:pin" -> inner wire end, relative
+    gate_boxes: list[tuple[Pos, Pos]] = field(default_factory=list)  # inner gate footprints (lo, size)
+    owner: dict[Pos, str] = field(default_factory=dict)      # inner routed cell -> inner net
+    nets: dict[str, tuple[str, list[str]]] = field(default_factory=dict)  # inner net -> source, sinks
+    port_net: dict[str, str] = field(default_factory=dict)   # pin -> inner net
+    cells: int = 0
+
+    def blocks_mirrored(self) -> list[tuple[Pos, BlockState]]:
+        w = self.footprint.width
+        return [((w - 1 - x, y, z), _mirror_block_x(b)) for (x, y, z), b in self.blocks]
+
+    def world(self, rel: Pos, origin: Pos, mirrored: bool) -> Pos:
+        x = self.footprint.width - 1 - rel[0] if mirrored else rel[0]
+        return origin[0] + x, origin[1] + rel[1], origin[2] + rel[2]
+
+
+@dataclass
+class Instance:
+    macro: str
+    component_id: str
+    cell_map: dict[str, str]  # macro's cell id -> netlist cell id
+    pin_net: dict[str, str]   # macro pin -> netlist net
+
+
+def _net_index(comp: ComponentList) -> tuple[dict[str, list[tuple[str, str, Direction]]], dict[tuple[str, str], str]]:
+    ends: dict[str, list[tuple[str, str, Direction]]] = {}
+    pin_net: dict[tuple[str, str], str] = {}
+    for net in comp.nets:
+        ends[net.net_id] = [(net.source.component_id, net.source.pin_name, Direction.OUT)] + [
+            (s.component_id, s.pin_name, Direction.IN) for s in net.sinks]
+        for cid, pin, _ in ends[net.net_id]:
+            pin_net[(cid, pin)] = net.net_id
+    return ends, pin_net
+
+
+def _instance_graph(cells: set[str], by_id: dict[str, Component], ends, pin_net) -> nx.DiGraph:
+    """Bipartite cell/net graph. Nets are labelled internal, input or output, so that a match keeps ports."""
+    g = nx.DiGraph()
+    for cid in cells:
+        c = by_id[cid]
+        consts = tuple(sorted((p.name, p.const_value) for p in c.pins if p.const_value is not None))
+        g.add_node(cid, label=(c.type.value, consts))
+        for pin in c.pins:
+            net = pin_net.get((cid, pin.name))
+            if net is None:
+                continue
+            if net not in g:
+                outside = [e for e in ends[net] if e[0] not in cells]
+                drives = ends[net][0][0] in cells
+                g.add_node(net, label="internal" if not outside else "output" if drives else "input")
+            if pin.direction == Direction.OUT:
+                g.add_edge(cid, net, label=pin.name)
+            else:
+                g.add_edge(net, cid, label=pin.name)
+    return g
+
+
+@dataclass
+class RepeatedClass:
+    template: nx.DiGraph
+    core: nx.DiGraph  # template without its shared nets
+    cells: set[str]
+    instances: list[dict[str, str]]  # template node -> instance node, cells and nets
+
+
+def _colors(g: nx.DiGraph, rounds: int = 6) -> dict[str, str]:
+    """Colour refinement over the whole instance, shared nets included; edge labels are pin roles."""
+    colors = {n: str(g.nodes[n]["label"]) for n in g}
+    for _ in range(rounds):
+        colors = {n: hashlib.sha256(repr((
+            colors[n],
+            sorted((g.edges[p, n]["label"], colors[p]) for p in g.predecessors(n)),
+            sorted((g.edges[n, q]["label"], colors[q]) for q in g.successors(n)),
+        )).encode()).hexdigest()[:16] for n in g}
+    return colors
+
+
+def _full_mapping(cls: RepeatedClass, g: nx.DiGraph, mapping: dict[str, str]) -> dict[str, str] | None:
+    """Extend a match of the core to the shared nets; None if pins on one net land on different nets."""
+    full = {n: mapping[n] for n in cls.cells}
+    seen: dict[str, str] = {}
+    for cell in cls.cells:
+        for t_net, i_net in _pin_pairs(cls.template, g, cell, mapping[cell]):
+            if full.setdefault(t_net, i_net) != i_net or seen.setdefault(i_net, t_net) != t_net:
+                return None
+            if cls.template.nodes[t_net]["label"] != g.nodes[i_net]["label"]:
+                return None
+    return full
+
+
+def _pin_pairs(a: nx.DiGraph, b: nx.DiGraph, cell_a: str, cell_b: str) -> list[tuple[str, str]]:
+    """(net in a, net in b) for each pin of a matched cell pair."""
+    def pins(g, cell):
+        return {**{g.edges[n, cell]["label"]: n for n in g.predecessors(cell)},
+                **{g.edges[cell, n]["label"]: n for n in g.successors(cell)}}
+    pa, pb = pins(a, cell_a), pins(b, cell_b)
+    return [(pa[k], pb[k]) for k in pa if k in pb]
+
+
+def mine_repeated(comp: ComponentList, max_fanout: int = 2, min_cells: int = 8) -> list[RepeatedClass]:
+    """Isomorphism classes of the components left once nets above max_fanout are cut, largest coverage first."""
+    by_id = {c.id: c for c in comp.components}
+    ends, pin_net = _net_index(comp)
+    u = nx.Graph()
+    u.add_nodes_from(c.id for c in comp.components if c.type not in _IO_TYPES)
+    for net, endpoints in ends.items():
+        members = [e[0] for e in endpoints if e[0] in u]
+        if len(endpoints) - 1 <= max_fanout:
+            nx.add_path(u, members)
+    classes: dict[str, list[RepeatedClass]] = defaultdict(list)
+    for cells in nx.connected_components(u):
+        if len(cells) < min_cells:
+            continue
+        g = _instance_graph(cells, by_id, ends, pin_net)
+        # Shared nets stay out of the search: their symmetry makes VF2 explode. Their consistency is checked after.
+        core = g.subgraph(n for n in g if n in cells or len(ends[n]) - 1 <= max_fanout).copy()
+        colors = _colors(g)
+        for n in core:
+            core.nodes[n]["color"] = colors[n]
+        h = hashlib.sha256(repr(sorted(colors.values())).encode()).hexdigest()
+        for cls in classes[h]:
+            gm = DiGraphMatcher(cls.core, core, node_match=lambda x, y: x["color"] == y["color"],
+                                edge_match=lambda x, y: x["label"] == y["label"])
+            found = next(filter(None, (_full_mapping(cls, g, m) for m in islice(gm.isomorphisms_iter(), _MATCH_TRIES))),
+                         None)
+            if found is not None:
+                cls.instances.append(found)
+                break
+        else:
+            classes[h].append(RepeatedClass(g, core, set(cells), [{n: n for n in g}]))
+    found = [c for group in classes.values() for c in group if len(c.instances) > 1]
+    return sorted(found, key=lambda c: -len(c.instances) * len(c.cells))
+
+
+def _port_name(i: int) -> str:
+    return f"p{i}"
+
+
+def macro_netlist(cls: RepeatedClass, comp: ComponentList) -> tuple[ComponentList, dict[str, str]]:
+    """The template instance as its own netlist, external nets on IO pins. Also returns inner net -> port."""
+    by_id = {c.id: c for c in comp.components}
+    ends, _ = _net_index(comp)
+    comps = [by_id[cid] for cid in sorted(cls.cells)]
+    nets, ports = [], {}
+    for net in sorted(n for n in cls.template if n not in cls.cells):
+        label = cls.template.nodes[net]["label"]
+        inside = [e for e in ends[net] if e[0] in cls.cells]
+        sinks = [NetEndpoint(component_id=c, pin_name=p) for c, p, d in inside if d == Direction.IN]
+        if label == "internal":
+            source = next((c, p) for c, p, d in inside if d == Direction.OUT)
+        else:
+            port = ports[net] = _port_name(len(ports))
+            if label == "input":
+                comps.append(Component(id=port, type=ComponentType.INPUT_PIN,
+                                       pins=[PinRef(name=port, direction=Direction.OUT)]))
+                source = (port, port)
+            else:
+                comps.append(Component(id=port, type=ComponentType.OUTPUT_PIN,
+                                       pins=[PinRef(name=port, direction=Direction.IN)]))
+                source = next((c, p) for c, p, d in inside if d == Direction.OUT)
+                sinks.append(NetEndpoint(component_id=port, pin_name=port))
+        nets.append(NetConnection(net_id=net, source=NetEndpoint(component_id=source[0], pin_name=source[1]),
+                                  sinks=sinks))
+    return ComponentList(schema_version=CURRENT_SCHEMA_VERSION, components=comps, nets=nets), ports
+
+
+def _digest(sub: ComponentList) -> str:
+    return hashlib.sha256(sub.model_dump_json().encode()).hexdigest()[:16]
+
+
+def macro_timing(sub: ComponentList, net_ticks: dict[str, int], gate_delay: Callable[[Component], int],
+                 sequential: frozenset[ComponentType]) -> tuple[dict, dict, dict]:
+    """Longest paths through the routed macro: (input -> output arcs, register -> output, input -> register).
+
+    Ticks include the entry repeater of an input pin and the exit repeater of an output pin.
+    """
+    by_id = {c.id: c for c in sub.components}
+    fanout: dict[str, list[NetConnection]] = defaultdict(list)
+    for net in sub.nets:
+        fanout[net.source.component_id].append(net)
+
+    memo: dict[str, tuple[dict[str, int], int | None]] = {}
+
+    def ahead(cid: str) -> tuple[dict[str, int], int | None]:
+        """Ticks from the output of cid to each output pin past it, and to the farthest register."""
+        if cid not in memo:
+            ports, reg = {}, None
+            for net in fanout[cid]:
+                wire = net_ticks.get(net.net_id, 0)
+                for sink in net.sinks:
+                    c = by_id[sink.component_id]
+                    if c.type == ComponentType.OUTPUT_PIN:
+                        ports[c.id] = max(ports.get(c.id, 0), wire + 1)
+                    elif c.type in sequential:
+                        reg = wire if reg is None else max(reg, wire)
+                    else:
+                        delay = wire + gate_delay(c)
+                        more, more_reg = ahead(c.id)
+                        for port, t in more.items():
+                            ports[port] = max(ports.get(port, 0), t + delay)
+                        if more_reg is not None:
+                            reg = delay + more_reg if reg is None else max(reg, delay + more_reg)
+            memo[cid] = ports, reg
+        return memo[cid]
+
+    arcs, q_out, setup = {}, {}, {}
+    for c in sub.components:
+        if c.type == ComponentType.INPUT_PIN:
+            ports, reg = ahead(c.id)
+            arcs[c.id] = {port: t + 1 for port, t in ports.items()}
+            if reg is not None:
+                setup[c.id] = reg + 1
+        elif c.type in sequential:
+            for port, t in ahead(c.id)[0].items():
+                q_out[port] = max(q_out.get(port, 0), t + gate_delay(c))
+    return arcs, q_out, setup
+
+
+def macro_from_capture(name: str, sub: ComponentList, capture: dict, ports: dict[str, str], cells: int,
+                       gate_delay, sequential) -> Macro:
+    """Cut the routed inner build down to its non-air box and turn its IO repeaters into pins."""
+    ws: Region = capture["workspace"]
+    placed = {p.component.id: p for p in capture["placed"]}
+    blocks = [(p, ws[p]) for p in ws.block_positions() if not _is_air(ws[p])]
+    lo = tuple(min(p[a] for p, _ in blocks) for a in range(3))
+    hi = tuple(max(p[a] for p, _ in blocks) for a in range(3))
+    fp = Footprint(width=hi[0] - lo[0] + 1, height=hi[1] - lo[1] + 1, depth=hi[2] - lo[2] + 1)
+    rel = lambda p: (p[0] - lo[0], p[1] - lo[1], p[2] - lo[2])  # noqa: E731
+    pins = []
+    for c in sub.components:
+        if c.type not in _IO_TYPES:
+            continue
+        cell = capture["io_cells"][(c.id, c.id)]
+        r = rel(cell)
+        is_input = c.type == ComponentType.INPUT_PIN
+        # Facing away from the box is what lets the top level reach it.
+        if (r[2] != fp.depth - 1) if is_input else (r[2] != 0):
+            raise ValueError(f"pin {c.id} at {r} is not on its face of {fp}")
+        pins.append(PinRef(
+            name=c.id, direction=Direction.IN if is_input else Direction.OUT,
+            side=CardinalDirection.SOUTH if is_input else CardinalDirection.NORTH,
+            offset=(r[0], r[1], fp.depth - 1 - r[2]),
+        ))
+    arcs, q_out, setup = macro_timing(sub, capture["net_ticks"], gate_delay, sequential)
+    nets = {n.net_id: (f"{n.source.component_id}:{n.source.pin_name}",
+                       [f"{s.component_id}:{s.pin_name}" for s in n.sinks]) for n in sub.nets}
+    return Macro(
+        name=name, footprint=fp, pins=pins,
+        blocks=[(rel(p), b) for p, b in blocks],
+        arcs=arcs, q_out=q_out, setup=setup,
+        terminals={f"{cid}:{pin}": rel(t) for (cid, pin), t in capture["pin_terminal"].items()},
+        gate_boxes=[(rel(p.origin), (p.component.footprint.width, p.component.footprint.height,
+                                     p.component.footprint.depth))
+                    for p in placed.values() if p.component.type not in _IO_TYPES],
+        owner={rel(p): n for p, n in capture["dust_owner"].items() if not n.startswith("__schematic__")},
+        nets=nets, port_net={port: net for net, port in ports.items()}, cells=cells,
+    )
+
+
+def save_macro(macro: Macro, directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    fp = macro.footprint
+    region = Region(0, 0, 0, fp.width, fp.height, fp.depth)
+    for p, b in macro.blocks:
+        region[p] = b
+    Schematic(name=macro.name, author="MineRTL", regions={"macro": region}).save(str(directory / f"{macro.name}.litematic"))
+    (directory / f"{macro.name}.json").write_text(json.dumps({
+        "footprint": fp.model_dump(), "pins": [p.model_dump(mode="json") for p in macro.pins],
+        "arcs": macro.arcs, "q_out": macro.q_out, "setup": macro.setup, "terminals": macro.terminals,
+        "gate_boxes": macro.gate_boxes, "owner": [[list(p), n] for p, n in macro.owner.items()],
+        "nets": macro.nets, "port_net": macro.port_net, "cells": macro.cells,
+    }))
+
+
+def load_macro(name: str, directory: Path) -> Macro | None:
+    meta_path, schem_path = directory / f"{name}.json", directory / f"{name}.litematic"
+    if not (meta_path.is_file() and schem_path.is_file()):
+        return None
+    meta = json.loads(meta_path.read_text())
+    region = next(iter(Schematic.load(str(schem_path)).regions.values()))
+    blocks = [(p, region[p]) for p in region.block_positions() if not _is_air(region[p])]
+    return Macro(
+        name=name, footprint=Footprint(**meta["footprint"]), pins=[PinRef(**p) for p in meta["pins"]],
+        blocks=blocks, arcs=meta["arcs"], q_out=meta["q_out"], setup=meta["setup"],
+        terminals={k: tuple(v) for k, v in meta["terminals"].items()},
+        gate_boxes=[(tuple(a), tuple(b)) for a, b in meta["gate_boxes"]],
+        owner={tuple(p): n for p, n in meta["owner"]},
+        nets={k: (s, list(t)) for k, (s, t) in meta["nets"].items()},
+        port_net=meta["port_net"], cells=meta["cells"],
+    )
+
+
+def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
+    """Pins per IO column that keep a macro's pin face about square."""
+    return max(1, math.ceil(math.sqrt(n_pins * column_gap / y_gap)))
+
+
+def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
+                   max_fanout: int = 2, min_cells: int = 8, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
+                   ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
+    """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances)."""
+    macros: dict[str, Macro] = {}
+    instances: list[Instance] = []
+    new_components: list[Component] = []
+    hidden_cells: set[str] = set()
+    ends, _ = _net_index(comp)
+    pin_rows: list[tuple[str, str, str, Direction]] = []
+
+    for cls in mine_repeated(comp, max_fanout, min_cells):
+        sub, ports = macro_netlist(cls, comp)
+        name = f"macro_{_digest(sub)}"
+        macro = macros[name] = build(name, sub, ports, len(cls.cells))
+        if on_class is not None:
+            on_class(cls, macro)
+        for k, mapping in enumerate(cls.instances):
+            cid = f"{name}_{k}"
+            cell_map = {c: mapping[c] for c in cls.cells}
+            pin_net = {port: mapping[net] for net, port in ports.items()}
+            hidden_cells.update(cell_map.values())
+            instances.append(Instance(name, cid, cell_map, pin_net))
+            new_components.append(Component(
+                id=cid, type=ComponentType.CUSTOM, pins=macro.pins, footprint=macro.footprint,
+                metadata={"macro": name},
+            ))
+            for pin in macro.pins:
+                pin_rows.append((pin_net[pin.name], cid, pin.name, pin.direction))
+    if not instances:
+        return comp, {}, []
+
+    rows: dict[str, list[tuple[str, str, Direction]]] = defaultdict(list)
+    for net, cid, pin, direction in pin_rows:
+        rows[net].append((cid, pin, direction))
+    components = [c for c in comp.components if c.id not in hidden_cells] + new_components
+    nets = []
+    for net in comp.nets:
+        kept = [e for e in ends[net.net_id] if e[0] not in hidden_cells] + rows.get(net.net_id, [])
+        sources = [e for e in kept if e[2] == Direction.OUT]
+        sinks = [e for e in kept if e[2] == Direction.IN]
+        if not sources or not sinks:
+            continue
+        nets.append(NetConnection(
+            net_id=net.net_id, source=NetEndpoint(component_id=sources[0][0], pin_name=sources[0][1]),
+            sinks=[NetEndpoint(component_id=c, pin_name=p) for c, p, _ in sinks],
+        ))
+    top = ComponentList(schema_version=CURRENT_SCHEMA_VERSION, components=components, nets=nets)
+    check_equivalent(comp, top, macros, instances)
+    return top, macros, instances
+
+
+def _flat_nets(comp: ComponentList) -> set[tuple[tuple[str, str], frozenset[tuple[str, str]]]]:
+    return {((n.source.component_id, n.source.pin_name),
+             frozenset((s.component_id, s.pin_name) for s in n.sinks)) for n in comp.nets}
+
+
+def check_equivalent(original: ComponentList, top: ComponentList, macros: dict[str, Macro],
+                     instances: list[Instance]) -> None:
+    """Flatten the top netlist through the macros; every net must match the original exactly."""
+    by_id = {i.component_id: i for i in instances}
+
+    def expand(cid: str, pin: str, want_source: bool) -> list[tuple[str, str]]:
+        inst = by_id.get(cid)
+        if inst is None:
+            return [(cid, pin)]
+        macro = macros[inst.macro]
+        source, sinks = macro.nets[macro.port_net[pin]]
+        ends = [source] if want_source else [s for s in sinks if s.rsplit(":", 1)[0] not in macro.port_net]
+        return [(inst.cell_map[e.rsplit(":", 1)[0]], e.rsplit(":", 1)[1]) for e in ends]
+
+    flat: set = set()
+    consumed: set[tuple[str, str]] = set()
+    for net in top.nets:
+        source = expand(net.source.component_id, net.source.pin_name, True)
+        sinks = frozenset(e for s in net.sinks for e in expand(s.component_id, s.pin_name, False))
+        if net.source.component_id in by_id:
+            inst = by_id[net.source.component_id]
+            macro = macros[inst.macro]
+            inner = macro.nets[macro.port_net[net.source.pin_name]]
+            sinks |= {(inst.cell_map[s.rsplit(":", 1)[0]], s.rsplit(":", 1)[1]) for s in inner[1]
+                      if s.rsplit(":", 1)[0] not in macro.port_net}
+        flat.add((source[0], sinks))
+        consumed.add((net.source.component_id, net.source.pin_name))
+    for inst in instances:
+        macro = macros[inst.macro]
+        exposed = set(macro.port_net.values())
+        for net, (source, sinks) in macro.nets.items():
+            if net in exposed:
+                continue
+            flat.add(((inst.cell_map[source.rsplit(":", 1)[0]], source.rsplit(":", 1)[1]),
+                      frozenset((inst.cell_map[s.rsplit(":", 1)[0]], s.rsplit(":", 1)[1]) for s in sinks)))
+    want = _flat_nets(original)
+    if flat != want:
+        missing, extra = want - flat, flat - want
+        raise ValueError(f"macro netlist is not the original: {len(missing)} nets missing, {len(extra)} extra; "
+                         f"e.g. {next(iter(missing or extra))}")

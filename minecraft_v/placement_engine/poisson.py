@@ -193,7 +193,8 @@ class _IoPlacer:
 
     def __init__(self, inputs: list[Component], outputs: list[Component], nets: list[NetConnection],
                  gutter: int, routing_gutter: int, y_gap: int, flat: bool,
-                 output_x_order: dict[str, float] | None):
+                 output_x_order: dict[str, float] | None, column_pins: int | None = None):
+        self.column_pins = column_pins  # share columns between signals, this many pins each (macro faces)
         self.inputs, self.outputs, self.nets = inputs, outputs, nets
         self.gutter, self.routing_gutter, self.y_gap = gutter, routing_gutter, y_gap
         self.flat, self.output_x_order = flat, output_x_order or {}
@@ -212,8 +213,13 @@ class _IoPlacer:
             return float(np.median(vals)) if vals else None
 
         groups: dict[str, list[str]] = defaultdict(list)
-        for c in comps:
-            groups[_io_base_name(c.id)].append(c.id)
+        if self.column_pins is None:
+            for c in comps:
+                groups[_io_base_name(c.id)].append(c.id)
+        else:
+            near = sorted((c.id for c in comps), key=lambda i: (wanted(i, 0) or centre, i))
+            for k, i in enumerate(near):
+                groups[f"column{k // self.column_pins}"].append(i)
         keyed = []
         for base, ids in groups.items():
             xs = [v for v in (wanted(i, 0) for i in ids) if v is not None]
@@ -226,7 +232,8 @@ class _IoPlacer:
         out = {}
         for (_, base, _), x in zip(keyed, columns):
             ys = {i: wanted(i, 1) or 0.0 for i in groups[base]}
-            order = sorted(ys, key=lambda i: (_bit_index(i), i))  # Y rises with bit index
+            order = sorted(ys, key=(lambda i: (_bit_index(i), i)) if self.column_pins is None  # Y rises with bit index
+                           else (lambda i: (ys[i], i)))
             spread = _spread([ys[i] for i in order], self.y_gap)
             lift = max(0, -spread[0])
             out.update({i: (x, y + lift) for i, y in zip(order, spread)})
@@ -621,6 +628,7 @@ def _poisson_placement(
         seed: int = 0,
         flat: bool = False,
         output_x_order: dict[str, float] | None = None,
+        io_column_pins: int | None = None,
 ) -> list[_Placed]:
     """Place gates electrostatically; see the module docstring."""
     t0 = time.monotonic()
@@ -632,7 +640,7 @@ def _poisson_placement(
     routing_gutter = loose[1] if routing_gutter is None else routing_gutter
 
     netlist = _Netlist(gates, inputs + outputs, nets)
-    io = _IoPlacer(inputs, outputs, nets, gutter, routing_gutter, 1 + y_spacing, flat, output_x_order)
+    io = _IoPlacer(inputs, outputs, nets, gutter, routing_gutter, 1 + y_spacing, flat, output_x_order, io_column_pins)
     if gates:
         sizes = np.array([[c.footprint.width + gutter,
                            1 if flat else c.footprint.height + y_spacing,

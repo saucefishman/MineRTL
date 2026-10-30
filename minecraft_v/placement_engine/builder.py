@@ -6,6 +6,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 from math import ceil
+
+import numpy as np
 from pathlib import Path
 
 from litemapy import BlockState, Region, Schematic
@@ -39,6 +41,7 @@ from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
+from .macro import Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
 from .verify import verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
@@ -46,6 +49,7 @@ from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
 BARREL = BlockState("minecraft:barrel")
+_MACRO_SEEDS = 4  # placement seeds to try before giving up on a macro
 
 
 def _pin_for_endpoint(
@@ -65,14 +69,20 @@ def _place_gate_templates(
         solid: set[tuple[int, int, int]],
         schematics_dir: Path,
         dust_owner: dict[tuple[int, int, int], str],
+        macros: dict[str, Macro] | None = None,
 ) -> tuple[int, int, int]:
     """Paste component schematics into workspace. Returns (mc_version, lm_version, lm_subversion)."""
     ref_mc_version = 2975
     ref_lm_version = 6
     ref_lm_sub = 1
+    mirrored_blocks: dict[str, list] = {}
     for item in placed:
         c = item.component
-        if c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM):
+        if c.type == ComponentType.CUSTOM:
+            _stamp_macro(workspace, macros[c.metadata["macro"]], item.origin, solid,
+                         bool(c.metadata.get("mirror_x")), mirrored_blocks)
+            continue
+        if c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN):
             continue
         if c.type not in SCHEMATIC_MAP:
             raise ValueError(f"No schematic template for {c.type}")
@@ -95,6 +105,25 @@ def _place_gate_templates(
     return (ref_mc_version, ref_lm_version, ref_lm_sub)
 
 
+def _stamp_macro(
+        workspace: Region,
+        macro: Macro,
+        origin: tuple[int, int, int],
+        solid: set[tuple[int, int, int]],
+        mirrored: bool,
+        mirrored_blocks: dict[str, list],
+) -> None:
+    """Paste a routed macro. Its footprint is walled off, so `solid` only has to know the hull."""
+    if mirrored:
+        blocks = mirrored_blocks.setdefault(macro.name, []) or macro.blocks_mirrored()
+        mirrored_blocks[macro.name] = blocks
+    else:
+        blocks = macro.blocks
+    ox, oy, oz = origin
+    for (x, y, z), block in blocks:
+        workspace[ox + x, oy + y, oz + z] = block
+
+
 def _place_const_sources(
         workspace: Region,
         placed: list[_Placed],
@@ -104,7 +133,7 @@ def _place_const_sources(
     const_positions: set[tuple[int, int, int]] = set()
     for item in placed:
         c = item.component
-        if c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN):
+        if c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM):
             continue
         for pin in c.pins:
             if pin.const_value not in ('0', '1', 'x', 'z'):
@@ -359,13 +388,40 @@ def _component_interior(placed: list[_Placed]) -> set[tuple[int, int, int]]:
     return {
         (ox + dx, oy + dy, oz + dz)
         for item in placed
-        if item.component.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+        if item.component.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM)
         for ox, oy, oz in [item.origin]
         for fp in [item.component.footprint]
         for dx in range(fp.width)
         for dy in range(fp.height)
         for dz in range(fp.depth)
     }
+
+
+_MACRO_WALL = 4  # keepout thickness inside a macro's box: thicker than any routing step, so the rest can be hollow
+
+
+def _macro_shell(item: _Placed, margin: tuple[int, int, int, int] = (0, 0, 0, 0)) -> set[tuple[int, int, int]]:
+    """Hull of a macro's box grown by margin (sides, below, above, unused); the middle stays out of the sets."""
+    ox, oy, oz = item.origin
+    fp = item.component.footprint
+    side, below, above, _ = margin
+    wall = _MACRO_WALL
+    xs = np.arange(ox - side, ox + fp.width + side)
+    ys = np.arange(oy - below, oy + fp.height + above)
+    zs = np.arange(oz - side, oz + fp.depth + side)
+    gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
+    keep = ((gx < ox + wall) | (gx >= ox + fp.width - wall) | (gy < oy + wall) | (gy >= oy + fp.height - wall)
+            | (gz < oz + wall) | (gz >= oz + fp.depth - wall))
+    return set(zip(gx[keep].tolist(), gy[keep].tolist(), gz[keep].tolist()))
+
+
+def _hidden_cells(placed: list[_Placed]) -> frozenset[tuple[int, int, int]]:
+    """Cells verification treats as air: gate interiors and macro walls (nothing reaches past those)."""
+    cells = _component_interior(placed)
+    for item in placed:
+        if item.component.type == ComponentType.CUSTOM:
+            cells |= _macro_shell(item)
+    return frozenset(cells)
 
 
 def _build_footprint_blocked(
@@ -381,6 +437,9 @@ def _build_footprint_blocked(
     + the lever/lamp cells (and their neighbours) behind input / in front of output repeaters."""
     fp_interior = _component_interior(placed)
     fp_expanded: set[tuple[int, int, int]] = set(fp_interior)
+    for item in placed:
+        if item.component.type == ComponentType.CUSTOM:
+            fp_expanded |= _macro_shell(item, (1, 1, 2, 0))  # same margins as the gate expansion below
     for cx, cy, cz in fp_interior:
         for ddx, ddy, ddz in _DIRS_6:
             fp_expanded.add((cx + ddx, cy + ddy, cz + ddz))
@@ -1178,7 +1237,7 @@ def _report_signal_violations(
         dust_owner: dict[tuple[int, int, int], str],
         component_cells: frozenset[tuple[int, int, int]],
         failed: set[str],
-) -> None:
+) -> list:
     """Print verify_signals opens/shorts for the routed nets (routing can 'succeed' yet be broken)."""
     spec = {
         net.net_id: (_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
@@ -1192,6 +1251,76 @@ def _report_signal_violations(
         print(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
     if violations:
         print(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
+    return violations
+
+
+def _report_flat_violations(
+        workspace: Region,
+        placed: list[_Placed],
+        nets: list[NetConnection],
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+        dust_owner: dict[tuple[int, int, int], str],
+        macros: dict[str, Macro],
+        failed: set[str],
+) -> list:
+    """verify_signals on the stamped layout as if flat: every net of the original netlist, from gate pin to gate
+    pin, through the entry and exit repeaters and the wires inside macros. Only gate interiors are hidden."""
+    stamps = {p.component.id: (macros[p.component.metadata["macro"]], p.origin, bool(p.component.metadata.get("mirror_x")))
+              for p in placed if p.component.type == ComponentType.CUSTOM}
+    hidden = _component_interior(placed)
+    owner = {pos: net for pos, net in dust_owner.items()}
+    spec: dict[str, tuple[tuple[int, int, int], list[tuple[int, int, int]]]] = {}
+
+    def inner_ends(cid: str, pin: str) -> list[tuple[int, int, int]]:
+        macro, origin, mirrored = stamps[cid]
+        source, sinks = macro.nets[macro.port_net[pin]]
+        ports = set(macro.port_net)
+        cells = [source] if source.rsplit(":", 1)[0] not in ports else []
+        cells += [s for s in sinks if s.rsplit(":", 1)[0] not in ports]
+        return [macro.world(macro.terminals[e], origin, mirrored) for e in cells]
+
+    exposed: dict[str, dict[str, str]] = {cid: {} for cid in stamps}
+    for net in nets:
+        endpoints = [net.source, *net.sinks]
+        if net.net_id in failed:
+            continue
+        ends: list[tuple[int, int, int]] = []
+        source = None
+        for i, ep in enumerate(endpoints):
+            if ep.component_id in stamps:
+                macro = stamps[ep.component_id][0]
+                exposed[ep.component_id][macro.port_net[ep.pin_name]] = net.net_id
+                cells = inner_ends(ep.component_id, ep.pin_name)
+                if i == 0:  # driven from inside: the first inner end is the driving gate pin
+                    source, cells = cells[0], cells[1:]
+                ends += cells
+            elif i == 0:
+                source = _pin_for_endpoint(pin_terminal, ep.component_id, ep.pin_name)
+            else:
+                ends.append(_pin_for_endpoint(pin_terminal, ep.component_id, ep.pin_name))
+        spec[net.net_id] = (source, ends)
+    for cid, (macro, origin, mirrored) in stamps.items():
+        ports = set(macro.port_net.values())
+        for inner, (source, sinks) in macro.nets.items():
+            name = exposed[cid].get(inner, f"{cid}/{inner}")
+            if inner not in ports:
+                spec[name] = (macro.world(macro.terminals[source], origin, mirrored),
+                              [macro.world(macro.terminals[s], origin, mirrored) for s in sinks])
+        for rel, inner in macro.owner.items():
+            owner[macro.world(rel, origin, mirrored)] = exposed[cid].get(inner, f"{cid}/{inner}")
+        w = macro.footprint.width
+        for (x, y, z), (sx, sy, sz) in macro.gate_boxes:
+            for dx in range(sx):
+                for dy in range(sy):
+                    for dz in range(sz):
+                        hidden.add(macro.world((x + dx, y + dy, z + dz), origin, mirrored))
+    with ProgressBar("[verify] flat signals", len(spec)) as bar:
+        violations = verify_signals(workspace, spec, owner, frozenset(hidden),
+                                    on_net=lambda net_id: bar.update(info=net_id))
+    for violation in violations:
+        print(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
+    print(f"[verify] {len(violations)} violation(s) in {len(spec)} flattened nets through {len(stamps)} macros")
+    return violations
 
 
 def _report_unsupported_blocks(
@@ -1208,15 +1337,15 @@ def _report_unsupported_blocks(
         print(f"[verify] {len(violations)} unsupported block(s)")
 
 
-def _compute_critical_path(
+_SEQUENTIAL = frozenset({ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH})
+
+
+def _net_wire_ticks(
         comp: ComponentList,
         dust_owner: dict[tuple[int, int, int], str],
         workspace: Region,
-) -> int:
-    """Count repeaters/torches per net, topo-sort DP; returns the critical path in ticks."""
-    from collections import deque
-
-    # Wire ticks per net: repeaters and torches placed in dust_owner
+) -> dict[str, int]:
+    """Repeaters and torches each net routes through."""
     net_ticks: dict[str, int] = {n.net_id: 0 for n in comp.nets}
     for pos, nid in dust_owner.items():
         if nid not in net_ticks:
@@ -1224,6 +1353,24 @@ def _compute_critical_path(
         blk = workspace[pos[0], pos[1], pos[2]]
         if _is_repeater(blk) or _is_torch(blk):
             net_ticks[nid] += 1
+    return net_ticks
+
+
+def _gate_delay(c: Component) -> int:
+    return SCHEMATIC_MAP[c.type].propagation_delay_ticks if c.type in SCHEMATIC_MAP else 0
+
+
+def _compute_critical_path(
+        comp: ComponentList,
+        dust_owner: dict[tuple[int, int, int], str],
+        workspace: Region,
+        macros: dict[str, Macro] | None = None,
+) -> int:
+    """Count repeaters/torches per net, topo-sort DP; returns the critical path in ticks."""
+    from collections import deque
+
+    # Wire ticks per net: repeaters and torches placed in dust_owner
+    net_ticks = _net_wire_ticks(comp, dust_owner, workspace)
 
     # IO repeater on nets driven by INPUT_PINs (+1 per such net)
     comp_by_id: dict[str, Component] = {c.id: c for c in comp.components}
@@ -1231,30 +1378,45 @@ def _compute_critical_path(
         if comp_by_id[n.source.component_id].type == ComponentType.INPUT_PIN:
             net_ticks[n.net_id] += 1
 
-    _SEQUENTIAL = frozenset({ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH})
-
     # Sequential components are split into two virtual graph nodes to break cycles:
     #   "{id}\x00q" — virtual Q-output source: in_degree=0, out_time=0 (registered output)
     #   "{id}"      — real D/C/E-input sink: receives edges from combinational logic, no
     #                 outgoing edges; arrival tracks setup-time constraint
+    # A macro has a node per pin, joined by its timing arcs.
     def _q_node(cid: str) -> str:
         return cid + "\x00q"
 
-    seq_ids = {c.id for c in comp.components if c.type in _SEQUENTIAL}
-    all_nodes: set[str] = {c.id for c in comp.components} | {_q_node(cid) for cid in seq_ids}
+    def _macro_pin(cid: str, pin: str) -> str:
+        return f"{cid}\x00pin\x00{pin}"
 
-    edges: dict[str, list[tuple[str, str]]] = {n: [] for n in all_nodes}
+    macro_of = {c.id: macros[c.metadata["macro"]] for c in comp.components if c.type == ComponentType.CUSTOM}
+    seq_ids = {c.id for c in comp.components if c.type in _SEQUENTIAL}
+    all_nodes: set[str] = ({c.id for c in comp.components if c.id not in macro_of}
+                           | {_q_node(cid) for cid in seq_ids}
+                           | {_macro_pin(cid, p.name) for cid, m in macro_of.items() for p in m.pins})
+
+    # (ticks, sink) per node; a macro's arcs are plain edges with the arc's ticks
+    edges: dict[str, list[tuple[int, str]]] = {n: [] for n in all_nodes}
     in_degree: dict[str, int] = {n: 0 for n in all_nodes}
 
     for n in comp.nets:
         src = n.source.component_id
-        src_node = _q_node(src) if src in seq_ids else src
+        if src in macro_of:
+            src_node = _macro_pin(src, n.source.pin_name)
+        else:
+            src_node = _q_node(src) if src in seq_ids else src
         for sink in n.sinks:
-            sid = sink.component_id
-            edges[src_node].append((n.net_id, sid))
+            sid = _macro_pin(sink.component_id, sink.pin_name) if sink.component_id in macro_of else sink.component_id
+            edges[src_node].append((net_ticks[n.net_id], sid))
             in_degree[sid] += 1
-
     arrival: dict[str, int] = {n: 0 for n in all_nodes}
+    for cid, m in macro_of.items():
+        for pin, arcs in m.arcs.items():
+            for out, ticks in arcs.items():
+                edges[_macro_pin(cid, pin)].append((ticks, _macro_pin(cid, out)))
+                in_degree[_macro_pin(cid, out)] += 1
+        for out, ticks in m.q_out.items():
+            arrival[_macro_pin(cid, out)] = ticks
 
     queue: deque[str] = deque(n for n, d in in_degree.items() if d == 0)
     processed = 0
@@ -1263,12 +1425,12 @@ def _compute_critical_path(
         processed += 1
         if nid.endswith("\x00q"):
             out_t = 0  # registered Q: always t=0
+        elif nid in comp_by_id:
+            out_t = arrival[nid] + _gate_delay(comp_by_id[nid])
         else:
-            c = comp_by_id[nid]
-            delay = SCHEMATIC_MAP[c.type].propagation_delay_ticks if c.type in SCHEMATIC_MAP else 0
-            out_t = arrival[nid] + delay
-        for net_id, sink_id in edges[nid]:
-            t = out_t + net_ticks[net_id]
+            out_t = arrival[nid]  # macro pin: its arcs carry the delay
+        for ticks, sink_id in edges[nid]:
+            t = out_t + ticks
             if t > arrival[sink_id]:
                 arrival[sink_id] = t
             in_degree[sink_id] -= 1
@@ -1278,14 +1440,15 @@ def _compute_critical_path(
     if processed < len(all_nodes):
         print("[timing] WARNING: cycle detected in component graph — path may be incomplete")
 
-    # Critical endpoints: OUTPUT_PINs and DFF/DFFE/DLATCH real nodes (setup-time sinks).
+    # Critical endpoints: OUTPUT_PINs and DFF/DFFE/DLATCH real nodes (setup-time sinks), and registers in macros.
     # Fall back to all real component nodes if none exist.
-    endpoint_ids = [
-                       c.id for c in comp.components
+    endpoints = [
+                       arrival[c.id] for c in comp.components
                        if c.type == ComponentType.OUTPUT_PIN or c.type in _SEQUENTIAL
-                   ] or [c.id for c in comp.components]
-
-    return max(arrival[n] for n in endpoint_ids)
+                   ] or [arrival[c.id] for c in comp.components if c.id not in macro_of]
+    for cid, m in macro_of.items():
+        endpoints += [arrival[_macro_pin(cid, pin)] + ticks for pin, ticks in m.setup.items()]
+    return max(endpoints)
 
 
 def _construct_clock_region(
@@ -1352,7 +1515,11 @@ def build_litematic_from_component_list(
         place_seed: int = 0,
         place_workers: int = 1,
         flat: bool = False,
+        macros: dict[str, Macro] | None = None,
+        capture: dict | None = None,
+        io_columns: int | None = None,
 ) -> Path:
+    """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""
     comp = _expand_multibit_io(comp)
     max_comp_height = max((c.footprint.height for c in comp.components), default=1)
     y_stride = max_comp_height + additional_component_height_spacing
@@ -1375,7 +1542,7 @@ def build_litematic_from_component_list(
             comp.components, comp.nets,
             base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
             routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
-            seed=place_seed, flat=flat, output_x_order=output_x_order,
+            seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
         )
     else:
         placed = _optimize_placement(
@@ -1422,7 +1589,7 @@ def build_litematic_from_component_list(
     ext_bounds = (0, 0, 0, width - 1, height - 1, workspace_depth - 1)
 
     ref_mc_version, ref_lm_version, ref_lm_sub = _place_gate_templates(
-        workspace, placed, solid, schematics_dir, dust_owner,
+        workspace, placed, solid, schematics_dir, dust_owner, macros,
     )
     const_positions = _place_const_sources(workspace, placed, solid)
     max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
@@ -1486,7 +1653,7 @@ def build_litematic_from_component_list(
             workspace, rec, solid, dust_owner,
             sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
             footprint_blocked, all_terminals, route_passes,
-            component_cells=frozenset(_component_interior(placed)),
+            component_cells=_hidden_cells(placed),
             snapshot_dir=snapshot_dir,
             search_timeout=wire_timeout,
             route_workers=route_workers,
@@ -1495,8 +1662,13 @@ def build_litematic_from_component_list(
             terminal_approach=terminal_approach,
         )
 
-    _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
-                              frozenset(_component_interior(placed)), {nid for nid, _ in routing_failures})
+    failed_nets = {nid for nid, _ in routing_failures}
+    if macros:
+        signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
+                                                    failed_nets)
+    else:
+        signal_violations = _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
+                                                      frozenset(_component_interior(placed)), failed_nets)
 
     if routing_failures:
         failed = ", ".join(nid for nid, _ in routing_failures)
@@ -1534,9 +1706,23 @@ def build_litematic_from_component_list(
         elif snapshot_dir is not None:
             save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
 
-    _report_unsupported_blocks(workspace, dust_owner, frozenset(_component_interior(placed)))
+    _report_unsupported_blocks(workspace, dust_owner, _hidden_cells(placed))
 
-    critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace)
+    if capture is not None:
+        capture.update(
+            workspace=workspace, placed=placed, dust_owner=dict(dust_owner), pin_terminal=pin_terminal,
+            net_ticks=_net_wire_ticks(comp, dust_owner, workspace),
+            violations=signal_violations + verify_support(workspace, dust_owner, _hidden_cells(placed)),
+            io_cells={(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,
+                                                                    p.component.footprint,
+                                                                    _default_io_side(p.component, pin))
+                      for p in placed if p.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+                      for pin in p.component.pins},
+        )
+        return out_path
+
+    critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, macros)
+    print(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
     apply_dust_shapes(workspace)
@@ -1573,3 +1759,36 @@ def build_litematic_from_component_list(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     schematic.save(str(out_path))
     return out_path
+
+
+def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int, schematics_dir: Path,
+                cache_dir: Path | None = None, route_deadline: float | None = None, **build_kwargs) -> Macro:
+    """Place and route one instance into a Macro, trying placement seeds until it verifies clean."""
+    if cache_dir is not None and (cached := load_macro(name, cache_dir)) is not None:
+        print(f"[macro] {name}: cached, footprint {cached.footprint.width}x{cached.footprint.height}x{cached.footprint.depth}")
+        return cached
+    n_pins = len(ports)
+    gutter, routing_gutter = 6, 6
+    for seed in range(_MACRO_SEEDS):
+        t0 = time.monotonic()
+        capture: dict = {}
+        try:
+            build_litematic_from_component_list(
+                sub, schematics_dir, Path("unused.litematic"), schematic_name=name, clock_pin=None,
+                route_passes=1, place_seed=seed, capture=capture, route_deadline=route_deadline,
+                gutter=gutter, component_depth_spacing=routing_gutter,
+                io_columns=io_column_pins(n_pins, 4, gutter + 1), **build_kwargs,
+            )
+            if capture["violations"]:
+                raise ValueError(f"{len(capture['violations'])} violations, first {capture['violations'][0]}")
+            macro = macro_from_capture(name, sub, capture, ports, cells, _gate_delay, _SEQUENTIAL)
+        except (RuntimeError, ValueError) as e:
+            print(f"[macro] {name} seed {seed} failed: {e}")
+            continue
+        fp = macro.footprint
+        print(f"[macro] {name}: {cells} cells, {n_pins} pins, footprint {fp.width}x{fp.height}x{fp.depth} "
+              f"(seed {seed}, {time.monotonic() - t0:.1f}s)")
+        if cache_dir is not None:
+            save_macro(macro, cache_dir)
+        return macro
+    raise RuntimeError(f"macro {name} did not route clean in {_MACRO_SEEDS} seeds")

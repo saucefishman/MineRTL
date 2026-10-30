@@ -8,6 +8,8 @@ from minecraft_v.build_utils import save_build_artifacts
 from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list
+from minecraft_v.placement_engine.builder import build_macro
+from minecraft_v.placement_engine.macro import extract_macros
 from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION,
     Component,
@@ -164,6 +166,14 @@ def main():
                         help="extra Y between levels beyond the tallest component (default 3)")
     parser.add_argument("--no-pin-extensions", action="store_true",
                         help="ignore --output-pin-targets-json (no output pin extensions)")
+    parser.add_argument("--macros", action="store_true",
+                        help="Route repeated subcircuits once and stamp them; the rest routes around them")
+    parser.add_argument("--macro-fanout", type=int, default=2,
+                        help="--macros: nets above this fanout are shared between instances, not grouped into them")
+    parser.add_argument("--macro-min-cells", type=int, default=8,
+                        help="--macros: smallest repeated subcircuit worth a macro")
+    parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
+                        help="--macros: directory keeping routed macros between builds")
     args = parser.parse_args()
 
     out_litematic = Path(args.out_litematic)
@@ -197,6 +207,19 @@ def main():
         raise SystemExit(f"Input pin '{generate_clock_pin}' for clock generation does not exist. Available pins: "
                          f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")
 
+    macros = None
+    if args.macros:
+        def build(name, sub, ports, cells):
+            return build_macro(name, sub, ports, cells, Path(args.schematics_dir), cache_dir=Path(args.macro_cache))
+
+        def report(cls, macro):
+            print(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")
+
+        component_list, macros, instances = extract_macros(component_list, build, args.macro_fanout, args.macro_min_cells,
+                                                           on_class=report)
+        print(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
+              f"{len(component_list.nets)} nets")
+
     build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir),
                                         out_path=out_litematic, schematic_name=schematic_name,
                                         allow_routing_failures=allow_routing_failures,
@@ -215,6 +238,7 @@ def main():
                                         place_seed=args.place_seed,
                                         place_workers=args.place_workers,
                                         flat=args.flat,
+                                        macros=macros,
                                         **{k: v for k, v in (
                                             ("gutter", args.gutter),
                                             ("component_width_spacing", args.io_margin),
