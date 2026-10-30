@@ -103,6 +103,19 @@ def test_flat_uses_one_level():
     assert len({p.origin[1] for p in placed}) == 1
 
 
+def test_flat_io_rows_clear_every_gate():
+    comp, _, _ = _setup()
+    placed = poisson._poisson_placement(comp.components, comp.nets, **dict(_KW, y_spacing=3), flat=True)
+    gates = [p for p in placed if p.component.type not in _IO]
+    far = max(p.origin[2] + p.component.footprint.depth for p in gates)
+    near = min(p.origin[2] for p in gates)
+    for p in placed:
+        if p.component.type == ComponentType.INPUT_PIN:
+            assert p.origin[2] >= far
+        elif p.component.type == ComponentType.OUTPUT_PIN:
+            assert p.origin[2] < near
+
+
 def test_field_solves_discrete_poisson():
     sizes = np.full((6, 3), 8.0)
     field = poisson._Field(sizes, np.array([32.0, 24.0, 32.0]))
