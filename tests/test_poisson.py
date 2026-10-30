@@ -3,7 +3,7 @@ from scipy import fft
 
 import minecraft_v.placement_engine.poisson as poisson
 from minecraft_v.placement_engine.builder import _io_barrier
-from minecraft_v.placement_engine.ir import ComponentType
+from minecraft_v.placement_engine.ir import Component, ComponentType
 from minecraft_v.placement_engine.layout import _io_base_name
 from tests.test_anneal import _KW, _setup
 
@@ -66,6 +66,26 @@ def test_io_alignment_rules():
     for kind in _IO:
         xs = sorted({o[0][0] for (k, _), o in columns.items() if k == kind})
         assert all(b - a >= _KW["gutter"] + 1 for a, b in zip(xs, xs[1:]))
+
+
+def test_io_y_rises_with_bit_index():
+    # Gates that want the bits reversed must not reverse them; a[10] sorts numerically, after a[9].
+    pins = [Component(id=f"a[{i}]", type=ComponentType.INPUT_PIN, pins=[]) for i in (10, 9, 0)]
+    gate = {f"a[{i}]": [("g", str(i))] for i in (10, 9, 0)}
+    io = poisson._IoPlacer(pins, [], [], 1, 1, 4, False, None)
+    io.neighbours.update(gate)
+    out = io._side(pins, {("g", "10"): (0.0, 0.0), ("g", "9"): (0.0, 20.0), ("g", "0"): (0.0, 40.0)}, 0.0, {})
+    assert out["a[0]"][1] < out["a[9]"][1] < out["a[10]"][1]
+
+    _, placed = _place()
+    columns = {}
+    for p in placed:
+        if p.component.type in _IO:
+            columns.setdefault((p.component.type, _io_base_name(p.component.id)), []).append(p)
+    for bits in columns.values():
+        bits.sort(key=lambda p: poisson._bit_index(p.component.id))
+        ys = [p.origin[1] for p in bits]
+        assert ys == sorted(set(ys))
 
 
 def test_spread_keeps_order_and_gap():
