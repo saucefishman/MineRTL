@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -146,9 +147,9 @@ def main():
     parser.add_argument("--place-mirror", action=argparse.BooleanOptionalAction, default=True,
                         help="Let --placer bary|sa mirror gates in X (default: on)")
     parser.add_argument("--place-seed", type=int, default=0, help="RNG seed for --placer sa (default 0)")
-    parser.add_argument("--place-workers", type=int, default=1,
-                        help="forked chains per annealing temperature for --placer sa (default 1; "
-                             "result depends on the count)")
+    parser.add_argument("--place-workers", type=int, default=min(4, os.cpu_count() or 1),
+                        help="forked chains per annealing temperature for --placer sa (default "
+                             "min(4, cpus); the result depends on the count, 1 = serial)")
     args = parser.parse_args()
 
     out_litematic = Path(args.out_litematic)
