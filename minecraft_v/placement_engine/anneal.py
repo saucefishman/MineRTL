@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 import multiprocessing
 import random
+import sys
 import time
 from collections import defaultdict
 
@@ -612,7 +613,9 @@ def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: b
         _ChainCtx.state, _ChainCtx.kinds, _ChainCtx.weights = state, kinds, weights
         pool = multiprocessing.get_context("fork").Pool(workers)
     chain_moves = max(1, -(-moves_per_temp // workers))
-    for _ in range(_PLACE_MAX_TEMPS):
+    live = sys.stdout.isatty()
+    t_start = time.monotonic()
+    for step in range(_PLACE_MAX_TEMPS):
         if time.monotonic() >= deadline:
             timed_out = True
             break
@@ -641,8 +644,15 @@ def _anneal(state: _PlaceState, rng: random.Random, *, y_moves: bool, z_moves: b
         state.full_recompute(refresh_io=True)
         if state.cost < best_cost - 1e-9:
             best_cost, best = state.cost, state.snapshot()
-        if temp < 0.005 * state.cost / num_nets:
+        done = temp < 0.005 * state.cost / num_nets
+        if live or step % 10 == 9 or done:
+            line = (f"[place] T {step + 1}/{_PLACE_MAX_TEMPS}  cost {state.cost:.0f}  best {best_cost:.0f}  "
+                    f"accept {alpha:.0%}  {time.monotonic() - t_start:.0f}s/{budget:.0f}s")
+            print(f"\r{line}\033[K" if live else line, end="" if live else "\n", flush=True)
+        if done:
             break
+    if live and step:
+        print()
     if pool is not None:
         pool.terminate()
     if timed_out:
