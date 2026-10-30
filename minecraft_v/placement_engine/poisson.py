@@ -670,6 +670,11 @@ def _poisson_placement(
         sizes = np.array([[c.footprint.width + gutter,
                            1 if flat else c.footprint.height + y_spacing,
                            c.footprint.depth + routing_gutter] for c in gates], dtype=float)
+        full_sizes = sizes.copy()
+        # Macros end up in front of everything (_front_macros): among the gates they only need a stand-in.
+        is_macro = np.array([c.type == ComponentType.CUSTOM for c in gates])
+        if is_macro.any() and not is_macro.all():
+            sizes[is_macro] = sizes[~is_macro].max(axis=0)
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
         height = 1.0 if flat else float(max(sizes[:, 1].max(), volume ** (1 / 3)))
         side = max(math.sqrt(volume / height), float(sizes[:, [0, 2]].max()))
@@ -685,7 +690,7 @@ def _poisson_placement(
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:
         pos = np.zeros((0, 3))
-        sizes = np.zeros((0, 3))
+        sizes = full_sizes = np.zeros((0, 3))
 
     def io_rows() -> np.ndarray:
         depth_end = float((pos[:, 2] + sizes[:, 2]).max()) if len(pos) else 0.0
@@ -698,7 +703,8 @@ def _poisson_placement(
     pos = pos_all[:len(gates)]
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)
-    _front_macros(pos, sizes, gates_final, routing_gutter)
+    _front_macros(pos, full_sizes, gates_final, routing_gutter)
+    sizes = full_sizes
     pos_all[len(gates):] = io_rows()
     _io_rows(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order), flat)
     print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
