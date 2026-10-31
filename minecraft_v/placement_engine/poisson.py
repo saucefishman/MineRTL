@@ -649,8 +649,7 @@ def _fix_banks(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], banks
     z = 0.0
     for i in banks:
         pos[i] = (0.0, 0.0, z)
-        gap = gates[i].metadata.get("bank_gap")  # a routed bank's rows
-        z += gates[i].footprint.depth + gap if gap is not None else sizes[i, 2] + channel
+        z += sizes[i, 2] + channel
     rest = np.setdiff1d(np.arange(len(gates)), banks)
     if not len(rest):
         return

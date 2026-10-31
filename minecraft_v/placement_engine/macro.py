@@ -552,35 +552,26 @@ def _row_shift(xs: set[int], width: int, pitch: int, columns: int) -> int:
     raise ValueError("no row offset keeps a bank's taps apart")
 
 
-def routed_row_gap(n_nets: int, height: int, scale: float) -> int:
-    """Z between the rows of a routed bank: room for its shared nets to run along the rows, at two by two cells each."""
-    return math.ceil(scale * _PLANE_PITCH * _PLANE_PITCH * n_nets / max(1, height)) + 6
-
-
 def build_bank(bank_name: str, tile: Macro, instances: list[dict[str, str]], cells: set[str], ports: dict[str, str],
-               columns: int, routed_turned: bool | None = None) -> tuple[Macro, Instance]:
+               columns: int) -> tuple[Macro, Instance]:
     """One macro from up to 2 x columns tiles: two rows, the second turned half way, pin faces toward one lane plane.
 
     Every shared input is a lane between the rows, serving both, and fans out past the east end to its pin. Several
     lanes share a Y (as the tile's pins do); a tap to a far lane bridges over the nearer ones. Per-tile pins stay on the
     tiles' back faces, the outside of the box.
-
-    With ``routed_turned`` set this is one row, turned or not, with no lanes: every tile keeps its shared pins, and the
-    router branches each shared net to them, in the gap fix_banks leaves between two such rows.
     """
-    routed = routed_turned is not None
     fp = tile.footprint
     pitch = fp.width + _TILE_GAP
     shared_pins = [p for p in tile.pins if p.side == CardinalDirection.SOUTH]
     shared_ys = sorted({p.offset[1] for p in shared_pins})
     per_y = max((sum(p.offset[1] == y for p in shared_pins) for y in shared_ys), default=1)
     row1_z = fp.depth + _row_gap(per_y)
-    shift = 0 if routed else _row_shift({p.offset[0] for p in shared_pins}, fp.width, pitch, columns)
+    shift = _row_shift({p.offset[0] for p in shared_pins}, fp.width, pitch, columns)
     row_width = columns * pitch - _TILE_GAP + shift
     east = row_width + 2
     pin_x = east + _PLANE_PITCH * per_y + 1
-    depth = fp.depth if routed else row1_z + fp.depth
-    width = row_width if routed else pin_x + 1
+    depth = row1_z + fp.depth
+    width = pin_x + 1
     blocks: dict[Pos, BlockState] = {}
     wired: set[Pos] = set()
     floors: set[Pos] = set()
@@ -608,8 +599,6 @@ def build_bank(bank_name: str, tile: Macro, instances: list[dict[str, str]], cel
         blocks[below] = _LANE_FLOOR
 
     def place(k: int) -> tuple[tuple[int, int, int], bool]:
-        if routed:
-            return (k * pitch, 0, 0), routed_turned
         row = k // columns
         return (k % columns * pitch + row * shift, 0, row * row1_z), row == 1
 
@@ -666,17 +655,16 @@ def build_bank(bank_name: str, tile: Macro, instances: list[dict[str, str]], cel
     for port in sorted(tile.pins, key=lambda p: (p.offset[1], p.offset[0])):
         tile_net = inner_of[port.name]
         tile_x, y = port.offset[0], port.offset[1]
-        front = port.side == CardinalDirection.SOUTH
-        shared = front and not routed
-        if not shared:  # stays on the back of its tile, or the front in a routed row
+        shared = port.side == CardinalDirection.SOUTH
+        if not shared:  # stays on the back of its tile
             for k, mapping in enumerate(instances):
                 turned = place(k)[1]
                 net = mapping[tile_net]
-                rel = (tile_x, y, fp.depth - 1 if front else 0)
+                rel = (tile_x, y, 0 if port.direction == Direction.OUT or not shared else fp.depth - 1)
                 x, _, z = at(k, rel)
                 name = f"t{k}_{port.name}"
                 pins.append(PinRef(name=name, direction=port.direction,
-                                   side=CardinalDirection.SOUTH if front != turned else CardinalDirection.NORTH,
+                                   side=CardinalDirection.SOUTH if turned else CardinalDirection.NORTH,
                                    offset=(x, y, depth - 1 - z)))
                 pin_net[name] = net
                 port_net[name] = net
@@ -765,7 +753,7 @@ def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
 
 
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
-                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, routed_gap_scale: float | None = None, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
+                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
     """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances)."""
     macros: dict[str, Macro] = {}
@@ -782,20 +770,11 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
         tile = build(tile_name, sub, ports, len(cls.cells))
         if on_class is not None:
             on_class(cls, tile)
-        routed = banked and routed_gap_scale is not None
-        per_array = bank_columns if routed else 2 * bank_columns if banked else row_tiles or len(cls.instances)
-        gap = 0
-        if routed:
-            gap = routed_row_gap(sum(p.side == CardinalDirection.SOUTH for p in tile.pins), tile.footprint.height,
-                                 routed_gap_scale)
+        per_array = 2 * bank_columns if banked else row_tiles or len(cls.instances)
         for start in range(0, len(cls.instances), per_array):
             row = replace(cls, instances=cls.instances[start:start + per_array])
             name = f"{'bank' if banked else 'array'}_{len(macros)}"
-            row_index = start // per_array
-            if routed:
-                macro, instance = build_bank(name, tile, row.instances, cls.cells, ports, bank_columns,
-                                             routed_turned=row_index % 2 == 1)
-            elif banked:
+            if banked:
                 macro, instance = build_bank(name, tile, row.instances, cls.cells, ports, bank_columns)
             else:
                 macro, instance = build_array(name, tile, row, ports)
@@ -806,8 +785,7 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
             hidden_cells.update(instance.cell_map)
             instances.append(instance)
             new_components.append(Component(id=instance.component_id, type=ComponentType.CUSTOM, pins=macro.pins,
-                                            footprint=fp, metadata={"macro": name, **({"bank": True} if banked else {}),
-                                                      **({"bank_gap": gap} if routed and row_index % 2 == 0 else {})}))
+                                            footprint=fp, metadata={"macro": name, **({"bank": True} if banked else {})}))
             for pin in macro.pins:
                 pin_rows.append((instance.pin_net[pin.name], instance.component_id, pin.name, pin.direction))
     if not instances:
