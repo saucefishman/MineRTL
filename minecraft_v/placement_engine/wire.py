@@ -336,6 +336,11 @@ def _check_slope_notch(
     checks that against the world, but an earlier part of the same path (outside its local
     snapshot) may have put a support block there since; the link would silently break."""
     (ax, ay, az), (bx, by, bz) = prev, cell
+    if (bx - ax, bz - az) in _TOWER_2BLOCK and abs(by - ay) == 2:  # a 2x slope is two of them
+        mid = ((ax + bx) // 2, (ay + by) // 2, (az + bz) // 2)
+        _check_slope_notch(workspace, solid, prev, mid)
+        _check_slope_notch(workspace, solid, mid, cell)
+        return
     if (bx - ax, bz - az) not in _HORIZ_DIRS or abs(by - ay) != 1:
         return
     notch = (bx, by + 1, bz) if by < ay else (ax, ay + 1, az)

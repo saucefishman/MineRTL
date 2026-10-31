@@ -687,7 +687,7 @@ def _net_sort_key(
     )
 
 
-_LAY_RETRIES = 4  # per sink: re-searches after a path that couldn't be laid (LayConflict)
+_LAY_RETRIES = 24  # per sink: re-searches after a path that couldn't be laid (LayConflict)
 _NET_RETRIES = 2  # per net: re-routes after no repeater fits a stretch
 _BLOCKER_RADIUS = 3  # nets with cells this close to a failed sink get ripped up and re-queued
 _BLOCKER_MAX = 4
@@ -956,13 +956,13 @@ def _bank_pin_leads(
     sinks = [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks]
     leads = []
     for wall in walls:
-        (ox, _, oz), fp = wall.origin, wall.component.footprint
+        (ox, oy, oz), fp = wall.origin, wall.component.footprint
         if wall.component.metadata.get("bank"):
             east = ox + fp.width
             hash_ = zlib.crc32(net.net_id.encode())
             lead = _BANK_PIN_LEAD + 2 * (hash_ % 8)  # spread, or wire running along Z just beyond them is the same wall
             at_pins = [p for p in sinks if east - 1 <= p[0] <= east + 1 and oz <= p[2] < oz + fp.depth
-                       and src[0] > p[0] + lead]
+                       and oy <= p[1] < oy + fp.height and src[0] > p[0] + lead]
             leads += [(p[0] + lead, p[1], p[2]) for p in at_pins]
             for other in macros:  # small macros are not walls, but one in the way still floods: a hint over it
                 (mx, my, mz), mf = other.origin, other.component.footprint
@@ -971,6 +971,11 @@ def _bank_pin_leads(
                 leads += [(p[0], my + mf.height + _WALL_VIA_LIFT, mz + mf.depth // 2) for p in sinks
                           if mx <= p[0] < mx + mf.width
                           and ((src[2] < mz and p[2] >= mz + mf.depth - 1) or (src[2] >= mz + mf.depth and p[2] <= mz))]
+                # Straight in to a pin on its faces: wire along the face walls off the rest.
+                back = 4 + 2 * (zlib.crc32(net.net_id.encode()) % 3)
+                leads += [(p[0], p[1], p[2] - back if p[2] < mz else p[2] + back) for p in sinks
+                          if mx <= p[0] < mx + mf.width and (p[2] < mz or p[2] >= mz + mf.depth)
+                          and p[2] - mz < mf.depth + 2 and mz - p[2] < 3]
             for other in macros:  # in the way of the straight line to a pin: over it
                 (mx, my, mz), mf = other.origin, other.component.footprint
                 if other.component.metadata.get("bank") or src[0] < mx + mf.width:
@@ -984,7 +989,7 @@ def _bank_pin_leads(
                           if p[0] < east and p[2] < oz and src[2] < oz + fp.depth]
                 leads += [(east + lead, p[1], p[2] + spread) for p in sinks
                           if p[0] < east and p[2] >= oz + fp.depth and src[2] >= oz]
-    return leads
+    return list(dict.fromkeys(leads))
 
 
 def _wall_vias(

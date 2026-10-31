@@ -580,7 +580,7 @@ def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: boo
         for i in range(n):
             if time.monotonic() >= deadline:
                 return
-            if i in pinned:
+            if i in pinned or (fixed_box is not None and netlist.comps[i].type == ComponentType.CUSTOM):
                 continue
             target = cost.median_target(i)
             target = (target[0], max(0, target[1]) if not flat else int(pos_all[i][1]), max(0, target[2]))
@@ -708,7 +708,9 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
         pos[i] = fixed[i]
     for i in sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2])):
         target = tuple(int(v) for v in pos[i])
-        spot = occ.nearest_free(i, (max(target[0], 0), max(target[1], 0), max(target[2], 0)), False, 20000)
+        # A macro has pins on its faces: not up against the output row.
+        low_z = channel if gates[i].type == ComponentType.CUSTOM else 0
+        spot = occ.nearest_free(i, (max(target[0], 0), max(target[1], 0), max(target[2], low_z)), False, 20000)
         if spot is None:
             raise ValueError(f"no room for {gates[i].id} around the banks")
         occ.add(i, spot)

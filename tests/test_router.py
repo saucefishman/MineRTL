@@ -219,3 +219,11 @@ def test_tower_starting_where_a_powered_drop_lands_is_laid():
 def test_powered_drop_from_a_tower_top_cant_land_in_its_own_column():
     with pytest.raises(ValueError):
         _lay_redstone_path(Region(0, 0, 0, 14, 14, 14), set(), {}, [(6, 4, 6), (6, 8, 8), (6, 4, 8)], "n")
+
+
+def test_slope_notch_checked_on_both_steps_of_a_2x_slope():
+    ws = Region(0, 0, 0, 14, 14, 14)
+    ws[6, 7, 7] = STONE
+    with pytest.raises(LayConflict):
+        _check_slope_notch(ws, {(6, 7, 7)}, (6, 7, 6), (6, 5, 8))
+
