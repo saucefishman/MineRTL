@@ -306,6 +306,8 @@ def _lay_redstone_path(
                 raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]}")
 
     for i, cell in enumerate(cells):
+        if i > 0:  # before the move handlers: this cell may also start a 2x slope, tower or powered drop
+            _check_slope_notch(workspace, solid, cells[i - 1], cell)
         if i in slope2_bottom:
             _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
             continue
@@ -321,8 +323,6 @@ def _lay_redstone_path(
                                      inverted_cells, goal, terminal_positions, path_cells)
 
         else:
-            if i > 0:
-                _check_slope_notch(workspace, solid, cells[i - 1], cell)
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
 
 

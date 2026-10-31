@@ -6,7 +6,7 @@ from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTER
 from minecraft_v.placement_engine.pathfinding import _signal_depths
 from minecraft_v.placement_engine.ripup import Recorder, JournaledDict, JournaledSet
 from minecraft_v.placement_engine.verify import verify_signals
-from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch, _place_repeaters_for_net
+from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch, _lay_redstone_path, _place_repeaters_for_net
 
 BOUNDS = (0, 0, 0, 23, 7, 23)
 
@@ -159,3 +159,13 @@ def test_router_breaks_long_descent_for_repeaters(drop, horiz):
                     terminals={src, sink})
     assert router.run([job], "[test]") == []
     assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
+
+
+def test_slope_notch_checked_when_cell_starts_a_longer_move():
+    """A cell that a 1-step slope lands on can also start a 2x slope; the notch check still applies."""
+    workspace = Region(0, 0, 0, 12, 16, 12)
+    notch = (2, 11, 2)
+    workspace[notch] = STONE
+    path = [(1, 11, 2), (2, 10, 2), (4, 8, 2)]
+    with pytest.raises(LayConflict, match="would be cut"):
+        _lay_redstone_path(workspace, {notch}, {}, path, "n")

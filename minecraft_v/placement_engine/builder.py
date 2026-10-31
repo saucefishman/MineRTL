@@ -926,10 +926,11 @@ def _wall_vias(
         (ox, oy, oz), fp = wall.origin, wall.component.footprint
         z0, z1 = oz, oz + fp.depth - 1
         crossing = [p for p in sinks if (src[2] < z0 and p[2] > z1) or (src[2] > z1 and p[2] < z0)]
-        if crossing and ox <= src[0] < ox + fp.width:
+        over = next((p[0] for p in (src, *crossing) if ox <= p[0] < ox + fp.width), None) if crossing else None
+        if over is not None:
             # Spread by net: nets from one IO column share an X, and a cell only fits one.
             spread = zlib.crc32(net.net_id.encode())
-            via.append((src[0], oy + fp.height + _WALL_VIA_LIFT + 2 * (spread % 4),
+            via.append((over, oy + fp.height + _WALL_VIA_LIFT + 2 * (spread % 4),
                         oz + (spread >> 8) % fp.depth))
     return via
 

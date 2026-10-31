@@ -166,7 +166,7 @@ def mine_repeated(comp: ComponentList, max_fanout: int = 2, min_cells: int = 8) 
         if len(endpoints) - 1 <= max_fanout:
             nx.add_path(u, members)
     classes: dict[str, list[RepeatedClass]] = defaultdict(list)
-    for cells in nx.connected_components(u):
+    for cells in sorted(nx.connected_components(u), key=min):  # sets iterate by hash: keep builds repeatable
         if len(cells) < min_cells:
             continue
         g = _instance_graph(cells, by_id, ends, pin_net)
