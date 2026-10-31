@@ -307,7 +307,13 @@ def _lay_redstone_path(
 
     for i, cell in enumerate(cells):
         if i in slope2_bottom:
-            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
+            if i > 0:
+                _check_slope_notch(workspace, solid, cells[i - 1], cell)
+            top = cells[i + 1]
+            mid = ((cell[0] + top[0]) // 2, (cell[1] + top[1]) // 2, (cell[2] + top[2]) // 2)
+            _check_slope_notch(workspace, solid, cell, mid)
+            _check_slope_notch(workspace, solid, mid, top)
+            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, top, BlockState("minecraft:sandstone"))
             continue
 
         if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):

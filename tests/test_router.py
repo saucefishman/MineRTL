@@ -6,7 +6,7 @@ from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTER
 from minecraft_v.placement_engine.pathfinding import _signal_depths
 from minecraft_v.placement_engine.ripup import Recorder, JournaledDict, JournaledSet
 from minecraft_v.placement_engine.verify import verify_signals
-from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch, _place_repeaters_for_net
+from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch, _lay_redstone_path, _place_repeaters_for_net
 
 BOUNDS = (0, 0, 0, 23, 7, 23)
 
@@ -83,6 +83,23 @@ def test_slope_notch_check(prev, cell, notch):
         _check_slope_notch(region, solid, prev, cell)
     assert e.value.cells == (cell, prev)
     _check_slope_notch(region, solid, prev, (cell[0], prev[1], cell[2]))  # flat: no notch
+
+
+@pytest.mark.parametrize("path, notch", [
+    ([(1, 5, 1), (3, 3, 1)], (2, 5, 1)),  # 2x down: above the middle cell
+    ([(1, 5, 1), (3, 3, 1)], (3, 4, 1)),  # 2x down: above the dest
+    ([(1, 3, 1), (3, 5, 1)], (1, 4, 1)),  # 2x up: above the launch
+    ([(1, 3, 1), (3, 5, 1)], (2, 5, 1)),  # 2x up: above the middle cell
+])
+def test_slope2_lay_rejects_block_cutting_a_step(path, notch):
+    rec = Recorder()
+    region = Region(0, 0, 0, 7, 8, 7)
+    solid = JournaledSet(rec, name="solid")
+    dust_owner = JournaledDict(rec)
+    region[notch] = STONE
+    solid.add(notch)
+    with pytest.raises(LayConflict):
+        _lay_redstone_path(region, solid, dust_owner, path, "a")
 
 
 # --- greedy router ---------------------------------------------------------------------------
