@@ -625,9 +625,10 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
 
 
 def _long_macros(gates: list[Component]) -> list[int]:
-    """Macros wide enough to act as walls: at least half the widest. Shorter ones behave like big gates."""
-    widths = {i: c.footprint.width for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM}
-    return [i for i, w in widths.items() if w * 2 >= max(widths.values())]
+    """Macros that act as walls: at least half the widest, and much wider than deep. Others behave like big gates."""
+    macros = [(i, c.footprint) for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM]
+    widest = max((fp.width for _, fp in macros), default=0)
+    return [i for i, fp in macros if fp.width * 2 >= widest and fp.width >= 2 * fp.depth]
 
 
 def _turn_macro(netlist: _Netlist, gates: list[Component], i: int) -> None:
