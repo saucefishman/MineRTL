@@ -497,7 +497,7 @@ def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
 
 
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
-                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 1, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
+                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
     """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances)."""
     macros: dict[str, Macro] = {}
@@ -513,8 +513,9 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
         tile = build(tile_name, sub, ports, len(cls.cells))
         if on_class is not None:
             on_class(cls, tile)
-        for start in range(0, len(cls.instances), row_tiles):
-            row = replace(cls, instances=cls.instances[start:start + row_tiles])
+        per_array = row_tiles or len(cls.instances)
+        for start in range(0, len(cls.instances), per_array):
+            row = replace(cls, instances=cls.instances[start:start + per_array])
             name = f"array_{len(macros)}"
             macro, instance = build_array(name, tile, row, ports)
             macros[name] = macro

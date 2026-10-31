@@ -172,8 +172,8 @@ def main():
                         help="--macros: nets above this fanout are shared between instances, not grouped into them")
     parser.add_argument("--macro-min-cells", type=int, default=8,
                         help="--macros: smallest repeated subcircuit worth a macro")
-    parser.add_argument("--macro-row-tiles", type=int, default=1,
-                        help="--macros: instances per array, sharing lanes; the placer arranges the arrays")
+    parser.add_argument("--macro-row-tiles", type=int, default=0,
+                        help="--macros: instances per array, sharing lanes; 0 = all instances of a pattern in one array")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")
     args = parser.parse_args()

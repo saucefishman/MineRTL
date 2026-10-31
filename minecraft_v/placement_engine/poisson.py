@@ -624,6 +624,64 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
     pos_all[outputs, 2] = output_z
 
 
+def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component]) -> bool:
+    """Flip each connected group of gates across a macro, in place, to the side holding most of its pins.
+
+    A long macro is a wall: wire can't reach a pin on its far face without climbing over it. Wirelength doesn't
+    say which side gates land on, because the macro's charge just pushes them out either way. Groups move whole,
+    so that no net inside one ends up crossing the wall. Returns whether any moved.
+    """
+    n = netlist.n_gates
+    macros = [i for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM]
+    if not macros or len(macros) == n:
+        return False
+    is_macro = [i in set(macros) for i in range(n)]
+    is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps]
+    net_pins: dict[int, list[int]] = defaultdict(list)
+    for i, net in enumerate(netlist.pin_net.tolist()):
+        net_pins[net].append(i)
+    group = list(range(n))
+
+    def find(a: int) -> int:
+        while group[a] != a:
+            group[a] = group[group[a]]
+            a = group[a]
+        return a
+
+    for pins in net_pins.values():
+        members = [c for c in (int(netlist.pin_comp[p]) for p in pins) if c < n and not is_macro[c]]
+        for other in members[1:]:
+            group[find(other)] = find(members[0])
+    groups: dict[int, list[int]] = defaultdict(list)
+    for g in range(n):
+        if not is_macro[g]:
+            groups[find(g)].append(g)
+    moved = False
+    for m in macros:
+        north, south = pos[m, 2], pos[m, 2] + sizes[m, 2]
+        south_pins = north + gates[m].footprint.depth - 1  # sizes are padded; pins are on the real face
+        pull: dict[int, int] = defaultdict(int)
+        for pins in net_pins.values():
+            comps = [int(netlist.pin_comp[p]) for p in pins]
+            roots = {find(c) for c in comps if c < n and not is_macro[c]}
+            for root in roots:
+                for p, c in zip(pins, comps):
+                    if c == m:
+                        z = pos[m, 2] + netlist.pin_offset[p, 2]
+                        pull[root] += 1 if z >= south_pins else -1 if z <= north else 0
+                    elif c >= n:
+                        pull[root] += 1 if is_input[c] else -1
+        for root, members in groups.items():
+            front = np.array([pos[g, 2] + sizes[g, 2] / 2 < (north + south) / 2 for g in members])
+            want_north = pull[root] < 0
+            for g, at_north in zip(members, front.tolist()):
+                if at_north != want_north:
+                    pos[g, 2] = (south + (north - pos[g, 2] - sizes[g, 2]) if at_north
+                                 else north - (pos[g, 2] - south) - sizes[g, 2])
+                    moved = True
+    return moved
+
+
 def _poisson_placement(
         components: list[Component],
         nets: list[NetConnection],
@@ -664,6 +722,11 @@ def _poisson_placement(
         pos[:, 0] -= pos[:, 0].min()
         for axis in (0, 2, 1):
             _compact(pos, sizes, axis)
+        if _pin_side_pass(netlist, pos, sizes, gates):
+            pos = _legalize(pos, sizes, flat)
+            pos[:, 0] -= pos[:, 0].min()
+            for axis in (0, 2, 1):
+                _compact(pos, sizes, axis)
         print(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:
