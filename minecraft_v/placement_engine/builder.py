@@ -51,6 +51,7 @@ REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
 BARREL = BlockState("minecraft:barrel")
 _WALL_VIA_LIFT = 4  # above a macro: clear of its keepout, with room for the wire's support
+_VIA_TRIES, _VIA_STEP = 8, 3  # search around a blocked waypoint
 _MACRO_SEEDS = 4  # placement seeds to try before giving up on a macro
 
 
@@ -759,7 +760,8 @@ class _GreedyRouter:
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
         sinks = sorted(job.sinks, key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
         reached_vias: list[Pos] = []
-        for dst in [*job.via, *sinks]:
+        vias = [v for v in (self._open_via(v, job) for v in job.via) if v is not None]
+        for dst in [*vias, *sinks]:
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
             start = job.src
             far_via = next((v for v in reached_vias if (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
@@ -772,9 +774,6 @@ class _GreedyRouter:
             while True:
                 mark = len(rec.journals[job.key])
                 try:
-                    if dst in job.via and not self._via_open(dst, job):
-                        path = None
-                        break
                     path = _find_wire_path(
                         ws, self.solid, self.dust_owner,
                         start, dst, job.net_id,
@@ -801,9 +800,7 @@ class _GreedyRouter:
                     rollback(rec, job.key, mark)
                     blocked.add(cell)
             self.failed_goal.pop(job.key, None)
-            if path is None:  # a waypoint someone else's wire took: this net routes without it
-                continue
-            if dst in job.via:
+            if dst in vias:
                 reached_vias.append(dst)
             paths.append(path)
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
@@ -819,6 +816,17 @@ class _GreedyRouter:
         cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
         return all(c not in self.footprint_blocked and self.dust_owner.get(c) in (None, job.net_id)
                    and _is_air(self.region[c]) for c in cells)
+
+    def _open_via(self, via: Pos, job: _RouteJob) -> Pos | None:
+        """The free cell nearest a wanted waypoint, trying along X and Z and then a layer up. None if there's none."""
+        x, y, z = via
+        for dy in range(0, 3):
+            for step in range(_VIA_TRIES):
+                for dx, dz in ((step, 0), (-step, 0), (0, step), (0, -step), (step, step), (-step, -step)):
+                    cell = (x + _VIA_STEP * dx, y + 2 * dy, z + _VIA_STEP * dz)
+                    if self._via_open(cell, job):
+                        return cell
+        return None
 
     def route_job_retrying(self, job: _RouteJob) -> None:
         near_terminal = {(x + dx, y + dy, z + dz) for x, y, z in job.terminals
@@ -949,7 +957,8 @@ def _route_all_nets(
     """
     inverted_cells = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals, terminal_approach)
-    walls = [p for p in placed if p.component.type == ComponentType.CUSTOM]
+    walls = [p for p in placed if p.component.type == ComponentType.CUSTOM
+             and p.component.footprint.width >= 2 * p.component.footprint.depth]  # others are easy to go around
     router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                            frozenset(pin_terminal.values()))
     jobs = [
