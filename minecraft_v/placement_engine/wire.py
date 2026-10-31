@@ -306,6 +306,8 @@ def _lay_redstone_path(
                 raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]}")
 
     for i, cell in enumerate(cells):
+        if i > 0:  # before the move handlers: this cell may also start a 2x slope, tower or powered drop
+            _check_slope_notch(workspace, solid, cells[i - 1], cell)
         if i in slope2_bottom:
             if i > 0:
                 _check_slope_notch(workspace, solid, cells[i - 1], cell)
@@ -316,7 +318,7 @@ def _lay_redstone_path(
             _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, top, BlockState("minecraft:sandstone"))
             continue
 
-        if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):
+        if (i in tower_top or i in p4_top) and i not in tower_bottom and i not in p4_bottom:
             continue  # already placed by their respective move handler
 
         if i in tower_bottom:
@@ -327,8 +329,6 @@ def _lay_redstone_path(
                                      inverted_cells, goal, terminal_positions, path_cells)
 
         else:
-            if i > 0:
-                _check_slope_notch(workspace, solid, cells[i - 1], cell)
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
 
 
@@ -342,6 +342,11 @@ def _check_slope_notch(
     checks that against the world, but an earlier part of the same path (outside its local
     snapshot) may have put a support block there since; the link would silently break."""
     (ax, ay, az), (bx, by, bz) = prev, cell
+    if (bx - ax, bz - az) in _TOWER_2BLOCK and abs(by - ay) == 2:  # a 2x slope is two of them
+        mid = ((ax + bx) // 2, (ay + by) // 2, (az + bz) // 2)
+        _check_slope_notch(workspace, solid, prev, mid)
+        _check_slope_notch(workspace, solid, mid, cell)
+        return
     if (bx - ax, bz - az) not in _HORIZ_DIRS or abs(by - ay) != 1:
         return
     notch = (bx, by + 1, bz) if by < ay else (ax, ay + 1, az)

@@ -1,5 +1,5 @@
 import pytest
-from litemapy import Region
+from litemapy import BlockState, Region
 
 from minecraft_v.placement_engine.builder import _GreedyRouter, _KeepoutMap, _RouteJob, _terminal_halo
 from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTERVAL
@@ -176,3 +176,71 @@ def test_router_breaks_long_descent_for_repeaters(drop, horiz):
                     terminals={src, sink})
     assert router.run([job], "[test]") == []
     assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
+
+
+def test_slope_notch_checked_when_cell_starts_a_longer_move():
+    """A cell that a 1-step slope lands on can also start a 2x slope; the notch check still applies."""
+    workspace = Region(0, 0, 0, 12, 16, 12)
+    notch = (2, 11, 2)
+    workspace[notch] = STONE
+    path = [(1, 11, 2), (2, 10, 2), (4, 8, 2)]
+    with pytest.raises(LayConflict, match="would be cut"):
+        _lay_redstone_path(workspace, {notch}, {}, path, "n")
+
+
+def test_bank_leads_only_for_the_bank_pins_and_channel():
+    from minecraft_v.placement_engine.builder import _bank_pin_leads
+    from minecraft_v.placement_engine.layout import _Placed
+    from minecraft_v.placement_engine.ir import (
+        Component, ComponentType, Footprint, NetConnection, NetEndpoint,
+    )
+    bank = _Placed(component=Component(id="bank", type=ComponentType.CUSTOM, pins=[], footprint=Footprint(width=100, height=20, depth=50),
+                                       metadata={"bank": True}), origin=(0, 0, 100))
+    terminals = {("s", "y"): (200, 5, 120), ("b", "east"): (100, 4, 120), ("g", "a"): (150, 4, 120),
+                 ("b", "back"): (30, 6, 99)}
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="s", pin_name="y"), sinks=[
+        NetEndpoint(component_id=c, pin_name=p) for c, p in (("b", "east"), ("g", "a"), ("b", "back"))])
+    leads = _bank_pin_leads(net, terminals, [bank], [bank])
+    assert len(leads) == 2
+    east, back = leads
+    assert east[1:] == (4, 120) and east[0] > 100
+    assert back[0] > 100 and back[1] == 6 and back[2] < 99  # the channel's mouth, away from the face
+
+
+def test_net_ticks_count_the_deepest_branch_not_every_repeater():
+    from minecraft_v.placement_engine.builder import _net_wire_ticks
+    from minecraft_v.placement_engine.ir import (
+        Component, ComponentList, ComponentType, CURRENT_SCHEMA_VERSION, NetConnection, NetEndpoint,
+    )
+    ws = Region(0, 0, 0, 21, 3, 3)
+    dust = BlockState("minecraft:redstone_wire")
+    rep = BlockState("minecraft:repeater", facing="west", delay="1")
+    owner = {}
+    for x in range(21):  # a line from x=10 both ways, 2 repeaters on each arm
+        ws[x, 0, 1] = rep if x in (2, 6, 14, 18) else dust
+        owner[(x, 0, 1)] = "n"
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="s", pin_name="y"),
+                        sinks=[NetEndpoint(component_id="t", pin_name="a")])
+    comp = ComponentList.model_construct(schema_version=CURRENT_SCHEMA_VERSION, components=[], nets=[net])
+    assert _net_wire_ticks(comp, owner, ws, {("s", "y"): (10, 0, 1)}) == {"n": 2}
+
+
+def test_tower_starting_where_a_powered_drop_lands_is_laid():
+    ws = Region(0, 0, 0, 14, 14, 14)
+    solid, owner = set(), {}
+    _lay_redstone_path(ws, solid, owner, [(6, 8, 6), (6, 4, 6), (6, 8, 8)], "n")
+    assert "repeater" in ws[6, 4, 7].id  # the tower's repeater
+    assert (6, 7, 8) in owner  # and its column
+
+
+def test_powered_drop_from_a_tower_top_cant_land_in_its_own_column():
+    with pytest.raises(ValueError):
+        _lay_redstone_path(Region(0, 0, 0, 14, 14, 14), set(), {}, [(6, 4, 6), (6, 8, 8), (6, 4, 8)], "n")
+
+
+def test_slope_notch_checked_on_both_steps_of_a_2x_slope():
+    ws = Region(0, 0, 0, 14, 14, 14)
+    ws[6, 7, 7] = STONE
+    with pytest.raises(LayConflict):
+        _check_slope_notch(ws, {(6, 7, 7)}, (6, 7, 6), (6, 5, 8))
+

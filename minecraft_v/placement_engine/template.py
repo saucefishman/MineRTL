@@ -41,6 +41,35 @@ def _mirror_block_x(block: BlockState) -> BlockState:
     return block.with_properties(**changed) if changed else block
 
 
+_OPPOSITE_DIR = {"north": "south", "south": "north", "east": "west", "west": "east"}
+
+
+def _rotate_block_180(block: BlockState) -> BlockState:
+    """``block`` turned half way about Y: every horizontal ``facing`` and wire side swaps with its opposite."""
+    props = dict(block.properties())
+    changed = {}
+    if props.get("facing") in _OPPOSITE_DIR:
+        changed["facing"] = _OPPOSITE_DIR[props["facing"]]
+    for a, b in (("east", "west"), ("north", "south")):
+        if a in props and b in props:
+            changed[a], changed[b] = props[b], props[a]
+    return block.with_properties(**changed) if changed else block
+
+
+def _rotate_component_180(component: Component) -> Component:
+    """Copy of ``component`` turned half way about Y within its footprint; ``metadata['rotate_180']`` tells the stamp."""
+    w, d = component.footprint.width, component.footprint.depth
+    pins = [
+        pin.model_copy(update={
+            "offset": (w - 1 - pin.offset[0], pin.offset[1], d - 1 - pin.offset[2]),
+            "side": CardinalDirection(_OPPOSITE_DIR[pin.side.value]) if pin.side is not None else None,
+        })
+        for pin in component.pins
+    ]
+    metadata = {**component.metadata, "rotate_180": not component.metadata.get("rotate_180", False)}
+    return component.model_copy(update={"pins": pins, "metadata": metadata})
+
+
 def _mirror_component_x(component: Component) -> Component:
     """Copy of ``component`` mirrored in X within its footprint; mirroring twice restores it.
 

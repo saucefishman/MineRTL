@@ -24,7 +24,7 @@ from scipy.sparse.linalg import cg
 
 from minecraft_v.placement_engine.ir import Component, ComponentType, NetConnection
 from minecraft_v.placement_engine.layout import _BIT_INDEX_RE, _Placed, _assign_io_x_positions, _io_base_name
-from minecraft_v.placement_engine.template import _mirror_component_x
+from minecraft_v.placement_engine.template import _mirror_component_x, _rotate_component_180
 
 _WEIGHTS = np.array([1.0, 2.0, 1.0])  # wirelength per block in X, Y, Z: Y needs slopes and towers
 _BINS_PER_BOX = 2            # bins per mean box size along each axis
@@ -46,6 +46,7 @@ _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENS
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+_LANE_PITCH = 2              # Y between macro entry pins: dust, then the floor of the next lane
 
 
 class _Netlist:
@@ -109,6 +110,7 @@ class _Field:
 
     def __init__(self, sizes: np.ndarray, dims: np.ndarray):
         self.dims = dims
+        self.fixed: np.ndarray | None = None  # fraction of each bin taken by fixed boxes
         mean = sizes.mean(axis=0)
         self.shape = tuple(int(max(1, min(128, round(_BINS_PER_BOX * dims[a] / mean[a])))) for a in range(3))
         self.h = dims / np.array(self.shape)
@@ -120,6 +122,16 @@ class _Field:
         eig = [(2 - 2 * np.cos(np.pi * np.arange(m) / m)) / self.h[a] ** 2 for a, m in enumerate(self.shape)]
         self.laplace = eig[0][:, None, None] + eig[1][None, :, None] + eig[2][None, None, :]
         self.laplace[0, 0, 0] = 1.0
+
+    def fix_box(self, lo: np.ndarray, size: np.ndarray) -> None:
+        """A solid box that never moves: it repels gates and takes up its bins."""
+        axes = []
+        for a in range(3):
+            edges = np.arange(self.shape[a]) * self.h[a]
+            axes.append(np.clip(np.minimum(edges + self.h[a], lo[a] + size[a]) - np.maximum(edges, lo[a]), 0.0, None)
+                        / self.h[a])
+        taken = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
+        self.fixed = taken if self.fixed is None else np.minimum(self.fixed + taken, 1.0)
 
     def _overlaps(self, pos: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray]]:
         """Per axis: the bins each box touches and its overlap length with them."""
@@ -144,8 +156,11 @@ class _Field:
                  + by[:, None, :, None] * self.shape[2] + bz[:, None, None, :])
         volume = float(np.prod(self.h))
         rho = np.bincount(index.ravel(), weight.ravel(), int(np.prod(self.shape))).reshape(self.shape) / volume
-        mean = self.charge.sum() / float(np.prod(self.dims))
-        overflow = float(np.maximum(rho - max(mean, _TARGET_DENSITY), 0.0).sum() * volume / self.charge.sum())
+        free = 1.0 if self.fixed is None else 1.0 - self.fixed
+        mean = self.charge.sum() / max(float((free * volume).sum() if self.fixed is not None else np.prod(self.dims)), 1.0)
+        overflow = float(np.maximum(rho - max(mean, _TARGET_DENSITY) * free, 0.0).sum() * volume / self.charge.sum())
+        if self.fixed is not None:
+            rho = rho + self.fixed
 
         coeff = fft.dctn(rho - rho.mean(), type=2, norm="ortho") / self.laplace
         coeff[0, 0, 0] = 0.0
@@ -193,7 +208,10 @@ class _IoPlacer:
 
     def __init__(self, inputs: list[Component], outputs: list[Component], nets: list[NetConnection],
                  gutter: int, routing_gutter: int, y_gap: int, flat: bool,
-                 output_x_order: dict[str, float] | None):
+                 output_x_order: dict[str, float] | None, column_pins: int | None = None, lane_pins: bool = True):
+        self.column_pins = column_pins  # share columns between signals, this many pins each (macro faces)
+        self.lane_pins = lane_pins      # inputs get a Y each, for lanes along the face
+        self.lane_height: float | None = None  # height a bank's lane face should fit in
         self.inputs, self.outputs, self.nets = inputs, outputs, nets
         self.gutter, self.routing_gutter, self.y_gap = gutter, routing_gutter, y_gap
         self.flat, self.output_x_order = flat, output_x_order or {}
@@ -211,9 +229,26 @@ class _IoPlacer:
             vals = [pins[e][axis] for e in self.neighbours[cid] if e in pins]
             return float(np.median(vals)) if vals else None
 
+        if self.column_pins is not None and self.lane_pins:
+            # Macro pins: every one on a face gets its own Y, so straight lanes can run along it (macro.build_array).
+            # A bank's lane face (macro.build_bank) shares Ys to fit the gates' height; a column's pins stay clear of
+            # each other's bridges.
+            per_y = 1
+            if self.lane_height and any(c.metadata.get("lane_pair") for c in comps):
+                per_y = max(1, math.ceil(_LANE_PITCH * len(comps) / self.lane_height))
+            n_columns = max(2 * per_y, math.ceil(len(comps) / self.column_pins))
+            xs = _spread([centre] * n_columns, self.gutter + 1)
+            lift = max(0, -xs[0])
+            by_y = sorted((c.id for c in comps), key=lambda i: (wanted(i, 1) or 0.0, i))
+            return {i: (xs[k % n_columns] + lift, _LANE_PITCH * (k // per_y)) for k, i in enumerate(by_y)}
         groups: dict[str, list[str]] = defaultdict(list)
-        for c in comps:
-            groups[_io_base_name(c.id)].append(c.id)
+        if self.column_pins is None:
+            for c in comps:
+                groups[_io_base_name(c.id)].append(c.id)
+        else:
+            near = sorted((c.id for c in comps), key=lambda i: (wanted(i, 0) or centre, i))
+            for k, i in enumerate(near):
+                groups[f"column{k // self.column_pins}"].append(i)
         keyed = []
         for base, ids in groups.items():
             xs = [v for v in (wanted(i, 0) for i in ids) if v is not None]
@@ -226,7 +261,8 @@ class _IoPlacer:
         out = {}
         for (_, base, _), x in zip(keyed, columns):
             ys = {i: wanted(i, 1) or 0.0 for i in groups[base]}
-            order = sorted(ys, key=lambda i: (_bit_index(i), i))  # Y rises with bit index
+            order = sorted(ys, key=(lambda i: (_bit_index(i), i)) if self.column_pins is None  # Y rises with bit index
+                           else (lambda i: (ys[i], i)))
             spread = _spread([ys[i] for i in order], self.y_gap)
             lift = max(0, -spread[0])
             out.update({i: (x, y + lift) for i, y in zip(order, spread)})
@@ -246,7 +282,9 @@ class _IoPlacer:
                 for c, p in zip(gates, pos) for pin in c.pins}
         centre = width / 2
         out = {}
-        for comps, z, order in ((self.inputs, input_z, {}), (self.outputs, output_z, self.output_x_order)):
+        north = [c for c in self.inputs if c.metadata.get("north_face")]
+        south = [c for c in self.inputs if not c.metadata.get("north_face")]
+        for comps, z, order in ((south, input_z, {}), (self.outputs + north, output_z, self.output_x_order)):
             out.update({i: (x, y, z) for i, (x, y) in self._side(comps, pins, centre, order).items()})
         return out
 
@@ -276,12 +314,24 @@ def _quadratic_start(netlist: _Netlist, pos: np.ndarray) -> None:
 
 
 def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _IoPlacer, gates: list[Component],
-                  seed: int) -> np.ndarray:
-    """Electrostatic global placement; returns the origins of the padded boxes, inside the domain."""
+                  seed: int, fixed: dict[int, np.ndarray] | None = None,
+                  fixed_box: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
+    """Electrostatic global placement; returns the origins of the padded boxes, inside the domain.
+
+    fixed: components staying at these origins, whose pins still pull on the nets. fixed_box: where they repel gates.
+    """
     n, m = netlist.n_gates, len(netlist.comps)
-    field = _Field(sizes, dims)
+    fixed = fixed or {}
+    free = np.array([i for i in range(n) if i not in fixed], dtype=np.int64)
+    field = _Field(sizes[free], dims)
+    if fixed_box is not None:
+        field.fix_box(*fixed_box)
     pad = sizes / 2
     lo, hi = pad, np.maximum(dims - pad, pad)
+
+    def pin_fixed(p: np.ndarray) -> None:
+        for i, origin in fixed.items():
+            p[i] = origin + pad[i]
 
     def refresh_io(pos: np.ndarray) -> None:
         coords = io.place(gates, np.maximum(pos[:n] - pad, 0), dims[0], dims[2])
@@ -301,6 +351,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     start = origins(pos)
     _quadratic_start(netlist, start)
     pos[:n] = np.clip(start[:n] + pad + rng.normal(0.0, 0.01, (n, 3)) * dims, lo, hi)
+    pin_fixed(pos)
     refresh_io(pos)
 
     v = pos.copy()
@@ -316,24 +367,24 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     max_move = _MAX_STEP_BINS * field.h
     t0 = time.monotonic()
     for it in range(_MAX_ITERS):
-        force, overflow = field.forces(v[:n])
+        force, overflow = field.forces(v[free])
         gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
-        wire = netlist.wa_gradient(origins(v), gamma)[:n]
+        wire = netlist.wa_gradient(origins(v), gamma)[free]
         if lam is None:
             lam = np.abs(wire).sum() / max(np.abs(force).sum(), 1e-9)
-        g = (wire - lam * force) / np.maximum(1.0, netlist.degree[:n, None] + lam * field.charge[:, None])
+        g = (wire - lam * force) / np.maximum(1.0, netlist.degree[free, None] + lam * field.charge[:, None])
         if prev_g is not None:
-            dv, dg = v[:n] - prev_v, g - prev_g
+            dv, dg = v[free] - prev_v, g - prev_g
             step = np.linalg.norm(dv) / max(np.linalg.norm(dg), 1e-12)
-        prev_v, prev_g = v[:n].copy(), g
+        prev_v, prev_g = v[free].copy(), g
         move = step * g
         worst = (np.abs(move) / max_move).max()
         if worst > 1:
             move = move / worst
-        new = np.clip(v[:n] - move, lo, hi)
+        new = np.clip(v[free] - move, lo[free], hi[free])
         a_next = (1 + math.sqrt(1 + 4 * a * a)) / 2
-        v[:n] = np.clip(new + (a - 1) / a_next * (new - u[:n]), lo, hi)
-        u[:n] = new
+        v[free] = np.clip(new + (a - 1) / a_next * (new - u[free]), lo[free], hi[free])
+        u[free] = new
         a = a_next
 
         hpwl = netlist.hpwl(origins(u))
@@ -509,18 +560,28 @@ class _NetCost:
         return out[0], out[1], out[2]
 
 
-def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: bool, deadline: float) -> None:
-    """Greedy detailed placement: move each gate towards its optimal region if that lowers HPWL."""
+def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: bool, deadline: float,
+            fixed_box: tuple[np.ndarray, np.ndarray] | None = None) -> None:
+    """Greedy detailed placement: move each gate towards its optimal region if that lowers HPWL.
+
+    fixed_box: banks stay put, and the gates stay out of this box around them.
+    """
     n = netlist.n_gates
-    occ = _Occupancy(sizes)
+    pinned = {i for i in range(n) if netlist.comps[i].metadata.get("bank")} if fixed_box is not None else set()
+    occ = _Occupancy(sizes if fixed_box is None else np.vstack([sizes, fixed_box[1]]))
+    if fixed_box is not None:
+        occ.add(n, tuple(int(v) for v in fixed_box[0]))
     for i in range(n):
-        occ.add(i, tuple(int(v) for v in pos_all[i]))
+        if i not in pinned:
+            occ.add(i, tuple(int(v) for v in pos_all[i]))
     cost = _NetCost(netlist, pos_all)
     for _ in range(_REFINE_PASSES):
         moved = 0
         for i in range(n):
             if time.monotonic() >= deadline:
                 return
+            if i in pinned or (fixed_box is not None and netlist.comps[i].type == ComponentType.CUSTOM):
+                continue
             target = cost.median_target(i)
             target = (target[0], max(0, target[1]) if not flat else int(pos_all[i][1]), max(0, target[2]))
             now = tuple(int(v) for v in pos_all[i])
@@ -547,7 +608,7 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
     out = list(gates)
     for i, c in enumerate(gates):
         w = c.footprint.width
-        if w < 2:
+        if w < 2 or c.metadata.get("bank"):
             continue
         before = cost.of(i)
         saved = {ni: cost.net_pins[ni] for ni in cost.comp_nets[i]}
@@ -591,7 +652,7 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
     def in_way(x: float) -> np.ndarray:
         return flat | ((x0 - _IO_COLUMN_CLEAR <= x) & (x <= x1 - 1 + _IO_COLUMN_CLEAR))
 
-    is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps[n:]]
+    is_input = [c.type == ComponentType.INPUT_PIN and not c.metadata.get("north_face") for c in netlist.comps[n:]]
     inputs = [i + n for i, flag in enumerate(is_input) if flag]
     outputs = [i + n for i, flag in enumerate(is_input) if not flag]
 
@@ -609,6 +670,166 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
     pos_all[outputs, 2] = output_z
 
 
+def _long_macros(gates: list[Component]) -> list[int]:
+    """Macros that act as walls: at least half the widest, and much wider than deep. Others behave like big gates."""
+    macros = [(i, c.footprint) for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM]
+    widest = max((fp.width for _, fp in macros), default=0)
+    return [i for i, fp in macros if fp.width * 2 >= widest and fp.width >= 2 * fp.depth
+            and not gates[i].metadata.get("bank")]
+
+
+_BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
+
+
+def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Component], banks: list[int], io: _IoPlacer,
+                        seed: int, channel: int, east_room: float
+                        ) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray]]:
+    """Banks stacked at the origin as fixed charge and pins, with a channel on their pin faces; gates flow around them.
+
+    The domain is the box's footprint plus east_room in X, and as tall as the gates need.
+    """
+    width = max(gates[i].footprint.width for i in banks)
+    depth = max(gates[i].footprint.depth for i in banks)
+    fixed: dict[int, np.ndarray] = {}
+    y = 0.0
+    for i in banks:
+        fixed[i] = np.array([0.0, y, float(channel)])
+        y += gates[i].footprint.height + _BANK_Y_GAP
+    box = (np.zeros(3), np.array([width + channel, y, depth + 2.0 * channel]))
+    free = [i for i in range(len(gates)) if i not in fixed]
+    volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
+    dims = np.array([width + channel + east_room, 0.0, depth + 2.0 * channel])
+    dims[1] = max(volume / (dims[0] * dims[2]), y + float(sizes[free, 1].max()))
+    print(f"[place] poisson: around banks, domain {tuple(int(v) for v in dims)}")
+    pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, fixed, box))
+    occ = _Occupancy(np.vstack([sizes, box[1]]))
+    occ.add(len(gates), (0, 0, 0))
+    for i in fixed:
+        pos[i] = fixed[i]
+    for i in sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2])):
+        target = tuple(int(v) for v in pos[i])
+        # A macro has pins on its faces: not up against the output row.
+        low_z = channel if gates[i].type == ComponentType.CUSTOM else 0
+        spot = occ.nearest_free(i, (max(target[0], 0), max(target[1], 0), max(target[2], low_z)), False, 20000)
+        if spot is None:
+            raise ValueError(f"no room for {gates[i].id} around the banks")
+        occ.add(i, spot)
+        pos[i] = spot
+    return pos, sizes, box
+
+
+def _turn_macro(netlist: _Netlist, gates: list[Component], i: int) -> None:
+    """Turn macro i half way, in place, keeping the netlist's pin offsets in step."""
+    c = gates[i]
+    gates[i] = netlist.comps[i] = _rotate_component_180(c)
+    at = netlist.pin_comp == i
+    netlist.pin_offset[at, 0] = c.footprint.width - 1 - netlist.pin_offset[at, 0]
+    netlist.pin_offset[at, 2] = c.footprint.depth - 1 - netlist.pin_offset[at, 2]
+
+
+def _turn_short_macros(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component]) -> None:
+    """Turn each short macro half way, in place, if that leaves fewer connections on the far side of it."""
+    n = netlist.n_gates
+    long = set(_long_macros(gates))
+    is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps]
+    net_pins: dict[int, list[int]] = defaultdict(list)
+    for p, net in enumerate(netlist.pin_net.tolist()):
+        net_pins[net].append(p)
+    for i, c in enumerate(gates):
+        if c.type != ComponentType.CUSTOM or i in long or c.metadata.get("bank"):
+            continue
+        middle = pos[i, 2] + c.footprint.depth / 2
+        crossed = kept = 0
+        for p in np.flatnonzero(netlist.pin_comp == i).tolist():
+            pin_south = netlist.pin_offset[p, 2] > c.footprint.depth / 2
+            for q in net_pins[int(netlist.pin_net[p])]:
+                other = int(netlist.pin_comp[q])
+                if other == i:
+                    continue
+                other_south = is_input[other] if other >= n else pos[other, 2] + netlist.pin_offset[q, 2] > middle
+                if pin_south == other_south:
+                    kept += 1
+                else:
+                    crossed += 1
+        if crossed > kept:
+            _turn_macro(netlist, gates, i)
+
+
+def _face_macro_rows(netlist: _Netlist, pos: np.ndarray, gates: list[Component]) -> None:
+    """Turn every second long macro half way, in place, so rows front to back face each other in pairs.
+
+    Two rows with their pins the same way put the back of one against the pins of the other; facing, they share
+    one channel for the gates that drive them.
+    """
+    rows = sorted(_long_macros(gates), key=lambda i: pos[i, 2])
+    for i in rows[1::2]:
+        _turn_macro(netlist, gates, i)
+
+
+def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component],
+                   centre: bool = True) -> bool:
+    """Move each connected group of gates in front of a macro's face holding most of its pins, in place.
+
+    A long macro is a wall: wire can't reach a pin on its far face without climbing over it. Wirelength doesn't
+    say which side gates land on, because the macro's charge just pushes them out either way. Groups move whole and
+    centred on the macro, so no net inside one crosses the wall and lane taps are near. Returns whether any moved.
+    """
+    n = netlist.n_gates
+    macros = _long_macros(gates)
+    if not macros or len(macros) == n:
+        return False
+    is_macro = [i in set(macros) for i in range(n)]
+    is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps]
+    net_pins: dict[int, list[int]] = defaultdict(list)
+    for i, net in enumerate(netlist.pin_net.tolist()):
+        net_pins[net].append(i)
+    group = list(range(n))
+
+    def find(a: int) -> int:
+        while group[a] != a:
+            group[a] = group[group[a]]
+            a = group[a]
+        return a
+
+    for pins in net_pins.values():
+        members = [c for c in (int(netlist.pin_comp[p]) for p in pins) if c < n and not is_macro[c]]
+        for other in members[1:]:
+            group[find(other)] = find(members[0])
+    groups: dict[int, list[int]] = defaultdict(list)
+    for g in range(n):
+        if not is_macro[g]:
+            groups[find(g)].append(g)
+    moved = False
+    for m in macros:
+        north, south = pos[m, 2], pos[m, 2] + sizes[m, 2]
+        south_pins = north + gates[m].footprint.depth - 1  # sizes are padded; pins are on the real face
+        pull: dict[int, int] = defaultdict(int)
+        for pins in net_pins.values():
+            comps = [int(netlist.pin_comp[p]) for p in pins]
+            roots = {find(c) for c in comps if c < n and not is_macro[c]}
+            for root in roots:
+                for p, c in zip(pins, comps):
+                    if c == m:
+                        z = pos[m, 2] + netlist.pin_offset[p, 2]
+                        pull[root] += 1 if z >= south_pins else -1 if z <= north else 0
+                    elif c >= n:
+                        pull[root] += 1 if is_input[c] else -1
+        for root, members in groups.items():
+            to_south = pull[root] >= 0  # a group with no preference goes with the inputs
+            # Rigidly, so the group keeps the arrangement poisson gave it.
+            lo = pos[members, 2].min()
+            hi = (pos[members, 2] + sizes[members, 2]).max()
+            shift_z = south - lo if to_south else north - hi
+            if (to_south and lo >= south) or (not to_south and hi <= north):
+                shift_z = 0.0
+            pos[members, 2] += shift_z
+            if centre:
+                pos[members, 0] += pos[m, 0] + sizes[m, 0] / 2 - (pos[members, 0] + sizes[members, 0] / 2).mean()
+            moved = True
+    pos[:, 0] -= min(0.0, pos[:, 0].min())
+    return moved
+
+
 def _poisson_placement(
         components: list[Component],
         nets: list[NetConnection],
@@ -621,6 +842,10 @@ def _poisson_placement(
         seed: int = 0,
         flat: bool = False,
         output_x_order: dict[str, float] | None = None,
+        io_column_pins: int | None = None,
+        macro_channel: int = 16,
+        macro_east_room: int = 20,
+        io_lane_pins: bool = True,
 ) -> list[_Placed]:
     """Place gates electrostatically; see the module docstring."""
     t0 = time.monotonic()
@@ -632,27 +857,54 @@ def _poisson_placement(
     routing_gutter = loose[1] if routing_gutter is None else routing_gutter
 
     netlist = _Netlist(gates, inputs + outputs, nets)
-    io = _IoPlacer(inputs, outputs, nets, gutter, routing_gutter, 1 + y_spacing, flat, output_x_order)
+    io = _IoPlacer(inputs, outputs, nets, gutter, routing_gutter, 1 + y_spacing, flat, output_x_order, io_column_pins, io_lane_pins)
     if gates:
         sizes = np.array([[c.footprint.width + gutter,
                            1 if flat else c.footprint.height + y_spacing,
                            c.footprint.depth + routing_gutter] for c in gates], dtype=float)
+        # Long macros are placed for real at legalization: in global placement they'd only inflate the charge grid.
+        real_sizes = sizes
+        sizes = sizes.copy()
+        walls = _long_macros(gates)
+        real_sizes[walls, 2] += macro_channel  # in the box, so compaction can't close it
+        banks = [i for i, c in enumerate(gates) if c.metadata.get("bank")]
+        walls = walls + banks
+        if walls and len(walls) < len(gates):
+            sizes[walls] = np.delete(sizes, walls, axis=0).max(axis=0)
+        fixed_box = None
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
         height = 1.0 if flat else float(max(sizes[:, 1].max(), volume ** (1 / 3)))
         side = max(math.sqrt(volume / height), float(sizes[:, [0, 2]].max()))
         dims = np.array([side, height, side])
+        io.lane_height = height
 
-        placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
-        pos = np.rint(placed_pos)
-        pos = _legalize(pos, sizes, flat)
-        pos[:, 0] -= pos[:, 0].min()
-        for axis in (0, 2, 1):
-            _compact(pos, sizes, axis)
+        if banks:
+            pos, sizes, fixed_box = _place_around_banks(netlist, real_sizes, gates, banks, io, seed, macro_channel,
+                                                        float(macro_east_room))
+        else:
+            placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
+            pos = np.rint(placed_pos)
+            sizes = real_sizes
+            pos = _legalize(pos, sizes, flat)
+            pos[:, 0] -= pos[:, 0].min()
+            for axis in (0, 2, 1):
+                _compact(pos, sizes, axis)
+            _face_macro_rows(netlist, pos, gates)
+            if _pin_side_pass(netlist, pos, sizes, gates):
+                pos = _legalize(pos, sizes, flat)
+                pos[:, 0] -= pos[:, 0].min()
+                for axis in (0, 2, 1):
+                    _compact(pos, sizes, axis)
+                # Compaction slides gates under and over a wall, where wire can't reach its far face. No compaction after this.
+                _pin_side_pass(netlist, pos, sizes, gates, centre=False)
+                pos = _legalize(pos, sizes, flat)
+                _turn_short_macros(netlist, pos, sizes, gates)
         print(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:
         pos = np.zeros((0, 3))
         sizes = np.zeros((0, 3))
+        fixed_box = None
 
     def io_rows() -> np.ndarray:
         depth_end = float((pos[:, 2] + sizes[:, 2]).max()) if len(pos) else 0.0
@@ -661,17 +913,22 @@ def _poisson_placement(
         return np.array([coords[c.id] for c in netlist.comps[netlist.n_gates:]], dtype=float).reshape(-1, 3)
 
     pos_all = np.vstack([pos, io_rows()])
-    _refine(netlist, pos_all, sizes, flat, time.monotonic() + 10.0)
+    _refine(netlist, pos_all, sizes, flat, time.monotonic() + 10.0, fixed_box)
     pos = pos_all[:len(gates)]
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)
     pos_all[len(gates):] = io_rows()
     _io_rows(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order), flat)
+    if _long_macros(gates_final):  # the north faces have pins too: room for their wires before the output row
+        pos_all[[i for i, c in enumerate(netlist.comps) if c.type == ComponentType.OUTPUT_PIN
+                 or c.metadata.get("north_face")], 2] -= macro_channel
     print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
 
     # World frame: margin in X, frontmost output at z=1 (as in layout._pack_layout).
     front = [p[2] for c, p in zip(netlist.comps, pos_all) if c.type == ComponentType.OUTPUT_PIN]
     z_shift = 1 - min(front) if front else routing_gutter + 2 - float(pos_all[:, 2].min(initial=0.0))
+    if len(gates_final):  # a gate outside every output column can sit ahead of the output row
+        z_shift = max(z_shift, routing_gutter + 2 - float(pos_all[:len(gates_final), 2].min()))
     shift = np.array([io_margin - min(0.0, float(pos_all[:, 0].min())), base_y, z_shift])
     placed = []
     for c, p in zip(gates_final + inputs + outputs, pos_all + shift):
