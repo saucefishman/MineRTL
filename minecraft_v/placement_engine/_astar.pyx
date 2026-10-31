@@ -480,7 +480,7 @@ cdef class World:
 
     cdef bint wire_walkable(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt,
                             bint with_inv_fp) except -1:
-        """_wire_walkable; with_inv_fp False = no inverted cells / footprint (mid_walkable).
+        """_wire_walkable; with_inv_fp False = no footprint checks (mid_walkable).
         Only the boolean matters, so each neighbour cell is fetched once and all its checks run
         together (the Python version's check order differs; its result doesn't)."""
         cdef int d, dy, nx, ny, nz, vdy, vy
@@ -501,7 +501,7 @@ cdef class World:
             for dy in range(-1, 2):
                 nx, ny, nz = x + HORIZ[d][0], y + dy, z + HORIZ[d][1]
                 c = self.cell(nx, ny, nz)
-                if with_inv_fp and c.val & F_INV:
+                if c.val & F_INV:
                     return False
                 if has_exempt and nx == ex and ny == ey and nz == ez:
                     continue

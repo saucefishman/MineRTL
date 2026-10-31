@@ -4,6 +4,7 @@ Builds a directed "powers" relation over blocks (Java redstone, simplified to th
 structures the router builds) and searches from each net's source:
 - open:  a sink of the net that its source can't reach;
 - short: a cell reached from two nets' sources, or a cell owned by another net;
+- weak: a sink the source reaches, but with no signal strength left;
 - latch: a repeater whose own output reaches its input, so that it holds itself on.
 `verify_support` separately flags dust/repeaters/torches with nothing to stand on.
 
@@ -36,11 +37,12 @@ _NON_OPAQUE_MARKERS = ("glass", "trapdoor", "redstone_wire", "torch", "repeater"
 
 _AIR, _DUST, _REPEATER, _TORCH, _WALL_TORCH, _OPAQUE, _OTHER = range(7)
 _STRONG, _WEAK = "S", "W"
+_MAX_SIGNAL = 15
 
 
 @dataclass(frozen=True)
 class Violation:
-    kind: str                 # "open" | "short" | "latch" | "unsupported"
+    kind: str                 # "open" | "short" | "weak" | "latch" | "unsupported"
     nets: frozenset[str]
     pos: Pos
 
@@ -224,6 +226,25 @@ def _reach(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
     return reached
 
 
+def _strengths(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
+    """Cells source's signal reaches with strength left: dust loses 1 a step, others restore 15."""
+    start: tuple[Pos, str] = (source, _STRONG if world.kind(source) == _OPAQUE else "")
+    best = {start: _MAX_SIGNAL}
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        level = best[node]
+        if node[0] in stop and node[0] != source:
+            continue
+        is_dust = world.kind(node[0]) == _DUST
+        for nxt in world.successors(node):
+            next_level = level - 1 if is_dust and world.kind(nxt[0]) == _DUST else _MAX_SIGNAL
+            if next_level > best.get(nxt, 0):
+                best[nxt] = next_level
+                queue.append(nxt)
+    return {pos for pos, _ in best}
+
+
 def find_latch(region: Region, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
     """The cells of a signal cycle from source through a repeater, if any."""
     return _latch_cycle(_World(region, frozenset(), frozenset()), source, stop)
@@ -284,6 +305,10 @@ def verify_signals(
         for sink in sinks:
             if sink not in reached:
                 violations.append(Violation("open", frozenset({net_id}), sink))
+        strong_enough = _strengths(world, source, stop)
+        for sink in sinks:
+            if sink in reached and sink not in strong_enough:
+                violations.append(Violation("weak", frozenset({net_id}), sink))
         latch = _latch_cycle(world, source, stop)
         if latch:
             violations.append(Violation("latch", frozenset({net_id}), latch[0]))

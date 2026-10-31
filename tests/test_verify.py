@@ -302,3 +302,11 @@ def test_repeater_feeding_itself_is_a_latch():
     _wire(region, owner, "a", [(4, 1, 1), (4, 1, 2), (3, 1, 2), (2, 1, 2), (1, 1, 2)])
     violations = verify_signals(region, {"a": ((1, 1, 1), [(4, 1, 2)])}, owner)
     assert any(v.kind == "latch" for v in violations)
+
+
+def test_signal_running_out_is_weak():
+    region, owner = Region(0, 0, 0, 20, 4, 4), {}
+    wire = _line_x(0, 18, 1, 1)
+    _wire(region, owner, "a", wire)
+    assert "weak" in _kinds(verify_signals(region, {"a": (wire[0], [wire[-1]])}, owner))
+    assert "weak" not in _kinds(verify_signals(region, {"a": (wire[0], [wire[14]])}, owner))

@@ -449,19 +449,22 @@ def _place_repeaters_for_net(
         return True
 
     # upstream_seg[pos] = path segment [last_reset_cell, ..., pos] from the most recent
-    # reset point to pos. Prepended to tree-seed paths so the backward cap search can
+    # reset point to pos, never past it: a walk counts signal from its first cell. Prepended
+    # to tree-seed paths so the backward cap search can
     # reach viable repeater positions in the already-laid upstream wire.
     upstream_seg: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
+    upstream_dist: dict[tuple[int, int, int], int] = {}  # signal already spent at that reset cell
 
     for orig_path in ordered_paths:
         path: list[tuple[int, int, int]] = list(orig_path)
         start = path[0]
         # Prepend upstream segment so the cap search can look back into prior wire.
-        if start in upstream_seg and len(upstream_seg[start]) > 1:
+        if start in upstream_seg:
             path = upstream_seg[start][:-1] + path  # upstream[:-1] avoids duplicating start
 
 
-        reset_depth = 0 # path will always start at reset location
+        # A path starts at a reset location, some signal past it after a tower or torch
+        reset_depth = -upstream_dist.get(start, 0)
         reset_idx = 0
         depth = 0
         depths = []
@@ -490,7 +493,8 @@ def _place_repeaters_for_net(
 
             depths.append(depth)
             dist = depth - reset_depth
-            upstream_seg[pos] = path[max(reset_idx - _REPEATER_INTERVAL, 0):pos_idx + 1]
+            upstream_seg[pos] = path[reset_idx:pos_idx + 1]
+            upstream_dist[pos] = depths[reset_idx] - reset_depth
             if dist >= _REPEATER_INTERVAL:
                 # Scan backward in signal-depth units, not path-index units.
                 # cap = highest j where the repeater can actually receive signal.
