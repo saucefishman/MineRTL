@@ -172,6 +172,8 @@ def main():
                         help="--macros: nets above this fanout are shared between instances, not grouped into them")
     parser.add_argument("--macro-min-cells", type=int, default=8,
                         help="--macros: smallest repeated subcircuit worth a macro")
+    parser.add_argument("--macro-row-tiles", type=int, default=1,
+                        help="--macros: instances per array, sharing lanes; the placer arranges the arrays")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")
     args = parser.parse_args()
@@ -216,6 +218,7 @@ def main():
             print(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")
 
         component_list, macros, instances = extract_macros(component_list, build, args.macro_fanout, args.macro_min_cells,
+                                                           args.macro_row_tiles,
                                                            on_class=report)
         print(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")

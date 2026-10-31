@@ -13,7 +13,7 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import islice
 from pathlib import Path
 
@@ -497,7 +497,7 @@ def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
 
 
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
-                   max_fanout: int = 2, min_cells: int = 8, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
+                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 1, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
     """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances)."""
     macros: dict[str, Macro] = {}
@@ -511,20 +511,22 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
         sub, ports = macro_netlist(cls, comp)
         tile_name = f"macro_{_digest(sub)}"
         tile = build(tile_name, sub, ports, len(cls.cells))
-        name = f"array_{len(macros)}"
-        macro, instance = build_array(name, tile, cls, ports)
-        macros[name] = macro
         if on_class is not None:
             on_class(cls, tile)
-        fp = macro.footprint
-        print(f"[macro] {name}: {len(cls.instances)} x {tile_name}, footprint {fp.width}x{fp.height}x{fp.depth}, "
-              f"{len(macro.pins)} pins")
-        hidden_cells.update(instance.cell_map)
-        instances.append(instance)
-        new_components.append(Component(id=instance.component_id, type=ComponentType.CUSTOM, pins=macro.pins,
-                                        footprint=fp, metadata={"macro": name}))
-        for pin in macro.pins:
-            pin_rows.append((instance.pin_net[pin.name], instance.component_id, pin.name, pin.direction))
+        for start in range(0, len(cls.instances), row_tiles):
+            row = replace(cls, instances=cls.instances[start:start + row_tiles])
+            name = f"array_{len(macros)}"
+            macro, instance = build_array(name, tile, row, ports)
+            macros[name] = macro
+            fp = macro.footprint
+            print(f"[macro] {name}: {len(row.instances)} x {tile_name}, footprint {fp.width}x{fp.height}x{fp.depth}, "
+                  f"{len(macro.pins)} pins")
+            hidden_cells.update(instance.cell_map)
+            instances.append(instance)
+            new_components.append(Component(id=instance.component_id, type=ComponentType.CUSTOM, pins=macro.pins,
+                                            footprint=fp, metadata={"macro": name}))
+            for pin in macro.pins:
+                pin_rows.append((instance.pin_net[pin.name], instance.component_id, pin.name, pin.direction))
     if not instances:
         return comp, {}, []
 
