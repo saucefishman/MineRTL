@@ -630,6 +630,43 @@ def _long_macros(gates: list[Component]) -> list[int]:
     return [i for i, w in widths.items() if w * 2 >= max(widths.values())]
 
 
+def _turn_macro(netlist: _Netlist, gates: list[Component], i: int) -> None:
+    """Turn macro i half way, in place, keeping the netlist's pin offsets in step."""
+    c = gates[i]
+    gates[i] = netlist.comps[i] = _rotate_component_180(c)
+    at = netlist.pin_comp == i
+    netlist.pin_offset[at, 0] = c.footprint.width - 1 - netlist.pin_offset[at, 0]
+    netlist.pin_offset[at, 2] = c.footprint.depth - 1 - netlist.pin_offset[at, 2]
+
+
+def _turn_short_macros(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component]) -> None:
+    """Turn each short macro half way, in place, if that leaves fewer connections on the far side of it."""
+    n = netlist.n_gates
+    long = set(_long_macros(gates))
+    is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps]
+    net_pins: dict[int, list[int]] = defaultdict(list)
+    for p, net in enumerate(netlist.pin_net.tolist()):
+        net_pins[net].append(p)
+    for i, c in enumerate(gates):
+        if c.type != ComponentType.CUSTOM or i in long:
+            continue
+        middle = pos[i, 2] + c.footprint.depth / 2
+        crossed = kept = 0
+        for p in np.flatnonzero(netlist.pin_comp == i).tolist():
+            pin_south = netlist.pin_offset[p, 2] > c.footprint.depth / 2
+            for q in net_pins[int(netlist.pin_net[p])]:
+                other = int(netlist.pin_comp[q])
+                if other == i:
+                    continue
+                other_south = is_input[other] if other >= n else pos[other, 2] + netlist.pin_offset[q, 2] > middle
+                if pin_south == other_south:
+                    kept += 1
+                else:
+                    crossed += 1
+        if crossed > kept:
+            _turn_macro(netlist, gates, i)
+
+
 def _face_macro_rows(netlist: _Netlist, pos: np.ndarray, gates: list[Component]) -> None:
     """Turn every second long macro half way, in place, so rows front to back face each other in pairs.
 
@@ -638,11 +675,7 @@ def _face_macro_rows(netlist: _Netlist, pos: np.ndarray, gates: list[Component])
     """
     rows = sorted(_long_macros(gates), key=lambda i: pos[i, 2])
     for i in rows[1::2]:
-        c = gates[i]
-        gates[i] = netlist.comps[i] = _rotate_component_180(c)
-        at = netlist.pin_comp == i
-        netlist.pin_offset[at, 0] = c.footprint.width - 1 - netlist.pin_offset[at, 0]
-        netlist.pin_offset[at, 2] = c.footprint.depth - 1 - netlist.pin_offset[at, 2]
+        _turn_macro(netlist, gates, i)
 
 
 def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component],
@@ -767,6 +800,7 @@ def _poisson_placement(
             # Compaction slides gates under and over a wall, where wire can't reach its far face. No compaction after this.
             _pin_side_pass(netlist, pos, sizes, gates, centre=False)
             pos = _legalize(pos, sizes, flat)
+            _turn_short_macros(netlist, pos, sizes, gates)
         print(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:

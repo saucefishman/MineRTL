@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bisect
 import time
+import zlib
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
@@ -755,10 +756,11 @@ class _GreedyRouter:
         net_seeds = [pos for pos, owner in self.dust_owner.items()
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
         sinks = sorted(job.sinks, key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
+        reached_vias: list[Pos] = []
         for dst in [*job.via, *sinks]:
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
             start = job.src
-            far_via = next((v for v in job.via if v != dst and (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
+            far_via = next((v for v in reached_vias if (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
             if far_via is not None:  # searching from the near side too would only flood the wall's face
                 start, tree_seeds = far_via, [far_via]
             seed_depths = _signal_depths((self.net_paths(job.net_id) if net_seeds else []) + paths)
@@ -768,6 +770,9 @@ class _GreedyRouter:
             while True:
                 mark = len(rec.journals[job.key])
                 try:
+                    if dst in job.via and not self._via_open(dst, job):
+                        path = None
+                        break
                     path = _find_wire_path(
                         ws, self.solid, self.dust_owner,
                         start, dst, job.net_id,
@@ -794,11 +799,21 @@ class _GreedyRouter:
                     rollback(rec, job.key, mark)
                     blocked.add(cell)
             self.failed_goal.pop(job.key, None)
+            if path is None:  # a waypoint someone else's wire took: this net routes without it
+                continue
+            if dst in job.via:
+                reached_vias.append(dst)
             paths.append(path)
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
         self.paths[job.key] = (job.net_id, paths)
+
+    def _via_open(self, via: Pos, job: _RouteJob) -> bool:
+        """Whether a waypoint is free: air with air around it, so no other net's wire is near."""
+        x, y, z = via
+        cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-2, -1, 0, 1) for dz in (-1, 0, 1)]
+        return all(self.dust_owner.get(c) in (None, job.net_id) and _is_air(self.region[c]) for c in cells)
 
     def route_job_retrying(self, job: _RouteJob) -> None:
         near_terminal = {(x + dx, y + dy, z + dz) for x, y, z in job.terminals
@@ -885,19 +900,12 @@ class _GreedyRouter:
         return failures
 
 
-def _macro_walls(placed: list[_Placed]) -> list[_Placed]:
-    """Macros long enough that wire can't sensibly go around them: at least half the widest."""
-    macros = [p for p in placed if p.component.type == ComponentType.CUSTOM]
-    widest = max((p.component.footprint.width for p in macros), default=0)
-    return [p for p in macros if p.component.footprint.width * 2 >= widest]
-
-
 def _wall_vias(
         net: NetConnection,
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         walls: list[_Placed],
 ) -> list[tuple[int, int, int]]:
-    """A cell above each wall the net has to cross. A* heads straight at a goal behind a wall and floods its face."""
+    """A cell above each macro the net has to cross. A* heads straight at a goal behind one and floods its face."""
     src = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
     sinks = [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks]
     via = []
@@ -906,7 +914,10 @@ def _wall_vias(
         z0, z1 = oz, oz + fp.depth - 1
         crossing = [p for p in sinks if (src[2] < z0 and p[2] > z1) or (src[2] > z1 and p[2] < z0)]
         if crossing and ox <= src[0] < ox + fp.width:
-            via.append((src[0], oy + fp.height + _WALL_VIA_LIFT, oz + fp.depth // 2))
+            # Spread by net: nets from one IO column share an X, and a cell only fits one.
+            spread = zlib.crc32(net.net_id.encode())
+            via.append((src[0], oy + fp.height + _WALL_VIA_LIFT + 2 * (spread % 4),
+                        oz + (spread >> 8) % fp.depth))
     return via
 
 
@@ -933,7 +944,7 @@ def _route_all_nets(
     """
     inverted_cells = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals, terminal_approach)
-    walls = _macro_walls(placed)
+    walls = [p for p in placed if p.component.type == ComponentType.CUSTOM]
     router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                            frozenset(pin_terminal.values()))
     jobs = [
