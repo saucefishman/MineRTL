@@ -216,7 +216,9 @@ def main():
     macros = None
     if args.macros:
         def build(name, sub, ports, cells):
-            return build_macro(name, sub, ports, cells, Path(args.schematics_dir), cache_dir=Path(args.macro_cache))
+            return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
+                               cache_dir=Path(args.macro_cache) / f"row{args.macro_row_tiles}",
+                               io_lane_pins=args.macro_row_tiles != 1)
 
         def report(cls, macro):
             print(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")

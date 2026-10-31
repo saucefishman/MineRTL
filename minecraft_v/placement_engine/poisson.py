@@ -194,8 +194,9 @@ class _IoPlacer:
 
     def __init__(self, inputs: list[Component], outputs: list[Component], nets: list[NetConnection],
                  gutter: int, routing_gutter: int, y_gap: int, flat: bool,
-                 output_x_order: dict[str, float] | None, column_pins: int | None = None):
+                 output_x_order: dict[str, float] | None, column_pins: int | None = None, lane_pins: bool = True):
         self.column_pins = column_pins  # share columns between signals, this many pins each (macro faces)
+        self.lane_pins = lane_pins      # inputs get a Y each, for lanes along the face
         self.inputs, self.outputs, self.nets = inputs, outputs, nets
         self.gutter, self.routing_gutter, self.y_gap = gutter, routing_gutter, y_gap
         self.flat, self.output_x_order = flat, output_x_order or {}
@@ -213,7 +214,7 @@ class _IoPlacer:
             vals = [pins[e][axis] for e in self.neighbours[cid] if e in pins]
             return float(np.median(vals)) if vals else None
 
-        if self.column_pins is not None and comps is self.inputs:
+        if self.column_pins is not None and self.lane_pins and comps is self.inputs:
             # Macro entry pins: every one gets its own Y, so straight lanes can run along the face (macro.build_array).
             n_columns = max(2, math.ceil(len(comps) / self.column_pins))
             xs = _spread([centre] * n_columns, self.gutter + 1)
@@ -757,6 +758,7 @@ def _poisson_placement(
         output_x_order: dict[str, float] | None = None,
         io_column_pins: int | None = None,
         macro_channel: int = 16,
+        io_lane_pins: bool = True,
 ) -> list[_Placed]:
     """Place gates electrostatically; see the module docstring."""
     t0 = time.monotonic()
@@ -768,7 +770,7 @@ def _poisson_placement(
     routing_gutter = loose[1] if routing_gutter is None else routing_gutter
 
     netlist = _Netlist(gates, inputs + outputs, nets)
-    io = _IoPlacer(inputs, outputs, nets, gutter, routing_gutter, 1 + y_spacing, flat, output_x_order, io_column_pins)
+    io = _IoPlacer(inputs, outputs, nets, gutter, routing_gutter, 1 + y_spacing, flat, output_x_order, io_column_pins, io_lane_pins)
     if gates:
         sizes = np.array([[c.footprint.width + gutter,
                            1 if flat else c.footprint.height + y_spacing,

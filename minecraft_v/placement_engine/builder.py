@@ -812,8 +812,11 @@ class _GreedyRouter:
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
         """Whether a waypoint is free: air with air around it, so no other net's wire is near."""
         x, y, z = via
+        if not (0 <= x < self.region.width and 0 <= y < self.region.height - 2 and 0 <= z < self.region.length):
+            return False
         cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-2, -1, 0, 1) for dz in (-1, 0, 1)]
-        return all(self.dust_owner.get(c) in (None, job.net_id) and _is_air(self.region[c]) for c in cells)
+        return all(c not in self.footprint_blocked and self.dust_owner.get(c) in (None, job.net_id)
+                   and _is_air(self.region[c]) for c in cells)
 
     def route_job_retrying(self, job: _RouteJob) -> None:
         near_terminal = {(x + dx, y + dy, z + dz) for x, y, z in job.terminals
@@ -1566,6 +1569,7 @@ def build_litematic_from_component_list(
         io_columns: int | None = None,
         macro_channel: int = 16,
         macro_headroom: int = 16,
+        io_lane_pins: bool = True,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""
     if macros:  # an array is a wall across the layout: wires get past it overhead
@@ -1594,7 +1598,7 @@ def build_litematic_from_component_list(
             base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
             routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
             seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
-            macro_channel=macro_channel,
+            macro_channel=macro_channel, io_lane_pins=io_lane_pins,
         )
     else:
         placed = _optimize_placement(
