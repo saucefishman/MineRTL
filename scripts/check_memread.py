@@ -1,7 +1,6 @@
-"""Build examples/memread on one placement seed and run it in scripts/mchprs_harness on all modes.
+"""Build examples/memread on one placement seed and run it in mchprs_headless on all modes.
 
-Counts through the preloaded words several times. Writes aren't exercised: the DFFE template
-captures when enable rises during clock high, so wen also overwrites the next word.
+Counts through the preloaded words several times. Writes aren't exercised here.
 
 Usage: check_memread.py <netlist.json> <out_dir> <seed> [minecraft_v args...]
 """
@@ -10,8 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from settle_schematic import headless_binary
+
 ROOT = Path(__file__).parent.parent
-HARNESS = ROOT / "scripts/mchprs_harness/target/release"
 WORDS = [int(line, 16) for line in (ROOT / "examples/memread/memread.hex").read_text().split()]
 CLOCK_WIDTH, SETTLE = 200, 250
 
@@ -47,7 +47,7 @@ def main() -> int:
                     out / f"s{seed}_artifacts/component_layout.json", litematic], check=True)
     script_path = out / f"s{seed}.script"
     script_path.write_text(script())
-    return subprocess.run([HARNESS / "mchprs_harness", litematic, pins, script_path, "noupdate,redstone,redpiler"]).returncode
+    return subprocess.run([headless_binary(), "test", litematic, pins, script_path, "--modes", "noupdate,redstone,redpiler"]).returncode
 
 
 if __name__ == "__main__":
