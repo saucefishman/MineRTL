@@ -179,8 +179,10 @@ def mine_repeated(comp: ComponentList, max_fanout: int = 2, min_cells: int = 8) 
         for cls in classes[h]:
             gm = DiGraphMatcher(cls.core, core, node_match=lambda x, y: x["color"] == y["color"],
                                 edge_match=lambda x, y: x["label"] == y["label"])
-            found = next(filter(None, (_full_mapping(cls, g, m) for m in islice(gm.isomorphisms_iter(), _MATCH_TRIES))),
-                         None)
+            # Symmetric parts (two read trees) can match either way round. Agreeing with the template on shared nets
+            # is what lets them share a lane, so take the match that does most.
+            matches = filter(None, (_full_mapping(cls, g, m) for m in islice(gm.isomorphisms_iter(), _MATCH_TRIES)))
+            found = max(matches, default=None, key=lambda m: sum(m[n] == n for n in cls.template if n not in cls.cells))
             if found is not None:
                 cls.instances.append(found)
                 break
