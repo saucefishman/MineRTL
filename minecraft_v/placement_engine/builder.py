@@ -76,12 +76,12 @@ def _place_gate_templates(
     ref_mc_version = 2975
     ref_lm_version = 6
     ref_lm_sub = 1
-    mirrored_blocks: dict[str, list] = {}
+    oriented_blocks: dict[tuple[str, bool, bool], list] = {}
     for item in placed:
         c = item.component
         if c.type == ComponentType.CUSTOM:
             _stamp_macro(workspace, macros[c.metadata["macro"]], item.origin, solid,
-                         bool(c.metadata.get("mirror_x")), mirrored_blocks)
+                         bool(c.metadata.get("mirror_x")), bool(c.metadata.get("rotate_180")), oriented_blocks)
             continue
         if c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN):
             continue
@@ -112,14 +112,14 @@ def _stamp_macro(
         origin: tuple[int, int, int],
         solid: set[tuple[int, int, int]],
         mirrored: bool,
-        mirrored_blocks: dict[str, list],
+        rotated: bool,
+        oriented_blocks: dict[tuple[str, bool, bool], list],
 ) -> None:
     """Paste a routed macro. Its footprint is walled off, so `solid` only has to know the hull."""
-    if mirrored:
-        blocks = mirrored_blocks.setdefault(macro.name, []) or macro.blocks_mirrored()
-        mirrored_blocks[macro.name] = blocks
-    else:
-        blocks = macro.blocks
+    key = (macro.name, mirrored, rotated)
+    if key not in oriented_blocks:
+        oriented_blocks[key] = macro.blocks_oriented(mirrored, rotated)
+    blocks = oriented_blocks[key]
     ox, oy, oz = origin
     for (x, y, z), block in blocks:
         workspace[ox + x, oy + y, oz + z] = block
@@ -1266,19 +1266,20 @@ def _report_flat_violations(
 ) -> list:
     """verify_signals on the stamped layout as if flat: every net of the original netlist, from gate pin to gate
     pin, through the entry and exit repeaters and the wires inside macros. Only gate interiors are hidden."""
-    stamps = {p.component.id: (macros[p.component.metadata["macro"]], p.origin, bool(p.component.metadata.get("mirror_x")))
+    stamps = {p.component.id: (macros[p.component.metadata["macro"]], p.origin, bool(p.component.metadata.get("mirror_x")),
+                                  bool(p.component.metadata.get("rotate_180")))
               for p in placed if p.component.type == ComponentType.CUSTOM}
     hidden = _component_interior(placed)
     owner = {pos: net for pos, net in dust_owner.items()}
     spec: dict[str, tuple[tuple[int, int, int], list[tuple[int, int, int]]]] = {}
 
     def inner_ends(cid: str, pin: str) -> list[tuple[int, int, int]]:
-        macro, origin, mirrored = stamps[cid]
+        macro, origin, mirrored, rotated = stamps[cid]
         source, sinks = macro.nets[macro.port_net[pin]]
         ports = set(macro.port_net)
         cells = [source] if source.rsplit(":", 1)[0] not in ports else []
         cells += [s for s in sinks if s.rsplit(":", 1)[0] not in ports]
-        return [macro.world(macro.terminals[e], origin, mirrored) for e in cells]
+        return [macro.world(macro.terminals[e], origin, mirrored, rotated) for e in cells]
 
     exposed: dict[str, dict[str, str]] = {cid: {} for cid in stamps}
     for net in nets:
@@ -1300,21 +1301,21 @@ def _report_flat_violations(
             else:
                 ends.append(_pin_for_endpoint(pin_terminal, ep.component_id, ep.pin_name))
         spec[net.net_id] = (source, ends)
-    for cid, (macro, origin, mirrored) in stamps.items():
+    for cid, (macro, origin, mirrored, rotated) in stamps.items():
         ports = set(macro.port_net.values())
         for inner, (source, sinks) in macro.nets.items():
             name = exposed[cid].get(inner, f"{cid}/{inner}")
             if inner not in ports:
-                spec[name] = (macro.world(macro.terminals[source], origin, mirrored),
-                              [macro.world(macro.terminals[s], origin, mirrored) for s in sinks])
+                spec[name] = (macro.world(macro.terminals[source], origin, mirrored, rotated),
+                              [macro.world(macro.terminals[s], origin, mirrored, rotated) for s in sinks])
         for rel, inner in macro.owner.items():
-            owner[macro.world(rel, origin, mirrored)] = exposed[cid].get(inner, f"{cid}/{inner}")
+            owner[macro.world(rel, origin, mirrored, rotated)] = exposed[cid].get(inner, f"{cid}/{inner}")
         w = macro.footprint.width
         for (x, y, z), (sx, sy, sz) in macro.gate_boxes:
             for dx in range(sx):
                 for dy in range(sy):
                     for dz in range(sz):
-                        hidden.add(macro.world((x + dx, y + dy, z + dz), origin, mirrored))
+                        hidden.add(macro.world((x + dx, y + dy, z + dz), origin, mirrored, rotated))
     with ProgressBar("[verify] flat signals", len(spec)) as bar:
         violations = verify_signals(workspace, spec, owner, frozenset(hidden),
                                     on_net=lambda net_id: bar.update(info=net_id))

@@ -24,7 +24,7 @@ from scipy.sparse.linalg import cg
 
 from minecraft_v.placement_engine.ir import Component, ComponentType, NetConnection
 from minecraft_v.placement_engine.layout import _BIT_INDEX_RE, _Placed, _assign_io_x_positions, _io_base_name
-from minecraft_v.placement_engine.template import _mirror_component_x
+from minecraft_v.placement_engine.template import _mirror_component_x, _rotate_component_180
 
 _WEIGHTS = np.array([1.0, 2.0, 1.0])  # wirelength per block in X, Y, Z: Y needs slopes and towers
 _BINS_PER_BOX = 2            # bins per mean box size along each axis
@@ -46,6 +46,7 @@ _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENS
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+_WALL_CHANNEL = 16           # Z kept clear in front of a long macro's face, on top of its padding
 _LANE_PITCH = 2              # Y between macro entry pins: dust, then the floor of the next lane
 
 
@@ -624,15 +625,36 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
     pos_all[outputs, 2] = output_z
 
 
+def _long_macros(gates: list[Component]) -> list[int]:
+    """Macros wide enough to act as walls: at least half the widest. Shorter ones behave like big gates."""
+    widths = {i: c.footprint.width for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM}
+    return [i for i, w in widths.items() if w * 2 >= max(widths.values())]
+
+
+def _face_macro_rows(netlist: _Netlist, pos: np.ndarray, gates: list[Component]) -> None:
+    """Turn every second long macro half way, in place, so rows front to back face each other in pairs.
+
+    Two rows with their pins the same way put the back of one against the pins of the other; facing, they share
+    one channel for the gates that drive them.
+    """
+    rows = sorted(_long_macros(gates), key=lambda i: pos[i, 2])
+    for i in rows[1::2]:
+        c = gates[i]
+        gates[i] = netlist.comps[i] = _rotate_component_180(c)
+        at = netlist.pin_comp == i
+        netlist.pin_offset[at, 0] = c.footprint.width - 1 - netlist.pin_offset[at, 0]
+        netlist.pin_offset[at, 2] = c.footprint.depth - 1 - netlist.pin_offset[at, 2]
+
+
 def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component]) -> bool:
-    """Flip each connected group of gates across a macro, in place, to the side holding most of its pins.
+    """Move each connected group of gates in front of a macro's face holding most of its pins, in place.
 
     A long macro is a wall: wire can't reach a pin on its far face without climbing over it. Wirelength doesn't
-    say which side gates land on, because the macro's charge just pushes them out either way. Groups move whole,
-    so that no net inside one ends up crossing the wall. Returns whether any moved.
+    say which side gates land on, because the macro's charge just pushes them out either way. Groups move whole and
+    centred on the macro, so no net inside one crosses the wall and lane taps are near. Returns whether any moved.
     """
     n = netlist.n_gates
-    macros = [i for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM]
+    macros = _long_macros(gates)
     if not macros or len(macros) == n:
         return False
     is_macro = [i in set(macros) for i in range(n)]
@@ -672,13 +694,20 @@ def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates:
                     elif c >= n:
                         pull[root] += 1 if is_input[c] else -1
         for root, members in groups.items():
-            front = np.array([pos[g, 2] + sizes[g, 2] / 2 < (north + south) / 2 for g in members])
-            want_north = pull[root] < 0
-            for g, at_north in zip(members, front.tolist()):
-                if at_north != want_north:
-                    pos[g, 2] = (south + (north - pos[g, 2] - sizes[g, 2]) if at_north
-                                 else north - (pos[g, 2] - south) - sizes[g, 2])
-                    moved = True
+            if not pull[root]:
+                continue
+            # Rigidly, so the group keeps the arrangement poisson gave it.
+            lo = pos[members, 2].min()
+            hi = (pos[members, 2] + sizes[members, 2]).max()
+            channel = _WALL_CHANNEL
+            shift_z = south + channel - lo if pull[root] > 0 else north - channel - hi
+            if (pull[root] > 0 and lo >= south + channel) or (pull[root] < 0 and hi <= north - channel):
+                shift_z = 0.0
+            centre = (pos[members, 0] + sizes[members, 0] / 2).mean()
+            pos[members, 2] += shift_z
+            pos[members, 0] += pos[m, 0] + sizes[m, 0] / 2 - centre
+            moved = True
+    pos[:, 0] -= min(0.0, pos[:, 0].min())
     return moved
 
 
@@ -711,6 +740,12 @@ def _poisson_placement(
         sizes = np.array([[c.footprint.width + gutter,
                            1 if flat else c.footprint.height + y_spacing,
                            c.footprint.depth + routing_gutter] for c in gates], dtype=float)
+        # Long macros are placed for real at legalization: in global placement they'd only inflate the charge grid.
+        real_sizes = sizes
+        sizes = sizes.copy()
+        walls = _long_macros(gates)
+        if walls and len(walls) < len(gates):
+            sizes[walls] = np.delete(sizes, walls, axis=0).max(axis=0)
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
         height = 1.0 if flat else float(max(sizes[:, 1].max(), volume ** (1 / 3)))
         side = max(math.sqrt(volume / height), float(sizes[:, [0, 2]].max()))
@@ -718,10 +753,12 @@ def _poisson_placement(
 
         placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
         pos = np.rint(placed_pos)
+        sizes = real_sizes
         pos = _legalize(pos, sizes, flat)
         pos[:, 0] -= pos[:, 0].min()
         for axis in (0, 2, 1):
             _compact(pos, sizes, axis)
+        _face_macro_rows(netlist, pos, gates)
         if _pin_side_pass(netlist, pos, sizes, gates):
             pos = _legalize(pos, sizes, flat)
             pos[:, 0] -= pos[:, 0].min()

@@ -26,7 +26,7 @@ from minecraft_v.placement_engine.ir import (
     NetConnection, NetEndpoint, PinRef,
 )
 from .block_utils import _is_air
-from .template import _mirror_block_x
+from .template import _mirror_block_x, _rotate_block_180
 
 Pos = tuple[int, int, int]
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
@@ -49,13 +49,27 @@ class Macro:
     port_net: dict[str, str] = field(default_factory=dict)   # pin -> inner net
     cells: int = 0
 
-    def blocks_mirrored(self) -> list[tuple[Pos, BlockState]]:
-        w = self.footprint.width
-        return [((w - 1 - x, y, z), _mirror_block_x(b)) for (x, y, z), b in self.blocks]
+    def blocks_oriented(self, mirrored: bool, rotated: bool) -> list[tuple[Pos, BlockState]]:
+        out = []
+        for rel, block in self.blocks:
+            if rotated:
+                block = _rotate_block_180(block)
+            if mirrored:
+                block = _mirror_block_x(block)
+            out.append((self.oriented(rel, mirrored, rotated), block))
+        return out
 
-    def world(self, rel: Pos, origin: Pos, mirrored: bool) -> Pos:
-        x = self.footprint.width - 1 - rel[0] if mirrored else rel[0]
-        return origin[0] + x, origin[1] + rel[1], origin[2] + rel[2]
+    def oriented(self, rel: Pos, mirrored: bool, rotated: bool) -> Pos:
+        x, y, z = rel
+        if mirrored != rotated:  # half a turn also reverses X, so the two cancel there
+            x = self.footprint.width - 1 - x
+        if rotated:
+            z = self.footprint.depth - 1 - z
+        return x, y, z
+
+    def world(self, rel: Pos, origin: Pos, mirrored: bool, rotated: bool = False) -> Pos:
+        x, y, z = self.oriented(rel, mirrored, rotated)
+        return origin[0] + x, origin[1] + y, origin[2] + z
 
 
 @dataclass
