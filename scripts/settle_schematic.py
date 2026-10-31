@@ -7,6 +7,7 @@ clock inputs are cut while the rest settles in MCHPRS's redstone code, and the r
 Usage: settle_schematic.py <in.litematic> <component_layout.json> <out.litematic>
 """
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,14 @@ from pathlib import Path
 
 from litemapy import Schematic
 
-SETTLE = Path(__file__).parent / "mchprs_harness/target/release/settle"
+def headless_binary() -> str:
+    """MCHPRS's headless runner: $MCHPRS_HEADLESS, else under $MCHPRS_DIR (default ~/Projects/MCHPRS)."""
+    if "MCHPRS_HEADLESS" in os.environ:
+        return os.environ["MCHPRS_HEADLESS"]
+    root = Path(os.environ.get("MCHPRS_DIR", Path.home() / "Projects/MCHPRS"))
+    return str(root / "target/release/mchprs_headless")
+
+
 # Template x, z -> properties in the clock-low state, for the blocks whose saved state differs.
 DFF_CLOCK_LOW = {
     (3, 1): {"powered": "false"},                     # clock input
@@ -56,7 +64,7 @@ def settle(in_path: str, layout_path: str, out_path: str) -> None:
         # Without any generated clock region: it would never settle, and the clock counts as low.
         Schematic(name="settle", regions={"main": region}).save(str(tmp / "in.litematic"))
         (tmp / "cuts.txt").write_text("".join(f"{x} {y} {z}\n" for x, y, z in cuts))
-        result = subprocess.run([SETTLE, tmp / "in.litematic", tmp / "cuts.txt", tmp / "states.txt"],
+        result = subprocess.run([headless_binary(), "settle", tmp / "in.litematic", tmp / "cuts.txt", tmp / "states.txt"],
                                 check=True, capture_output=True, text=True)
         print(result.stdout.strip())
         cut = set(cuts)

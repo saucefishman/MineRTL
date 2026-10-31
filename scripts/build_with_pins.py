@@ -1,4 +1,4 @@
-"""Run the minecraft_v build and write the top level's pin positions for scripts/mchprs_harness.
+"""Run the minecraft_v build and write the top level's pin positions for `mchprs_headless test`.
 
 Usage: build_with_pins.py <pins.txt> <minecraft_v args...>
 """

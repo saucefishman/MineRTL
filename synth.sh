@@ -106,6 +106,9 @@ uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
 
 # Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it)
 if [[ "$settle" == true ]]; then
-    (cd scripts/mchprs_harness && cargo build --release --quiet --bin settle)
+    mchprs_dir="${MCHPRS_DIR:-$HOME/Projects/MCHPRS}"
+    if [[ -z "${MCHPRS_HEADLESS:-}" && ! -x "$mchprs_dir/target/release/mchprs_headless" ]]; then
+        (cd "$mchprs_dir" && cargo build --release --quiet -p mchprs_headless)
+    fi
     uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic"
 fi
