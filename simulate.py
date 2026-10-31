@@ -229,7 +229,7 @@ def simulate(cl, n_cycles: int, clock_id: str | None, input_vals: dict[str, int]
     net_value: dict[str, int] = {net.net_id: 0 for net in cl.nets}
 
     # Sequential state: ff_q[comp_id] = Q output value
-    ff_q: dict[str, int] = {c.id: 0 for c in cl.components if c.type in _SEQ_TYPES}
+    ff_q: dict[str, int] = {c.id: c.metadata.get("init", 0) for c in cl.components if c.type in _SEQ_TYPES}
 
     # Net id for each INPUT_PIN's output pin
     input_pin_net: dict[str, str] = {}  # comp_id → net_id

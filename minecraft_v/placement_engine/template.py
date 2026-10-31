@@ -69,9 +69,11 @@ def _paste_template(
         schematic_net_id: str | None = None,
         pin_positions: frozenset[tuple[int, int, int]] = frozenset(),
         mirror_width: int | None = None,
+        block_states: dict[tuple[int, int, int], dict[str, str]] | None = None,
 ) -> None:
     """Paste ``template``'s non-air blocks at ``dest_origin``; ``mirror_width`` reflects it in X
-    within that width (see ``_mirror_component_x``)."""
+    within that width (see ``_mirror_component_x``). ``block_states`` overrides properties of
+    blocks at template positions, e.g. to paste a flip-flop already holding a 1."""
     tmin_x, tmin_y, tmin_z, _, _, _ = _non_air_bounds(template)
     dx, dy, dz = dest_origin
     placed: list[tuple[tuple[int, int, int], BlockState]] = []
@@ -80,6 +82,8 @@ def _paste_template(
         if _is_air(block):
             continue
         x, y, z = pos
+        if block_states is not None and pos in block_states:
+            block = block.with_properties(**block_states[pos])
         rx = x - tmin_x
         if mirror_width is not None:
             rx = mirror_width - 1 - rx

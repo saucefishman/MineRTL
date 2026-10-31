@@ -2,7 +2,7 @@ import pytest
 
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from minecraft_v.main import module_to_component_list
-from minecraft_v.models import Cell, Module, Port
+from minecraft_v.models import Cell, Module, NetName, Port
 from minecraft_v.placement_engine.ir import (
     CardinalDirection,
     ComponentType,
@@ -149,6 +149,18 @@ class TestCellMapping:
         assert comp.footprint.width == 7
         assert comp.footprint.depth == 4
         assert _pin(comp, "E").side == CardinalDirection.EAST
+
+    def test_init_marks_flip_flops_starting_high(self):
+        ff = lambda q: _make_cell("$_DFF_P_", {"C": "input", "D": "input", "Q": "output"},
+                                  {"C": [1], "D": [2], "Q": [q]})
+        mod = _make_module(cells={"lo": ff(10), "hi": ff(11), "none": ff(12)})
+        # init is MSB first: bit 11 starts at 1, bit 10 at 0
+        mod.netnames = {"r": NetName(bits=[10, 11], attributes={"init": "10"}),
+                        "plain": NetName(bits=[12])}
+        result = module_to_component_list(mod)
+        assert _comp(result, "hi").metadata == {"init": 1}
+        assert _comp(result, "lo").metadata == {}
+        assert _comp(result, "none").metadata == {}
 
     def test_mux_cell(self):
         mod = _make_module(cells={

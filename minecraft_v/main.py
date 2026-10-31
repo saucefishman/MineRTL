@@ -44,8 +44,22 @@ def _load_output_pin_targets(path: str) -> dict[str, tuple[int, int]]:
     return normalized
 
 
+def _init_high_bits(module: Module) -> set[int]:
+    """Net bits whose register starts at 1, from the netlist's "init" attributes."""
+    high: set[int] = set()
+    for net in module.netnames.values():
+        init = net.attributes.get("init")
+        if init is None:
+            continue
+        for bit, value in zip(reversed(net.bits), str(init).zfill(len(net.bits))):
+            if value == "1" and isinstance(bit, int):
+                high.add(bit)
+    return high
+
+
 def module_to_component_list(module: Module) -> ComponentList:
     components: list[Component] = []
+    init_high = _init_high_bits(module)
     # bit_id -> [(component_id, pin_name, Direction)]
     bit_endpoints: dict[int, list[tuple[str, str, Direction]]] = defaultdict(list)
 
@@ -88,12 +102,15 @@ def module_to_component_list(module: Module) -> ComponentList:
                 pin_ref = pin_ref.model_copy(update={"const_value": const_val})
             pins.append(pin_ref)
 
+        starts_high = comp_type in (ComponentType.DFF, ComponentType.DFFE) and \
+            any(bit in init_high for bit in cell.connections.get("Q", []))
         components.append(Component(
             id=cell_name,
             type=comp_type,
             pins=pins,
             params=dict(cell.parameters),
             footprint=schematic.footprint,
+            metadata={"init": 1} if starts_high else {},
         ))
 
     nets: list[NetConnection] = []

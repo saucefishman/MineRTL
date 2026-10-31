@@ -126,3 +126,21 @@ def test_output_pin_target_layer_wiring(tmp_path: Path, capsys):
 )
 def test_single_gate_routes_clean(tmp_path: Path, capsys, gate_type, kwargs, placer):
     _build(_single_gate_module(gate_type, **kwargs), tmp_path / "gate.litematic", capsys, placer=placer)
+
+
+@pytest.mark.parametrize("gate, cells", [
+    ("DFF", [(0, 0, 1), (0, 0, 0)]),
+    ("DFFE", [(0, 0, 2), (0, 0, 0)]),
+])
+def test_init_high_flip_flop_pastes_powered(gate, cells):
+    from litemapy import Region
+    from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
+    from minecraft_v.placement_engine.template import _load_template_region, _paste_template
+
+    kind = ComponentType[gate]
+    template = _load_template_region(SCHEMATICS_DIR, SCHEMATIC_MAP[kind].file_prefix)
+    for block_states, want in ((None, "false"), (INIT_HIGH_STATES[kind], "true")):
+        region = Region(0, 0, 0, 12, 3, 8)
+        _paste_template(region, template, (1, 1, 1), set(), block_states=block_states)
+        for x, y, z in cells:
+            assert region[1 + x, 1 + y, 1 + z]["powered"] == want

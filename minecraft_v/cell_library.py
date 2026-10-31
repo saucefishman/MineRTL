@@ -115,6 +115,21 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
 }
 
 
+# Template blocks to change for a flip-flop pasted holding a 1: the latched repeater and the
+# path from it to Q. Everything past Q settles when the world first updates.
+INIT_HIGH_STATES: dict[ComponentType, dict[tuple[int, int, int], dict[str, str]]] = {
+    ComponentType.DFF: {
+        (0, 0, 1): {"powered": "true"},
+        (0, 0, 0): {"powered": "true"},
+    },
+    ComponentType.DFFE: {
+        (0, 0, 2): {"powered": "true"},
+        (0, 0, 1): {"power": "15"},
+        (0, 0, 0): {"powered": "true"},
+    },
+}
+
+
 def apply_schematic_pin(pin_name: str, direction: Direction, schematic: SchematicInfo) -> PinRef:
     template = next((p for p in schematic.pins if p.name == pin_name and p.direction == direction), None)
     if template is None:

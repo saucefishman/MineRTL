@@ -11,7 +11,7 @@ from pathlib import Path
 from litemapy import BlockState, Region, Schematic
 
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
-from minecraft_v.cell_library import SCHEMATIC_MAP
+from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
 from minecraft_v.progress import ProgressBar, log
 from minecraft_v.placement_engine.ir import (
     Component,
@@ -91,7 +91,8 @@ def _place_gate_templates(
         )
         _paste_template(workspace, template, item.origin, solid,
                         dust_owner, f"__schematic__{c.id}", pin_positions,
-                        mirror_width=c.footprint.width if c.metadata.get("mirror_x") else None)
+                        mirror_width=c.footprint.width if c.metadata.get("mirror_x") else None,
+                        block_states=INIT_HIGH_STATES.get(c.type) if c.metadata.get("init") else None)
     return (ref_mc_version, ref_lm_version, ref_lm_sub)
 
 
