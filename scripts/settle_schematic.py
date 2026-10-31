@@ -41,7 +41,7 @@ def component_blocks(comp: dict) -> tuple[tuple[int, int, int], callable]:
 
 def settle(in_path: str, layout_path: str, out_path: str) -> None:
     schematic = Schematic.load(in_path)
-    region = next(iter(schematic.regions.values()))
+    region = schematic.regions["main"]
     cuts = []
     for comp in json.load(open(layout_path)):
         if comp["type"] not in ("DFF", "DFFE"):
@@ -53,7 +53,8 @@ def settle(in_path: str, layout_path: str, out_path: str) -> None:
                 region[world(x, z)] = region[world(x, z)].with_properties(**props)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        schematic.save(str(tmp / "in.litematic"))
+        # Without any generated clock region: it would never settle, and the clock counts as low.
+        Schematic(name="settle", regions={"main": region}).save(str(tmp / "in.litematic"))
         (tmp / "cuts.txt").write_text("".join(f"{x} {y} {z}\n" for x, y, z in cuts))
         result = subprocess.run([SETTLE, tmp / "in.litematic", tmp / "cuts.txt", tmp / "states.txt"],
                                 check=True, capture_output=True, text=True)

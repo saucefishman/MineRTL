@@ -148,7 +148,8 @@ def main():
     parser.add_argument("--schematic-name", type=str, default=None)
     parser.add_argument("--allow-routing-failures", type=bool, default=False)
     parser.add_argument("--output-pin-targets-json", type=str, default=None)
-    parser.add_argument("--generate-clock", type=str, default=None)
+    parser.add_argument("--generate-clock", type=str, default="auto",
+                        help="Input pin to drive with a generated clock; auto: _clk or clk if present; none: no clock")
     parser.add_argument("--route-passes", type=int, default=None,
                         help="Routing passes incl. final hard pass; 1 = single greedy pass (default: _ROUTE_MAX_PASSES)")
     parser.add_argument("--wire-timeout", type=float, default=None,
@@ -238,7 +239,10 @@ def main():
         if args.output_pin_targets_json and not args.no_pin_extensions
         else None
     )
-    generate_clock_pin = args.generate_clock
+    generate_clock_pin = None if args.generate_clock == "none" else args.generate_clock
+    if generate_clock_pin == "auto":
+        pins = {c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN}
+        generate_clock_pin = next((pin for pin in ("_clk", "clk") if pin in pins), None)
     if generate_clock_pin is not None and generate_clock_pin not in (c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN):
         raise SystemExit(f"Input pin '{generate_clock_pin}' for clock generation does not exist. Available pins: "
                          f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")

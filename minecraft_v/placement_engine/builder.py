@@ -44,7 +44,7 @@ from .template import (
 )
 from .macro import Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import verify_signals, verify_support
+from .verify import find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -830,6 +830,10 @@ class _GreedyRouter:
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
+        # Wire branches off the net's own sinks, so signal has to be followed through those.
+        latch = find_latch(self.region, job.src, self.terminal_positions - {job.src, *job.sinks})
+        if latch and all(self.dust_owner.get(cell, job.net_id) == job.net_id for cell in latch):
+            raise LayConflict(f"Net '{job.net_id}': wire past a repeater feeds back into it (latch)", tuple(latch))
         self.paths[job.key] = (job.net_id, paths)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
@@ -863,7 +867,7 @@ class _GreedyRouter:
                 return
             except LayConflict as e:
                 stretch = frozenset(e.cells) - near_terminal - job_blocked
-                if attempt == _NET_RETRIES or not stretch or "cannot place repeater" not in str(e):
+                if attempt == _NET_RETRIES or not stretch or not ("cannot place repeater" in str(e) or "(latch)" in str(e)):
                     raise
                 rollback(self.rec, job.key, mark)
                 job_blocked |= stretch

@@ -1,6 +1,8 @@
 // Reads memory out in order: q shows the word at count's low bits, count advances every clock.
 // wen stores count into the current word, so the memory stays flip-flops rather than a ROM.
-module main(input clk, input wen, output [15:0] count, output [15:0] q);
+module main(input _clk, input switch, input wen, output [15:0] count, output [15:0] q);
+
+    wire clk = _clk & switch;
 
     reg [15:0] counter = 0;
     reg [15:0] data[0:7];
