@@ -46,7 +46,7 @@ _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENS
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
-_WALL_CHANNEL = 16           # Z kept clear in front of a long macro's face, on top of its padding
+_WALL_CHANNEL = 16           # Z kept clear past a long macro's input face, on top of its padding
 _LANE_PITCH = 2              # Y between macro entry pins: dust, then the floor of the next lane
 
 
@@ -694,14 +694,12 @@ def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates:
                     elif c >= n:
                         pull[root] += 1 if is_input[c] else -1
         for root, members in groups.items():
-            if not pull[root]:
-                continue
+            to_south = pull[root] >= 0  # a group with no preference goes with the inputs
             # Rigidly, so the group keeps the arrangement poisson gave it.
             lo = pos[members, 2].min()
             hi = (pos[members, 2] + sizes[members, 2]).max()
-            channel = _WALL_CHANNEL
-            shift_z = south + channel - lo if pull[root] > 0 else north - channel - hi
-            if (pull[root] > 0 and lo >= south + channel) or (pull[root] < 0 and hi <= north - channel):
+            shift_z = south - lo if to_south else north - hi
+            if (to_south and lo >= south) or (not to_south and hi <= north):
                 shift_z = 0.0
             centre = (pos[members, 0] + sizes[members, 0] / 2).mean()
             pos[members, 2] += shift_z
@@ -744,6 +742,7 @@ def _poisson_placement(
         real_sizes = sizes
         sizes = sizes.copy()
         walls = _long_macros(gates)
+        real_sizes[walls, 2] += _WALL_CHANNEL  # in the box, so compaction can't close it
         if walls and len(walls) < len(gates):
             sizes[walls] = np.delete(sizes, walls, axis=0).max(axis=0)
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
