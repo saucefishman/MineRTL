@@ -196,7 +196,8 @@ def _port_name(i: int) -> str:
     return f"p{i}"
 
 
-def macro_netlist(cls: RepeatedClass, comp: ComponentList) -> tuple[ComponentList, dict[str, str]]:
+def macro_netlist(cls: RepeatedClass, comp: ComponentList, back_unique: bool = False,
+                  ) -> tuple[ComponentList, dict[str, str]]:
     """The template instance as its own netlist, external nets on IO pins. Also returns inner net -> port."""
     by_id = {c.id: c for c in comp.components}
     ends, _ = _net_index(comp)
@@ -205,7 +206,10 @@ def macro_netlist(cls: RepeatedClass, comp: ComponentList) -> tuple[ComponentLis
     # Entries on both faces: each needs a Y per pin for its lanes, so this halves the height pins force.
     by_fanout = sorted((n for n in cls.template if n not in cls.cells and cls.template.nodes[n]["label"] == "input"),
                        key=lambda n: (-len(ends[n]), n))
-    north_inputs = {n: k % 2 == 1 for k, n in enumerate(by_fanout)}
+    if back_unique:  # shared inputs on the lane face, per-tile ones behind with the outputs
+        north_inputs = {n: len({m[n] for m in cls.instances}) > 1 for n in by_fanout}
+    else:
+        north_inputs = {n: k % 2 == 1 for k, n in enumerate(by_fanout)}
     for net in sorted(n for n in cls.template if n not in cls.cells):
         label = cls.template.nodes[net]["label"]
         inside = [e for e in ends[net] if e[0] in cls.cells]
@@ -520,13 +524,166 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
     return array, Instance(array_name, f"{array_name}_0", identity, pin_net)
 
 
+_JOG = 8  # Z between the two columns of a bank's shared pins
+
+
+def build_bank(bank_name: str, tile: Macro, instances: list[dict[str, str]], cells: set[str], ports: dict[str, str],
+               columns: int) -> tuple[Macro, Instance]:
+    """One macro from up to 2 x columns tiles: two rows, the second turned half way, pin faces toward one lane plane.
+
+    Every shared input is a lane on its own Y between the rows, serving both, and leaves past the east end to its pin:
+    pins alternate between two Z positions, so that neighbours on a column are two lane pitches apart. Per-tile pins
+    stay on the tiles' back faces, the outside of the box.
+    """
+    fp = tile.footprint
+    pitch = fp.width + _TILE_GAP
+    row1_z = fp.depth + 3
+    row_width = columns * pitch - _TILE_GAP
+    east = row_width + 2
+    lane_z = fp.depth + 1
+    depth = row1_z + fp.depth
+    width = east + 2
+    blocks: dict[Pos, BlockState] = {}
+    owner: dict[Pos, str] = {}
+    terminals: dict[str, Pos] = {}
+    gate_boxes: list[tuple[Pos, Pos]] = []
+    nets: dict[str, tuple[str, list[str]]] = {}
+    port_net: dict[str, str] = {}
+    pin_net: dict[str, str] = {}
+    pins: list[PinRef] = []
+    arcs: dict[str, dict[str, int]] = {}
+    q_out: dict[str, int] = {}
+    setup: dict[str, int] = {}
+    inner_of = {port: net for net, port in ports.items()}
+    oriented = {False: tile.blocks_oriented(False, False), True: tile.blocks_oriented(False, True)}
+
+    def lay(pos: Pos, block: BlockState, net: str | None = None) -> None:
+        blocks[pos] = block
+        if net is not None:
+            owner[pos] = net
+        blocks.setdefault((pos[0], pos[1] - 1, pos[2]), _LANE_FLOOR)
+
+    def place(k: int) -> tuple[tuple[int, int, int], bool]:
+        row = k // columns
+        return (k % columns * pitch, 0, row * row1_z), row == 1
+
+    def at(k: int, rel: Pos) -> Pos:
+        origin, turned = place(k)
+        x, y, z = tile.oriented(rel, False, turned)
+        return origin[0] + x, y, origin[2] + z
+
+    for k, mapping in enumerate(instances):
+        origin, turned = place(k)
+        for (x, y, z), block in oriented[turned]:
+            blocks[(origin[0] + x, y, origin[2] + z)] = block
+        for rel, inner in tile.owner.items():
+            owner[at(k, rel)] = mapping[inner]
+        for (x, y, z), (sx, sy, sz) in tile.gate_boxes:
+            corners = [at(k, (x, y, z)), at(k, (x + sx - 1, y, z + sz - 1))]
+            gate_boxes.append(((min(c[0] for c in corners), y, min(c[2] for c in corners)), (sx, sy, sz)))
+        for key, rel in tile.terminals.items():
+            cell, pin = key.rsplit(":", 1)
+            if cell in cells:
+                terminals[f"{mapping[cell]}:{pin}"] = at(k, rel)
+        for inner, (source, sinks) in tile.nets.items():
+            net = mapping[inner]
+            mapped = [f"{mapping[e.rsplit(':', 1)[0]]}:{e.rsplit(':', 1)[1]}" for e in sinks
+                      if e.rsplit(":", 1)[0] in cells]
+            if source.rsplit(":", 1)[0] in cells:
+                nets[net] = (f"{mapping[source.rsplit(':', 1)[0]]}:{source.rsplit(':', 1)[1]}", mapped)
+            else:
+                nets[net] = ("", nets.get(net, ("", []))[1] + mapped)
+
+    extra: dict[tuple[int, str], tuple[str, int]] = {}
+    n_shared = 0
+    for port in sorted(tile.pins, key=lambda p: p.offset[1]):
+        tile_net = inner_of[port.name]
+        tile_x, y = port.offset[0], port.offset[1]
+        shared = port.side == CardinalDirection.SOUTH
+        if not shared:  # stays on the back of its tile
+            for k, mapping in enumerate(instances):
+                turned = place(k)[1]
+                net = mapping[tile_net]
+                rel = (tile_x, y, 0 if port.direction == Direction.OUT or not shared else fp.depth - 1)
+                x, _, z = at(k, rel)
+                name = f"t{k}_{port.name}"
+                pins.append(PinRef(name=name, direction=port.direction,
+                                   side=CardinalDirection.SOUTH if turned else CardinalDirection.NORTH,
+                                   offset=(x, y, depth - 1 - z)))
+                pin_net[name] = net
+                port_net[name] = net
+                if port.direction == Direction.OUT:
+                    nets[net] = (nets[net][0], nets[net][1] + [f"{name}:{name}"])
+                else:
+                    nets[net] = (f"{name}:{name}", nets[net][1])
+                    extra[(k, port.name)] = (name, 0)
+            continue
+        net = instances[0][tile_net]
+        taps = set()
+        for k in range(len(instances)):
+            x, _, z = at(k, (tile_x, y, fp.depth - 1))
+            taps.add(x)
+            inward = 1 if place(k)[1] else -1
+            spacer = z - inward
+            lay((x, y, spacer), _lane_repeater("south" if inward < 0 else "north"), net)
+        pin_z = lane_z + (_JOG if n_shared % 2 else 0)
+        n_shared += 1
+        lay((east + 1, y, pin_z), _lane_repeater("east"), net)
+        for z in range(min(lane_z, pin_z), max(lane_z, pin_z) + 1):  # the jog; its own Y, so nothing else is here
+            lay((east, y, z), _LANE_DUST, net)
+        since, ticks = (pin_z - lane_z), 1
+        ticks_at: dict[int, int] = {}
+        for x in range(east - 1, min(taps) - 1, -1):
+            if since >= _LANE_REACH and x not in taps:
+                lay((x, y, lane_z), _lane_repeater("east"), net)
+                since, ticks = 0, ticks + 1
+            else:
+                lay((x, y, lane_z), _LANE_DUST, net)
+                since += 1
+            ticks_at[x] = ticks
+        name = port.name
+        pins.append(PinRef(name=name, direction=Direction.IN, side=CardinalDirection.EAST,
+                           offset=(east + 1, y, depth - 1 - pin_z)))
+        pin_net[name] = net
+        port_net[name] = net
+        nets[net] = (f"{name}:{name}", nets[net][1])
+        for k in range(len(instances)):
+            extra[(k, port.name)] = (name, ticks_at[at(k, (tile_x, y, 0))[0]] + 1)
+    for k in range(len(instances)):
+        for port in tile.pins:
+            if port.direction == Direction.OUT and port.name in tile.q_out:
+                q_out[f"t{k}_{port.name}"] = tile.q_out[port.name]
+            if port.direction != Direction.IN:
+                continue
+            array_pin, before = extra[(k, port.name)]
+            into = arcs.setdefault(array_pin, {})
+            for out, ticks in tile.arcs.get(port.name, {}).items():
+                into[f"t{k}_{out}"] = max(into.get(f"t{k}_{out}", 0), ticks + before)
+            if port.name in tile.setup:
+                setup[array_pin] = max(setup.get(array_pin, 0), tile.setup[port.name] + before)
+    low = min(p[1] for p in blocks)
+    high = max(p[1] for p in blocks)
+    bank = Macro(
+        name=bank_name, footprint=Footprint(width=width, height=high - low + 1, depth=depth),
+        pins=[p.model_copy(update={"offset": (p.offset[0], p.offset[1] - low, p.offset[2])}) for p in pins],
+        blocks=[((x, y - low, z), b) for (x, y, z), b in blocks.items()],
+        arcs=arcs, q_out=q_out, setup=setup,
+        terminals={k: (p[0], p[1] - low, p[2]) for k, p in terminals.items()},
+        gate_boxes=[((p[0], p[1] - low, p[2]), size) for p, size in gate_boxes],
+        owner={(p[0], p[1] - low, p[2]): net for p, net in owner.items()},
+        nets=nets, port_net=port_net, cells=len(cells) * len(instances),
+    )
+    identity = {cell: cell for mapping in instances for cell in (mapping[c] for c in cells)}
+    return bank, Instance(bank_name, f"{bank_name}_0", identity, pin_net)
+
+
 def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
     """Pins per IO column that keep a macro's pin face about square."""
     return max(1, math.ceil(math.sqrt(n_pins * column_gap / y_gap)))
 
 
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
-                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
+                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
     """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances)."""
     macros: dict[str, Macro] = {}
@@ -537,16 +694,20 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
     pin_rows: list[tuple[str, str, str, Direction]] = []
 
     for cls in mine_repeated(comp, max_fanout, min_cells):
-        sub, ports = macro_netlist(cls, comp)
+        banked = bank_columns > 0 and len(cls.instances) >= 2 * bank_columns
+        sub, ports = macro_netlist(cls, comp, back_unique=banked)
         tile_name = f"macro_{_digest(sub)}"
         tile = build(tile_name, sub, ports, len(cls.cells))
         if on_class is not None:
             on_class(cls, tile)
-        per_array = row_tiles or len(cls.instances)
+        per_array = 2 * bank_columns if banked else row_tiles or len(cls.instances)
         for start in range(0, len(cls.instances), per_array):
             row = replace(cls, instances=cls.instances[start:start + per_array])
-            name = f"array_{len(macros)}"
-            macro, instance = build_array(name, tile, row, ports)
+            name = f"{'bank' if banked else 'array'}_{len(macros)}"
+            if banked:
+                macro, instance = build_bank(name, tile, row.instances, cls.cells, ports, bank_columns)
+            else:
+                macro, instance = build_array(name, tile, row, ports)
             macros[name] = macro
             fp = macro.footprint
             print(f"[macro] {name}: {len(row.instances)} x {tile_name}, footprint {fp.width}x{fp.height}x{fp.depth}, "
@@ -554,7 +715,7 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
             hidden_cells.update(instance.cell_map)
             instances.append(instance)
             new_components.append(Component(id=instance.component_id, type=ComponentType.CUSTOM, pins=macro.pins,
-                                            footprint=fp, metadata={"macro": name}))
+                                            footprint=fp, metadata={"macro": name, **({"bank": True} if banked else {})}))
             for pin in macro.pins:
                 pin_rows.append((instance.pin_net[pin.name], instance.component_id, pin.name, pin.direction))
     if not instances:

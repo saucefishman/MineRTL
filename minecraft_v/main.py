@@ -178,6 +178,8 @@ def main():
                         help="--macros: Z kept clear past a long macro's input face")
     parser.add_argument("--macro-headroom", type=int, default=32,
                         help="--macros: layers kept above the tallest macro")
+    parser.add_argument("--macro-bank-columns", type=int, default=0,
+                        help="--macros: tiles per row in fixed two-row banks facing one lane plane; 0 = off")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")
     args = parser.parse_args()
@@ -225,6 +227,7 @@ def main():
 
         component_list, macros, instances = extract_macros(component_list, build, args.macro_fanout, args.macro_min_cells,
                                                            args.macro_row_tiles,
+                                                           args.macro_bank_columns,
                                                            on_class=report)
         print(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")

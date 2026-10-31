@@ -565,7 +565,7 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
     out = list(gates)
     for i, c in enumerate(gates):
         w = c.footprint.width
-        if w < 2:
+        if w < 2 or c.metadata.get("bank"):
             continue
         before = cost.of(i)
         saved = {ni: cost.net_pins[ni] for ni in cost.comp_nets[i]}
@@ -631,7 +631,28 @@ def _long_macros(gates: list[Component]) -> list[int]:
     """Macros that act as walls: at least half the widest, and much wider than deep. Others behave like big gates."""
     macros = [(i, c.footprint) for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM]
     widest = max((fp.width for _, fp in macros), default=0)
-    return [i for i, fp in macros if fp.width * 2 >= widest and fp.width >= 2 * fp.depth]
+    return [i for i, fp in macros if fp.width * 2 >= widest and fp.width >= 2 * fp.depth
+            and not gates[i].metadata.get("bank")]
+
+
+def _fix_banks(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], banks: list[int], channel: int) -> None:
+    """Stack banks along Z at the origin, in place, with the other gates to the east, next to their pins.
+
+    Poisson's arrangement of the other gates is kept. Nothing crosses a bank to reach its east face.
+    """
+    z = 0.0
+    for i in banks:
+        pos[i] = (0.0, 0.0, z)
+        z += sizes[i, 2] + channel
+    rest = np.setdiff1d(np.arange(len(gates)), banks)
+    if not len(rest):
+        return
+    east = float((pos[banks, 0] + sizes[banks, 0]).max())
+    pos[rest, 0] += east + channel - pos[rest, 0].min()
+    middle = (z - channel) / 2
+    pos[rest, 2] += middle - (pos[rest, 2] + sizes[rest, 2] / 2).mean()
+    pos[rest, 2] -= min(0.0, float(pos[rest, 2].min()))
+    pos[rest, 1] -= float(pos[rest, 1].min())
 
 
 def _turn_macro(netlist: _Netlist, gates: list[Component], i: int) -> None:
@@ -652,7 +673,7 @@ def _turn_short_macros(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, ga
     for p, net in enumerate(netlist.pin_net.tolist()):
         net_pins[net].append(p)
     for i, c in enumerate(gates):
-        if c.type != ComponentType.CUSTOM or i in long:
+        if c.type != ComponentType.CUSTOM or i in long or c.metadata.get("bank"):
             continue
         middle = pos[i, 2] + c.footprint.depth / 2
         crossed = kept = 0
@@ -782,6 +803,8 @@ def _poisson_placement(
         sizes = sizes.copy()
         walls = _long_macros(gates)
         real_sizes[walls, 2] += macro_channel  # in the box, so compaction can't close it
+        banks = [i for i, c in enumerate(gates) if c.metadata.get("bank")]
+        walls = walls + banks
         if walls and len(walls) < len(gates):
             sizes[walls] = np.delete(sizes, walls, axis=0).max(axis=0)
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
@@ -791,8 +814,11 @@ def _poisson_placement(
 
         placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
         pos = np.rint(placed_pos)
-        sizes = real_sizes
-        pos = _legalize(pos, sizes, flat)
+        if banks:  # poisson's positions stand for the gates only: banks are fixed below, after compaction
+            pos = _legalize(pos, sizes, flat)
+        else:
+            sizes = real_sizes
+            pos = _legalize(pos, sizes, flat)
         pos[:, 0] -= pos[:, 0].min()
         for axis in (0, 2, 1):
             _compact(pos, sizes, axis)
@@ -806,6 +832,9 @@ def _poisson_placement(
             _pin_side_pass(netlist, pos, sizes, gates, centre=False)
             pos = _legalize(pos, sizes, flat)
             _turn_short_macros(netlist, pos, sizes, gates)
+        if banks:
+            sizes = real_sizes
+            _fix_banks(pos, sizes, gates, banks, macro_channel)
         print(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:
