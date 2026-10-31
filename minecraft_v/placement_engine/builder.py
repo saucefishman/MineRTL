@@ -50,7 +50,7 @@ from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
 BARREL = BlockState("minecraft:barrel")
-_WALL_VIA_LIFT = 3  # above a macro: clear of its keepout, with room for the wire's support
+_WALL_VIA_LIFT = 4  # above a macro: clear of its keepout, with room for the wire's support
 _MACRO_SEEDS = 4  # placement seeds to try before giving up on a macro
 
 
@@ -517,8 +517,10 @@ def _io_envelope_blocked(
     gates = []
     for item in placed:
         x, _, z = item.origin
-        if item.component.type == ComponentType.INPUT_PIN:
+        if item.component.type == ComponentType.INPUT_PIN and not item.component.metadata.get("north_face"):
             inputs[x] = max(inputs.get(x, z + 1), z + 1)
+        elif item.component.type == ComponentType.INPUT_PIN:
+            outputs[x] = min(outputs.get(x, z - 1), z - 1)
         elif item.component.type == ComponentType.OUTPUT_PIN:
             outputs[x] = min(outputs.get(x, z - 1), z - 1)
         else:
@@ -814,7 +816,7 @@ class _GreedyRouter:
         x, y, z = via
         if not (0 <= x < self.region.width and 0 <= y < self.region.height - 2 and 0 <= z < self.region.length):
             return False
-        cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-2, -1, 0, 1) for dz in (-1, 0, 1)]
+        cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
         return all(c not in self.footprint_blocked and self.dust_owner.get(c) in (None, job.net_id)
                    and _is_air(self.region[c]) for c in cells)
 
@@ -1568,7 +1570,7 @@ def build_litematic_from_component_list(
         capture: dict | None = None,
         io_columns: int | None = None,
         macro_channel: int = 16,
-        macro_headroom: int = 16,
+        macro_headroom: int = 32,
         io_lane_pins: bool = True,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""

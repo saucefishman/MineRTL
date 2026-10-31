@@ -200,6 +200,10 @@ def macro_netlist(cls: RepeatedClass, comp: ComponentList) -> tuple[ComponentLis
     ends, _ = _net_index(comp)
     comps = [by_id[cid] for cid in sorted(cls.cells)]
     nets, ports = [], {}
+    # Entries on both faces: each needs a Y per pin for its lanes, so this halves the height pins force.
+    by_fanout = sorted((n for n in cls.template if n not in cls.cells and cls.template.nodes[n]["label"] == "input"),
+                       key=lambda n: (-len(ends[n]), n))
+    north_inputs = {n: k % 2 == 1 for k, n in enumerate(by_fanout)}
     for net in sorted(n for n in cls.template if n not in cls.cells):
         label = cls.template.nodes[net]["label"]
         inside = [e for e in ends[net] if e[0] in cls.cells]
@@ -209,8 +213,11 @@ def macro_netlist(cls: RepeatedClass, comp: ComponentList) -> tuple[ComponentLis
         else:
             port = ports[net] = _port_name(len(ports))
             if label == "input":
+                north = north_inputs.get(net, False)
                 comps.append(Component(id=port, type=ComponentType.INPUT_PIN,
-                                       pins=[PinRef(name=port, direction=Direction.OUT)]))
+                                       pins=[PinRef(name=port, direction=Direction.OUT,
+                                                    side=CardinalDirection.NORTH if north else None)],
+                                       metadata={"north_face": True} if north else {}))
                 source = (port, port)
             else:
                 comps.append(Component(id=port, type=ComponentType.OUTPUT_PIN,
@@ -291,12 +298,13 @@ def macro_from_capture(name: str, sub: ComponentList, capture: dict, ports: dict
         cell = capture["io_cells"][(c.id, c.id)]
         r = rel(cell)
         is_input = c.type == ComponentType.INPUT_PIN
+        south = is_input and not c.metadata.get("north_face")
         # Facing away from the box is what lets the top level reach it.
-        if (r[2] != fp.depth - 1) if is_input else (r[2] != 0):
+        if (r[2] != fp.depth - 1) if south else (r[2] != 0):
             raise ValueError(f"pin {c.id} at {r} is not on its face of {fp}")
         pins.append(PinRef(
             name=c.id, direction=Direction.IN if is_input else Direction.OUT,
-            side=CardinalDirection.SOUTH if is_input else CardinalDirection.NORTH,
+            side=CardinalDirection.SOUTH if south else CardinalDirection.NORTH,
             offset=(r[0], r[1], fp.depth - 1 - r[2]),
         ))
     arcs, q_out, setup = macro_timing(sub, capture["net_ticks"], gate_delay, sequential)
@@ -372,8 +380,10 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
     x0 = 0
     pitch = fp.width + _TILE_GAP
     width = n * pitch - _TILE_GAP
-    spacer_z, lane_z, pin_z = fp.depth, fp.depth + 1, fp.depth + 2
-    depth = fp.depth + 3
+    tile_z = 3  # past the north face: pin, lane and spacer planes; the same again past the south face
+    faces = {CardinalDirection.SOUTH: (fp.depth + tile_z, fp.depth + tile_z + 1, fp.depth + tile_z + 2, "south"),
+             CardinalDirection.NORTH: (tile_z - 1, tile_z - 2, tile_z - 3, "north")}
+    depth = fp.depth + 2 * tile_z
     blocks: dict[Pos, BlockState] = {}
     owner: dict[Pos, str] = {}
     terminals: dict[str, Pos] = {}
@@ -389,7 +399,7 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
     inner_of = {port: net for net, port in ports.items()}
 
     def tile_rel(k: int, p: Pos) -> Pos:
-        return p[0] + x0 + k * pitch, p[1], p[2]
+        return p[0] + x0 + k * pitch, p[1], p[2] + tile_z
 
     def lay(pos: Pos, block: BlockState, net: str | None = None, floor: bool = True) -> None:
         blocks[pos] = block
@@ -424,9 +434,10 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
     n_lanes = 0
     for port in inputs:
         tile_x, y = port.offset[0], port.offset[1]
+        spacer_z, lane_z, pin_z, inward = faces[port.side]
         rel_nets = {m[inner_of[port.name]] for m in cls.instances}
         for k in range(n):
-            lay((tile_x + x0 + k * pitch, y, spacer_z), _lane_repeater("south"),
+            lay((tile_x + x0 + k * pitch, y, spacer_z), _lane_repeater(inward),
                 cls.instances[k][inner_of[port.name]])
         if len(rel_nets) == 1 and n > 1:
             net = rel_nets.pop()
@@ -434,7 +445,7 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
             # Tap the middle: pins sit near each other on the face and the lane runs both ways from there.
             tap = width // 2 + (n_lanes % _TAP_COLUMNS - _TAP_COLUMNS // 2) * _TAP_PITCH
             n_lanes += 1
-            lay((tap, y, pin_z), _lane_repeater("south"), net)
+            lay((tap, y, pin_z), _lane_repeater(inward), net)
             lay((tap, y, lane_z), _LANE_DUST, net)
             ticks_at: dict[int, int] = {tap: 1}
             taps = set(xs)
@@ -449,7 +460,7 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
                         since += 1
                     ticks_at[x] = ticks
             pin_name = port.name
-            pins.append(PinRef(name=pin_name, direction=Direction.IN, side=CardinalDirection.SOUTH,
+            pins.append(PinRef(name=pin_name, direction=Direction.IN, side=port.side,
                                offset=(tap, y, depth - 1 - pin_z)))
             pin_net[pin_name] = net
             port_net[pin_name] = net
@@ -461,9 +472,9 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
                 net = cls.instances[k][inner_of[port.name]]
                 x = tile_x + x0 + k * pitch
                 name = f"t{k}_{port.name}"
-                lay((x, y, lane_z), _lane_repeater("south"), net)
-                lay((x, y, pin_z), _lane_repeater("south"), net)
-                pins.append(PinRef(name=name, direction=Direction.IN, side=CardinalDirection.SOUTH,
+                lay((x, y, lane_z), _lane_repeater(inward), net)
+                lay((x, y, pin_z), _lane_repeater(inward), net)
+                pins.append(PinRef(name=name, direction=Direction.IN, side=port.side,
                                    offset=(x, y, depth - 1 - pin_z)))
                 pin_net[name] = net
                 port_net[name] = net
@@ -474,18 +485,20 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
             net = mapping[inner_of[port.name]]
             name = f"t{k}_{port.name}"
             x = port.offset[0] + x0 + k * pitch
+            for z in range(tile_z):  # out through the lane plane: its own Y, so no lane is in the way
+                lay((x, port.offset[1], z), _lane_repeater("south"), net)
             pins.append(PinRef(name=name, direction=Direction.OUT, side=CardinalDirection.NORTH,
                                offset=(x, port.offset[1], depth - 1)))
             pin_net[name] = net
             port_net[name] = net
             nets[net] = (nets[net][0], nets[net][1] + [f"{name}:{name}"])
             if port.name in tile.q_out:
-                q_out[name] = tile.q_out[port.name]
+                q_out[name] = tile.q_out[port.name] + tile_z
         for port in inputs:
             array_pin, before = extra[(k, port.name)]
             into = arcs.setdefault(array_pin, {})
             for out, ticks in tile.arcs.get(port.name, {}).items():
-                into[f"t{k}_{out}"] = max(into.get(f"t{k}_{out}", 0), ticks + before)
+                into[f"t{k}_{out}"] = max(into.get(f"t{k}_{out}", 0), ticks + before + tile_z)
             if port.name in tile.setup:
                 setup[array_pin] = max(setup.get(array_pin, 0), tile.setup[port.name] + before)
     ys = [p[1] for p in blocks]

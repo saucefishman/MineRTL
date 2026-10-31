@@ -176,7 +176,7 @@ def main():
                         help="--macros: instances per array, sharing lanes; 0 = all instances of a pattern in one array")
     parser.add_argument("--macro-channel", type=int, default=16,
                         help="--macros: Z kept clear past a long macro's input face")
-    parser.add_argument("--macro-headroom", type=int, default=16,
+    parser.add_argument("--macro-headroom", type=int, default=32,
                         help="--macros: layers kept above the tallest macro")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")

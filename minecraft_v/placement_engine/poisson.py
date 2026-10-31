@@ -214,8 +214,8 @@ class _IoPlacer:
             vals = [pins[e][axis] for e in self.neighbours[cid] if e in pins]
             return float(np.median(vals)) if vals else None
 
-        if self.column_pins is not None and self.lane_pins and comps is self.inputs:
-            # Macro entry pins: every one gets its own Y, so straight lanes can run along the face (macro.build_array).
+        if self.column_pins is not None and self.lane_pins:
+            # Macro pins: every one on a face gets its own Y, so straight lanes can run along it (macro.build_array).
             n_columns = max(2, math.ceil(len(comps) / self.column_pins))
             xs = _spread([centre] * n_columns, self.gutter + 1)
             lift = max(0, -xs[0])
@@ -262,7 +262,9 @@ class _IoPlacer:
                 for c, p in zip(gates, pos) for pin in c.pins}
         centre = width / 2
         out = {}
-        for comps, z, order in ((self.inputs, input_z, {}), (self.outputs, output_z, self.output_x_order)):
+        north = [c for c in self.inputs if c.metadata.get("north_face")]
+        south = [c for c in self.inputs if not c.metadata.get("north_face")]
+        for comps, z, order in ((south, input_z, {}), (self.outputs + north, output_z, self.output_x_order)):
             out.update({i: (x, y, z) for i, (x, y) in self._side(comps, pins, centre, order).items()})
         return out
 
@@ -607,7 +609,7 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
     def in_way(x: float) -> np.ndarray:
         return flat | ((x0 - _IO_COLUMN_CLEAR <= x) & (x <= x1 - 1 + _IO_COLUMN_CLEAR))
 
-    is_input = [c.type == ComponentType.INPUT_PIN for c in netlist.comps[n:]]
+    is_input = [c.type == ComponentType.INPUT_PIN and not c.metadata.get("north_face") for c in netlist.comps[n:]]
     inputs = [i + n for i, flag in enumerate(is_input) if flag]
     outputs = [i + n for i, flag in enumerate(is_input) if not flag]
 
@@ -823,6 +825,9 @@ def _poisson_placement(
     gates_final = _mirror_pass(netlist, pos_all, gates)
     pos_all[len(gates):] = io_rows()
     _io_rows(netlist, pos_all, gates_final, routing_gutter, bool(output_x_order), flat)
+    if _long_macros(gates_final):  # the north faces have pins too: room for their wires before the output row
+        pos_all[[i for i, c in enumerate(netlist.comps) if c.type == ComponentType.OUTPUT_PIN
+                 or c.metadata.get("north_face")], 2] -= macro_channel
     print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
 
     # World frame: margin in X, frontmost output at z=1 (as in layout._pack_layout).
