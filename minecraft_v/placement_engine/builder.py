@@ -959,7 +959,8 @@ def _route_all_nets(
     inverted_cells = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals, terminal_approach)
     walls = [p for p in placed if p.component.type == ComponentType.CUSTOM
-             and p.component.footprint.width >= 2 * p.component.footprint.depth]  # others are easy to go around
+             and (p.component.metadata.get("bank")
+                  or p.component.footprint.width >= 2 * p.component.footprint.depth)]  # others are easy to go around
     router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                            frozenset(pin_terminal.values()))
     jobs = [

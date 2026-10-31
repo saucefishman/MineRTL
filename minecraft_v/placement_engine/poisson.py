@@ -197,6 +197,7 @@ class _IoPlacer:
                  output_x_order: dict[str, float] | None, column_pins: int | None = None, lane_pins: bool = True):
         self.column_pins = column_pins  # share columns between signals, this many pins each (macro faces)
         self.lane_pins = lane_pins      # inputs get a Y each, for lanes along the face
+        self.lane_height: float | None = None  # height a bank's lane face should fit in
         self.inputs, self.outputs, self.nets = inputs, outputs, nets
         self.gutter, self.routing_gutter, self.y_gap = gutter, routing_gutter, y_gap
         self.flat, self.output_x_order = flat, output_x_order or {}
@@ -216,11 +217,16 @@ class _IoPlacer:
 
         if self.column_pins is not None and self.lane_pins:
             # Macro pins: every one on a face gets its own Y, so straight lanes can run along it (macro.build_array).
-            n_columns = max(2, math.ceil(len(comps) / self.column_pins))
+            # A bank's lane face (macro.build_bank) shares Ys to fit the gates' height; a column's pins stay clear of
+            # each other's bridges.
+            per_y = 1
+            if self.lane_height and any(c.metadata.get("lane_pair") for c in comps):
+                per_y = max(1, math.ceil(_LANE_PITCH * len(comps) / self.lane_height))
+            n_columns = max(2 * per_y, math.ceil(len(comps) / self.column_pins))
             xs = _spread([centre] * n_columns, self.gutter + 1)
             lift = max(0, -xs[0])
             by_y = sorted((c.id for c in comps), key=lambda i: (wanted(i, 1) or 0.0, i))
-            return {i: (xs[k % n_columns] + lift, _LANE_PITCH * k) for k, i in enumerate(by_y)}
+            return {i: (xs[k % n_columns] + lift, _LANE_PITCH * (k // per_y)) for k, i in enumerate(by_y)}
         groups: dict[str, list[str]] = defaultdict(list)
         if self.column_pins is None:
             for c in comps:
@@ -643,7 +649,8 @@ def _fix_banks(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], banks
     z = 0.0
     for i in banks:
         pos[i] = (0.0, 0.0, z)
-        z += sizes[i, 2] + channel
+        gap = gates[i].metadata.get("bank_gap")  # a routed bank's rows
+        z += gates[i].footprint.depth + gap if gap is not None else sizes[i, 2] + channel
     rest = np.setdiff1d(np.arange(len(gates)), banks)
     if not len(rest):
         return
@@ -811,6 +818,7 @@ def _poisson_placement(
         height = 1.0 if flat else float(max(sizes[:, 1].max(), volume ** (1 / 3)))
         side = max(math.sqrt(volume / height), float(sizes[:, [0, 2]].max()))
         dims = np.array([side, height, side])
+        io.lane_height = height
 
         placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
         pos = np.rint(placed_pos)
