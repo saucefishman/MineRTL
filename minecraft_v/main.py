@@ -174,6 +174,10 @@ def main():
                         help="--macros: smallest repeated subcircuit worth a macro")
     parser.add_argument("--macro-row-tiles", type=int, default=0,
                         help="--macros: instances per array, sharing lanes; 0 = all instances of a pattern in one array")
+    parser.add_argument("--macro-channel", type=int, default=16,
+                        help="--macros: Z kept clear past a long macro's input face")
+    parser.add_argument("--macro-headroom", type=int, default=16,
+                        help="--macros: layers kept above the tallest macro")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")
     args = parser.parse_args()
@@ -242,6 +246,8 @@ def main():
                                         place_workers=args.place_workers,
                                         flat=args.flat,
                                         macros=macros,
+                                        macro_channel=args.macro_channel,
+                                        macro_headroom=args.macro_headroom,
                                         **{k: v for k, v in (
                                             ("gutter", args.gutter),
                                             ("component_width_spacing", args.io_margin),

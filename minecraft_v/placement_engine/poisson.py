@@ -46,7 +46,6 @@ _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENS
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
-_WALL_CHANNEL = 16           # Z kept clear past a long macro's input face, on top of its padding
 _LANE_PITCH = 2              # Y between macro entry pins: dust, then the floor of the next lane
 
 
@@ -722,6 +721,7 @@ def _poisson_placement(
         flat: bool = False,
         output_x_order: dict[str, float] | None = None,
         io_column_pins: int | None = None,
+        macro_channel: int = 16,
 ) -> list[_Placed]:
     """Place gates electrostatically; see the module docstring."""
     t0 = time.monotonic()
@@ -742,7 +742,7 @@ def _poisson_placement(
         real_sizes = sizes
         sizes = sizes.copy()
         walls = _long_macros(gates)
-        real_sizes[walls, 2] += _WALL_CHANNEL  # in the box, so compaction can't close it
+        real_sizes[walls, 2] += macro_channel  # in the box, so compaction can't close it
         if walls and len(walls) < len(gates):
             sizes[walls] = np.delete(sizes, walls, axis=0).max(axis=0)
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
