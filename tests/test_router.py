@@ -169,3 +169,22 @@ def test_slope_notch_checked_when_cell_starts_a_longer_move():
     path = [(1, 11, 2), (2, 10, 2), (4, 8, 2)]
     with pytest.raises(LayConflict, match="would be cut"):
         _lay_redstone_path(workspace, {notch}, {}, path, "n")
+
+
+def test_bank_leads_only_for_the_bank_pins_and_channel():
+    from minecraft_v.placement_engine.builder import _bank_pin_leads
+    from minecraft_v.placement_engine.layout import _Placed
+    from minecraft_v.placement_engine.ir import (
+        Component, ComponentType, Footprint, NetConnection, NetEndpoint,
+    )
+    bank = _Placed(component=Component(id="bank", type=ComponentType.CUSTOM, pins=[], footprint=Footprint(width=100, height=20, depth=50),
+                                       metadata={"bank": True}), origin=(0, 0, 100))
+    terminals = {("s", "y"): (200, 5, 120), ("b", "east"): (100, 4, 120), ("g", "a"): (150, 4, 120),
+                 ("b", "back"): (30, 6, 99)}
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="s", pin_name="y"), sinks=[
+        NetEndpoint(component_id=c, pin_name=p) for c, p in (("b", "east"), ("g", "a"), ("b", "back"))])
+    leads = _bank_pin_leads(net, terminals, [bank])
+    assert len(leads) == 2
+    east, back = leads
+    assert east[1:] == (4, 120) and east[0] > 100
+    assert back[0] > 100 and back[1] == 6 and back[2] < 99  # the channel's mouth, away from the face

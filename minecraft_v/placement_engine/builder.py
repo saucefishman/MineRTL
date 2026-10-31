@@ -710,6 +710,7 @@ class _RouteJob:
     branch_from_net: bool = False  # first sink may also branch off the net's existing wire
     search_kwargs: dict = field(default_factory=dict)
     via: list[Pos] = field(default_factory=list)  # reached first, so the sinks branch from there
+    lead: list[Pos] = field(default_factory=list)  # short of a pin, for a straight last stretch
 
 
 class _GreedyRouter:
@@ -758,9 +759,12 @@ class _GreedyRouter:
         paths: list[list[Pos]] = []
         net_seeds = [pos for pos, owner in self.dust_owner.items()
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
-        sinks = sorted(job.sinks, key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
         reached_vias: list[Pos] = []
         vias = [v for v in (self._open_via(v, job) for v in job.via) if v is not None]
+        leads = [v for v in (self._open_via(v, job) for v in job.lead) if v is not None]
+        # Nearest first; a lead comes before its pin, which is further on the same line.
+        sinks = sorted([*job.sinks, *leads],
+                       key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
         for dst in [*vias, *sinks]:
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
             start = job.src
@@ -799,7 +803,15 @@ class _GreedyRouter:
                         raise
                     rollback(rec, job.key, mark)
                     blocked.add(cell)
+                except ValueError:
+                    if dst not in leads:
+                        raise
+                    rollback(rec, job.key, mark)
+                    path = None  # only a hint: the pin itself may still be reachable
+                    break
             self.failed_goal.pop(job.key, None)
+            if path is None:
+                continue
             if dst in vias:
                 reached_vias.append(dst)
             paths.append(path)
@@ -891,9 +903,11 @@ class _GreedyRouter:
                     self.rip(job.key)
                     goal = self.failed_goal.get(job.key)
                     cleared = cleared_for.get(job.key, set())
+                    # Around the source too: it can be the walled-in end, and nothing around the goal would help.
                     victims = [] if goal is None or goal in cleared or len(cleared) >= _RIP_ROUNDS \
-                        or not rip_blockers else [
-                        v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX]
+                        or not rip_blockers else list(dict.fromkeys(
+                            [v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX]
+                            + [v for v in self.blockers(job.src, job.key, keys) if v not in ripped][:_BLOCKER_MAX]))
                     if victims and not isinstance(e, LayConflict):
                         cleared_for.setdefault(job.key, set()).add(goal)
                         requeued.add(job.key)
@@ -911,6 +925,40 @@ class _GreedyRouter:
                 if on_done is not None:
                     on_done(i, job)
         return failures
+
+
+_BANK_PIN_LEAD = 6
+
+
+def _bank_pin_leads(
+        net: NetConnection,
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+        walls: list[_Placed],
+) -> list[tuple[int, int, int]]:
+    """Cells short of a bank's east pins, and at the mouth of the channel to pins on its outer faces.
+
+    Wire running along Z right against east pins walls off the ones routed last, and a search heading straight for a
+    pin round the corner floods the east face.
+    """
+    src = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
+    sinks = [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks]
+    leads = []
+    for wall in walls:
+        (ox, _, oz), fp = wall.origin, wall.component.footprint
+        if wall.component.metadata.get("bank"):
+            east = ox + fp.width
+            hash_ = zlib.crc32(net.net_id.encode())
+            lead = _BANK_PIN_LEAD + 2 * (hash_ % 8)  # spread, or wire running along Z just beyond them is the same wall
+            leads += [(p[0] + lead, p[1], p[2]) for p in sinks
+                      if east - 1 <= p[0] <= east + 1 and oz <= p[2] < oz + fp.depth and src[0] > p[0] + lead]
+            if src[0] >= east:
+                spread = 2 + 2 * ((hash_ >> 8) % 8)  # away from the face, as nets share a Y across tiles
+                # Sinks across the bank from the source have a waypoint over it instead.
+                leads += [(east + lead, p[1], p[2] - spread) for p in sinks
+                          if p[0] < east and p[2] < oz and src[2] < oz + fp.depth]
+                leads += [(east + lead, p[1], p[2] + spread) for p in sinks
+                          if p[0] < east and p[2] >= oz + fp.depth and src[2] >= oz]
+    return leads
 
 
 def _wall_vias(
@@ -973,6 +1021,7 @@ def _route_all_nets(
             terminals=all_terminals.get(net.net_id, set()),
             support_block=WOOLS[i % len(WOOLS)],
             via=_wall_vias(net, pin_terminal, walls),
+            lead=_bank_pin_leads(net, pin_terminal, walls),
         )
         for i, net in enumerate(sorted_nets, 1)
     ]
