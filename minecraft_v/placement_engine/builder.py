@@ -50,6 +50,7 @@ REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
 BARREL = BlockState("minecraft:barrel")
 _MACRO_HEADROOM = 16  # layers kept above the tallest macro
+_WALL_VIA_LIFT = 3  # above a macro: clear of its keepout, with room for the wire's support
 _MACRO_SEEDS = 4  # placement seeds to try before giving up on a macro
 
 
@@ -705,6 +706,7 @@ class _RouteJob:
     support_block: BlockState = STONE
     branch_from_net: bool = False  # first sink may also branch off the net's existing wire
     search_kwargs: dict = field(default_factory=dict)
+    via: list[Pos] = field(default_factory=list)  # reached first, so the sinks branch from there
 
 
 class _GreedyRouter:
@@ -754,8 +756,12 @@ class _GreedyRouter:
         net_seeds = [pos for pos, owner in self.dust_owner.items()
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
         sinks = sorted(job.sinks, key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
-        for dst in sinks:
+        for dst in [*job.via, *sinks]:
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
+            start = job.src
+            far_via = next((v for v in job.via if v != dst and (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
+            if far_via is not None:  # searching from the near side too would only flood the wall's face
+                start, tree_seeds = far_via, [far_via]
             seed_depths = _signal_depths((self.net_paths(job.net_id) if net_seeds else []) + paths)
             self.failed_goal[job.key] = dst  # cleared when the sink is laid
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
@@ -765,7 +771,7 @@ class _GreedyRouter:
                 try:
                     path = _find_wire_path(
                         ws, self.solid, self.dust_owner,
-                        job.src, dst, job.net_id,
+                        start, dst, job.net_id,
                         job.bounds, self.max_bridge_y,
                         tree_seeds=tree_seeds,
                         protected=job.protected,
@@ -880,6 +886,31 @@ class _GreedyRouter:
         return failures
 
 
+def _macro_walls(placed: list[_Placed]) -> list[_Placed]:
+    """Macros long enough that wire can't sensibly go around them: at least half the widest."""
+    macros = [p for p in placed if p.component.type == ComponentType.CUSTOM]
+    widest = max((p.component.footprint.width for p in macros), default=0)
+    return [p for p in macros if p.component.footprint.width * 2 >= widest]
+
+
+def _wall_vias(
+        net: NetConnection,
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+        walls: list[_Placed],
+) -> list[tuple[int, int, int]]:
+    """A cell above each wall the net has to cross. A* heads straight at a goal behind a wall and floods its face."""
+    src = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
+    sinks = [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks]
+    via = []
+    for wall in walls:
+        (ox, oy, oz), fp = wall.origin, wall.component.footprint
+        z0, z1 = oz, oz + fp.depth - 1
+        crossing = [p for p in sinks if (src[2] < z0 and p[2] > z1) or (src[2] > z1 and p[2] < z0)]
+        if crossing and ox <= src[0] < ox + fp.width:
+            via.append((src[0], oy + fp.height + _WALL_VIA_LIFT, oz + fp.depth // 2))
+    return via
+
+
 def _route_all_nets(
         workspace: Region,
         rec: Recorder,
@@ -895,6 +926,7 @@ def _route_all_nets(
         deadline: float | None = None,
         fail_fast: bool = False,
         terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None,
+        placed: list[_Placed] = (),
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]], dict[str, tuple[str, list[list[Pos]]]]]:
     """Greedy routing of every net (_GreedyRouter); returns (failures, inverted cells, paths).
 
@@ -902,6 +934,7 @@ def _route_all_nets(
     """
     inverted_cells = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals, terminal_approach)
+    walls = _macro_walls(placed)
     router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                            frozenset(pin_terminal.values()))
     jobs = [
@@ -913,6 +946,7 @@ def _route_all_nets(
             protected=keepouts.for_net(net.net_id),
             terminals=all_terminals.get(net.net_id, set()),
             support_block=WOOLS[i % len(WOOLS)],
+            via=_wall_vias(net, pin_terminal, walls),
         )
         for i, net in enumerate(sorted_nets, 1)
     ]
@@ -1651,6 +1685,7 @@ def build_litematic_from_component_list(
             deadline=deadline,
             fail_fast=not allow_routing_failures,
             terminal_approach=terminal_approach,
+            placed=placed,
         )
     else:
         net_paths = {}  # negotiated mode keeps no ordered paths
