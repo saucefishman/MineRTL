@@ -117,6 +117,11 @@ def module_to_component_list(module: Module) -> ComponentList:
     )
 
 
+_BANK_GUTTER = 12
+_BANK_ROUTING_GUTTER = 12
+_BANK_Y_SPACING = 5
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--netlist", required=True)
@@ -166,21 +171,25 @@ def main():
                         help="extra Y between levels beyond the tallest component (default 3)")
     parser.add_argument("--no-pin-extensions", action="store_true",
                         help="ignore --output-pin-targets-json (no output pin extensions)")
-    parser.add_argument("--macros", action="store_true",
-                        help="Route repeated subcircuits once and stamp them; the rest routes around them")
+    parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=True,
+                        help="Route repeated subcircuits once and stamp them; the rest routes around them (default: on; "
+                             "needs --placer poisson, ignored with --flat)")
     parser.add_argument("--macro-fanout", type=int, default=2,
                         help="--macros: nets above this fanout are shared between instances, not grouped into them")
     parser.add_argument("--macro-min-cells", type=int, default=8,
                         help="--macros: smallest repeated subcircuit worth a macro")
+    parser.add_argument("--macro-min-instances", type=int, default=None,
+                        help="--macros: use macros only if some pattern repeats this often (default: enough for a "
+                             "bank; designs with only small repeats route better as gates)")
     parser.add_argument("--macro-row-tiles", type=int, default=0,
                         help="--macros: instances per array, sharing lanes; 0 = all instances of a pattern in one array")
-    parser.add_argument("--macro-channel", type=int, default=16,
+    parser.add_argument("--macro-channel", type=int, default=24,
                         help="--macros: Z kept clear past a long macro's input face")
     parser.add_argument("--macro-east-room", type=int, default=20,
                         help="--macro-bank-columns: X past a bank stack's pin end where gates may go; the rest go on top")
     parser.add_argument("--macro-headroom", type=int, default=32,
                         help="--macros: layers kept above the tallest macro")
-    parser.add_argument("--macro-bank-columns", type=int, default=0,
+    parser.add_argument("--macro-bank-columns", type=int, default=4,
                         help="--macros: tiles per row in fixed two-row banks facing one lane plane; 0 = off")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")
@@ -218,7 +227,7 @@ def main():
                          f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")
 
     macros = None
-    if args.macros:
+    if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
                                cache_dir=Path(args.macro_cache) / f"row{args.macro_row_tiles}",
@@ -230,9 +239,16 @@ def main():
         component_list, macros, instances = extract_macros(component_list, build, args.macro_fanout, args.macro_min_cells,
                                                            args.macro_row_tiles,
                                                            args.macro_bank_columns,
+                                                           (args.macro_min_instances if args.macro_min_instances is not None
+                                                            else max(2, 2 * args.macro_bank_columns)),
                                                            on_class=report)
         print(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")
+        if any(c.metadata.get("bank") for c in component_list.components):
+            # Gates around a bank stack: what mem and regsbig route clean with. Without banks, the usual auto spacing.
+            args.gutter = _BANK_GUTTER if args.gutter is None else args.gutter
+            args.routing_gutter = _BANK_ROUTING_GUTTER if args.routing_gutter is None else args.routing_gutter
+            args.y_spacing = _BANK_Y_SPACING if args.y_spacing is None else args.y_spacing
 
     build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir),
                                         out_path=out_litematic, schematic_name=schematic_name,

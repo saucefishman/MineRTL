@@ -753,7 +753,7 @@ def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
 
 
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
-                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
+                   max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, min_instances: int = 2, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
     """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances)."""
     macros: dict[str, Macro] = {}
@@ -763,7 +763,10 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
     ends, _ = _net_index(comp)
     pin_rows: list[tuple[str, str, str, Direction]] = []
 
-    for cls in mine_repeated(comp, max_fanout, min_cells):
+    classes = list(mine_repeated(comp, max_fanout, min_cells))
+    if not any(len(cls.instances) >= min_instances for cls in classes):
+        classes = []  # only small repeats: they route worse as macros than as gates
+    for cls in classes:
         banked = bank_columns > 0 and len(cls.instances) >= 2 * bank_columns
         sub, ports = macro_netlist(cls, comp, back_unique=banked)
         tile_name = f"macro_{_digest(sub)}"
