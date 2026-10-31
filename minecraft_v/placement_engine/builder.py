@@ -934,6 +934,7 @@ def _bank_pin_leads(
         net: NetConnection,
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         walls: list[_Placed],
+        macros: list[_Placed],
 ) -> list[tuple[int, int, int]]:
     """Cells short of a bank's east pins, and at the mouth of the channel to pins on its outer faces.
 
@@ -949,8 +950,15 @@ def _bank_pin_leads(
             east = ox + fp.width
             hash_ = zlib.crc32(net.net_id.encode())
             lead = _BANK_PIN_LEAD + 2 * (hash_ % 8)  # spread, or wire running along Z just beyond them is the same wall
-            leads += [(p[0] + lead, p[1], p[2]) for p in sinks
-                      if east - 1 <= p[0] <= east + 1 and oz <= p[2] < oz + fp.depth and src[0] > p[0] + lead]
+            at_pins = [p for p in sinks if east - 1 <= p[0] <= east + 1 and oz <= p[2] < oz + fp.depth
+                       and src[0] > p[0] + lead]
+            leads += [(p[0] + lead, p[1], p[2]) for p in at_pins]
+            for other in macros:  # in the way of the straight line to a pin: over it
+                (mx, my, mz), mf = other.origin, other.component.footprint
+                if other.component.metadata.get("bank") or src[0] < mx + mf.width:
+                    continue
+                leads += [(mx + mf.width // 2, my + mf.height + _WALL_VIA_LIFT, p[2]) for p in at_pins
+                          if mz <= p[2] < mz + mf.depth and p[1] < my + mf.height]
             if src[0] >= east:
                 spread = 2 + 2 * ((hash_ >> 8) % 8)  # away from the face, as nets share a Y across tiles
                 # Sinks across the bank from the source have a waypoint over it instead.
@@ -978,7 +986,11 @@ def _wall_vias(
         if over is not None:
             # Spread by net: nets from one IO column share an X, and a cell only fits one.
             spread = zlib.crc32(net.net_id.encode())
-            via.append((over, oy + fp.height + _WALL_VIA_LIFT + 2 * (spread % 4),
+            # Over whatever is stacked on this wall too.
+            top = max(w.origin[1] + w.component.footprint.height for w in walls
+                      if w.origin[0] < ox + fp.width and ox < w.origin[0] + w.component.footprint.width
+                      and w.origin[2] < oz + fp.depth and oz < w.origin[2] + w.component.footprint.depth)
+            via.append((over, top + _WALL_VIA_LIFT + 2 * (spread % 4),
                         oz + (spread >> 8) % fp.depth))
     return via
 
@@ -1006,6 +1018,7 @@ def _route_all_nets(
     """
     inverted_cells = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals, terminal_approach)
+    macros = [p for p in placed if p.component.type == ComponentType.CUSTOM]
     walls = [p for p in placed if p.component.type == ComponentType.CUSTOM
              and (p.component.metadata.get("bank")
                   or p.component.footprint.width >= 2 * p.component.footprint.depth)]  # others are easy to go around
@@ -1021,7 +1034,7 @@ def _route_all_nets(
             terminals=all_terminals.get(net.net_id, set()),
             support_block=WOOLS[i % len(WOOLS)],
             via=_wall_vias(net, pin_terminal, walls),
-            lead=_bank_pin_leads(net, pin_terminal, walls),
+            lead=_bank_pin_leads(net, pin_terminal, walls, macros),
         )
         for i, net in enumerate(sorted_nets, 1)
     ]

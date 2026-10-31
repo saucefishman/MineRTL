@@ -183,7 +183,7 @@ def test_bank_leads_only_for_the_bank_pins_and_channel():
                  ("b", "back"): (30, 6, 99)}
     net = NetConnection(net_id="n", source=NetEndpoint(component_id="s", pin_name="y"), sinks=[
         NetEndpoint(component_id=c, pin_name=p) for c, p in (("b", "east"), ("g", "a"), ("b", "back"))])
-    leads = _bank_pin_leads(net, terminals, [bank])
+    leads = _bank_pin_leads(net, terminals, [bank], [bank])
     assert len(leads) == 2
     east, back = leads
     assert east[1:] == (4, 120) and east[0] > 100

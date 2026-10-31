@@ -641,15 +641,20 @@ def _long_macros(gates: list[Component]) -> list[int]:
             and not gates[i].metadata.get("bank")]
 
 
-def _fix_banks(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], banks: list[int], channel: int) -> None:
-    """Stack banks along Z at the origin, in place, with the other gates to the east, next to their pins.
+_BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
 
-    Poisson's arrangement of the other gates is kept. Nothing crosses a bank to reach its east face.
+
+def _fix_banks(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], banks: list[int], channel: int) -> None:
+    """Stack banks in Y at the origin, in place, with the other gates to the east, next to their pins.
+
+    Poisson's arrangement of the other gates is kept. Nothing crosses a bank to reach its east face, and the faces with
+    per-tile pins stay in the open.
     """
-    z = 0.0
+    y = 0.0
     for i in banks:
-        pos[i] = (0.0, 0.0, z)
-        z += sizes[i, 2] + channel
+        pos[i] = (0.0, y, 0.0)
+        y += gates[i].footprint.height + _BANK_Y_GAP
+    z = float(sizes[banks, 2].max()) + channel
     rest = np.setdiff1d(np.arange(len(gates)), banks)
     if not len(rest):
         return
