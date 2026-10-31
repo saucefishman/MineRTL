@@ -97,7 +97,8 @@ def _instance_graph(cells: set[str], by_id: dict[str, Component], ends, pin_net)
     for cid in cells:
         c = by_id[cid]
         consts = tuple(sorted((p.name, p.const_value) for p in c.pins if p.const_value is not None))
-        g.add_node(cid, label=(c.type.value, consts))
+        # Stamps share their blocks, so flip-flops starting at different values can't share a macro.
+        g.add_node(cid, label=(c.type.value, consts, c.metadata.get("init", 0)))
         for pin in c.pins:
             net = pin_net.get((cid, pin.name))
             if net is None:
