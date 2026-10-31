@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import heapq
 import math
-import os
 import time
 from collections import defaultdict
 
@@ -682,28 +681,6 @@ def _long_macros(gates: list[Component]) -> list[int]:
 _BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
 
 
-def _fix_banks(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], banks: list[int], channel: int) -> None:
-    """Stack banks in Y at the origin, in place, with the other gates to the east, next to their pins.
-
-    Poisson's arrangement of the other gates is kept. Nothing crosses a bank to reach its east face, and the faces with
-    per-tile pins stay in the open.
-    """
-    y = 0.0
-    for i in banks:
-        pos[i] = (0.0, y, 0.0)
-        y += gates[i].footprint.height + _BANK_Y_GAP
-    z = float(sizes[banks, 2].max()) + channel
-    rest = np.setdiff1d(np.arange(len(gates)), banks)
-    if not len(rest):
-        return
-    east = float((pos[banks, 0] + sizes[banks, 0]).max())
-    pos[rest, 0] += east + channel - pos[rest, 0].min()
-    pos[rest, 1] -= float(pos[rest, 1].min())
-    middle = (z - channel) / 2
-    pos[rest, 2] += middle - (pos[rest, 2] + sizes[rest, 2] / 2).mean()
-    pos[rest, 2] -= min(0.0, float(pos[rest, 2].min()))
-
-
 def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Component], banks: list[int], io: _IoPlacer,
                         seed: int, channel: int, east_room: float
                         ) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray]]:
@@ -723,7 +700,7 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
     dims = np.array([width + channel + east_room, 0.0, depth + 2.0 * channel])
     dims[1] = max(volume / (dims[0] * dims[2]), y + float(sizes[free, 1].max()))
-    print(f"[place] poisson: real banks, domain {tuple(int(v) for v in dims)}")
+    print(f"[place] poisson: around banks, domain {tuple(int(v) for v in dims)}")
     pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, fixed, box))
     occ = _Occupancy(np.vstack([sizes, box[1]]))
     occ.add(len(gates), (0, 0, 0))
@@ -865,6 +842,7 @@ def _poisson_placement(
         output_x_order: dict[str, float] | None = None,
         io_column_pins: int | None = None,
         macro_channel: int = 16,
+        macro_east_room: int = 20,
         io_lane_pins: bool = True,
 ) -> list[_Placed]:
     """Place gates electrostatically; see the module docstring."""
@@ -891,7 +869,6 @@ def _poisson_placement(
         walls = walls + banks
         if walls and len(walls) < len(gates):
             sizes[walls] = np.delete(sizes, walls, axis=0).max(axis=0)
-        real_banks = os.environ.get("BREAL")
         fixed_box = None
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
         height = 1.0 if flat else float(max(sizes[:, 1].max(), volume ** (1 / 3)))
@@ -899,39 +876,27 @@ def _poisson_placement(
         dims = np.array([side, height, side])
         io.lane_height = height
 
-        if banks and real_banks is not None:
+        if banks:
             pos, sizes, fixed_box = _place_around_banks(netlist, real_sizes, gates, banks, io, seed, macro_channel,
-                                                        float(real_banks))
-            print(f"[place] poisson: real banks, legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}")
-            banks = []
-            placed_pos = None
+                                                        float(macro_east_room))
         else:
             placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
             pos = np.rint(placed_pos)
-        if placed_pos is None:
-            pass
-        elif banks:  # poisson's positions stand for the gates only: banks are fixed below, after compaction
-            pos = _legalize(pos, sizes, flat)
-        else:
             sizes = real_sizes
             pos = _legalize(pos, sizes, flat)
-        if placed_pos is not None:
             pos[:, 0] -= pos[:, 0].min()
             for axis in (0, 2, 1):
                 _compact(pos, sizes, axis)
             _face_macro_rows(netlist, pos, gates)
-        if placed_pos is not None and _pin_side_pass(netlist, pos, sizes, gates):
-            pos = _legalize(pos, sizes, flat)
-            pos[:, 0] -= pos[:, 0].min()
-            for axis in (0, 2, 1):
-                _compact(pos, sizes, axis)
-            # Compaction slides gates under and over a wall, where wire can't reach its far face. No compaction after this.
-            _pin_side_pass(netlist, pos, sizes, gates, centre=False)
-            pos = _legalize(pos, sizes, flat)
-            _turn_short_macros(netlist, pos, sizes, gates)
-        if banks:
-            sizes = real_sizes
-            _fix_banks(pos, sizes, gates, banks, macro_channel)
+            if _pin_side_pass(netlist, pos, sizes, gates):
+                pos = _legalize(pos, sizes, flat)
+                pos[:, 0] -= pos[:, 0].min()
+                for axis in (0, 2, 1):
+                    _compact(pos, sizes, axis)
+                # Compaction slides gates under and over a wall, where wire can't reach its far face. No compaction after this.
+                _pin_side_pass(netlist, pos, sizes, gates, centre=False)
+                pos = _legalize(pos, sizes, flat)
+                _turn_short_macros(netlist, pos, sizes, gates)
         print(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:

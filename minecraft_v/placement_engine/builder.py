@@ -774,7 +774,8 @@ class _GreedyRouter:
             seed_depths = _signal_depths((self.net_paths(job.net_id) if net_seeds else []) + paths)
             self.failed_goal[job.key] = dst  # cleared when the sink is laid
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
-            keep = {job.src, dst, *tree_seeds}
+            ends = {job.src, dst}
+            attempts = 0
             while True:
                 mark = len(rec.journals[job.key])
                 try:
@@ -798,11 +799,21 @@ class _GreedyRouter:
                                        terminal_positions=self.terminal_positions)
                     break
                 except LayConflict as e:
-                    cell = next((c for c in e.cells if c not in keep and c not in blocked), None)
+                    cell = next((c for c in e.cells if c not in ends and c not in blocked), None)
                     if cell is None or len(blocked) >= len(job_blocked) + _LAY_RETRIES:
-                        raise
+                        if dst not in leads:
+                            raise
+                        rollback(rec, job.key, mark)
+                        path = None  # only a hint
+                        break
                     rollback(rec, job.key, mark)
-                    blocked.add(cell)
+                    if cell in tree_seeds:  # can't branch here; the wire stays
+                        tree_seeds = [t for t in tree_seeds if t != cell]
+                        attempts += 1
+                        if attempts > _LAY_RETRIES:
+                            raise
+                    else:
+                        blocked.add(cell)
                 except ValueError:
                     if dst not in leads:
                         raise
@@ -953,6 +964,13 @@ def _bank_pin_leads(
             at_pins = [p for p in sinks if east - 1 <= p[0] <= east + 1 and oz <= p[2] < oz + fp.depth
                        and src[0] > p[0] + lead]
             leads += [(p[0] + lead, p[1], p[2]) for p in at_pins]
+            for other in macros:  # small macros are not walls, but one in the way still floods: a hint over it
+                (mx, my, mz), mf = other.origin, other.component.footprint
+                if other.component.metadata.get("bank"):
+                    continue
+                leads += [(p[0], my + mf.height + _WALL_VIA_LIFT, mz + mf.depth // 2) for p in sinks
+                          if mx <= p[0] < mx + mf.width
+                          and ((src[2] < mz and p[2] >= mz + mf.depth - 1) or (src[2] >= mz + mf.depth and p[2] <= mz))]
             for other in macros:  # in the way of the straight line to a pin: over it
                 (mx, my, mz), mf = other.origin, other.component.footprint
                 if other.component.metadata.get("bank") or src[0] < mx + mf.width:
@@ -1464,20 +1482,49 @@ def _report_unsupported_blocks(
 _SEQUENTIAL = frozenset({ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH})
 
 
+_WIRE_NEIGHBOURS = tuple(
+    (dx, dy, dz) for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)) for dy in (-1, 0, 1)
+) + tuple((0, dy, 0) for dy in (-5, -4, -3, -2, -1, 1, 2, 3, 4, 5))
+
+
 def _net_wire_ticks(
         comp: ComponentList,
         dust_owner: dict[tuple[int, int, int], str],
         workspace: Region,
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
 ) -> dict[str, int]:
-    """Repeaters and torches each net routes through."""
-    net_ticks: dict[str, int] = {n.net_id: 0 for n in comp.nets}
+    """Repeaters and torches on each net's deepest branch from its source."""
+    cells: dict[str, dict[tuple[int, int, int], int]] = {n.net_id: {} for n in comp.nets}
     for pos, nid in dust_owner.items():
-        if nid not in net_ticks:
-            continue
-        blk = workspace[pos[0], pos[1], pos[2]]
-        if _is_repeater(blk) or _is_torch(blk):
-            net_ticks[nid] += 1
-    return net_ticks
+        if nid in cells:
+            blk = workspace[pos[0], pos[1], pos[2]]
+            cells[nid][pos] = 1 if _is_repeater(blk) or _is_torch(blk) else 0
+    ticks: dict[str, int] = {}
+    for n in comp.nets:
+        net = cells[n.net_id]
+        src = _pin_for_endpoint(pin_terminal, n.source.component_id, n.source.pin_name)
+        depth: dict[tuple[int, int, int], int] = {}
+        floor = 0
+        while len(depth) < len(net):  # wire not joined to the rest (a hop the neighbours miss) continues from the deepest
+            start = min((p for p in net if p not in depth),
+                        key=lambda p: abs(p[0] - src[0]) + abs(p[1] - src[1]) + abs(p[2] - src[2]))
+            depth[start] = floor + net[start]
+            queue = deque([start])
+            while queue:
+                x, y, z = pos = queue.popleft()
+                for dx, dy, dz in _WIRE_NEIGHBOURS:
+                    next_pos = (x + dx, y + dy, z + dz)
+                    cost = net.get(next_pos)
+                    if cost is None or depth.get(next_pos, 1 << 30) <= depth[pos] + cost:
+                        continue
+                    depth[next_pos] = depth[pos] + cost
+                    if cost:
+                        queue.append(next_pos)
+                    else:
+                        queue.appendleft(next_pos)
+            floor = max(depth.values())
+        ticks[n.net_id] = floor
+    return ticks
 
 
 def _gate_delay(c: Component) -> int:
@@ -1488,13 +1535,14 @@ def _compute_critical_path(
         comp: ComponentList,
         dust_owner: dict[tuple[int, int, int], str],
         workspace: Region,
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         macros: dict[str, Macro] | None = None,
 ) -> int:
-    """Count repeaters/torches per net, topo-sort DP; returns the critical path in ticks."""
+    """Repeaters/torches on each net's deepest branch, topo-sort DP; returns the critical path in ticks."""
     from collections import deque
 
     # Wire ticks per net: repeaters and torches placed in dust_owner
-    net_ticks = _net_wire_ticks(comp, dust_owner, workspace)
+    net_ticks = _net_wire_ticks(comp, dust_owner, workspace, pin_terminal)
 
     # IO repeater on nets driven by INPUT_PINs (+1 per such net)
     comp_by_id: dict[str, Component] = {c.id: c for c in comp.components}
@@ -1643,6 +1691,7 @@ def build_litematic_from_component_list(
         capture: dict | None = None,
         io_columns: int | None = None,
         macro_channel: int = 16,
+        macro_east_room: int = 20,
         macro_headroom: int = 32,
         io_lane_pins: bool = True,
 ) -> Path:
@@ -1673,7 +1722,7 @@ def build_litematic_from_component_list(
             base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
             routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
             seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
-            macro_channel=macro_channel, io_lane_pins=io_lane_pins,
+            macro_channel=macro_channel, macro_east_room=macro_east_room, io_lane_pins=io_lane_pins,
         )
     else:
         placed = _optimize_placement(
@@ -1846,7 +1895,7 @@ def build_litematic_from_component_list(
     if capture is not None:
         capture.update(
             workspace=workspace, placed=placed, dust_owner=dict(dust_owner), pin_terminal=pin_terminal,
-            net_ticks=_net_wire_ticks(comp, dust_owner, workspace),
+            net_ticks=_net_wire_ticks(comp, dust_owner, workspace, pin_terminal),
             violations=signal_violations + verify_support(workspace, dust_owner, _hidden_cells(placed)),
             io_cells={(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,
                                                                     p.component.footprint,
@@ -1856,7 +1905,7 @@ def build_litematic_from_component_list(
         )
         return out_path
 
-    critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, macros)
+    critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros)
     print(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.

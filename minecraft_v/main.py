@@ -176,6 +176,8 @@ def main():
                         help="--macros: instances per array, sharing lanes; 0 = all instances of a pattern in one array")
     parser.add_argument("--macro-channel", type=int, default=16,
                         help="--macros: Z kept clear past a long macro's input face")
+    parser.add_argument("--macro-east-room", type=int, default=20,
+                        help="--macro-bank-columns: X past a bank stack's pin end where gates may go; the rest go on top")
     parser.add_argument("--macro-headroom", type=int, default=32,
                         help="--macros: layers kept above the tallest macro")
     parser.add_argument("--macro-bank-columns", type=int, default=0,
@@ -252,6 +254,7 @@ def main():
                                         flat=args.flat,
                                         macros=macros,
                                         macro_channel=args.macro_channel,
+                                        macro_east_room=args.macro_east_room,
                                         macro_headroom=args.macro_headroom,
                                         **{k: v for k, v in (
                                             ("gutter", args.gutter),

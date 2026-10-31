@@ -1,5 +1,5 @@
 import pytest
-from litemapy import Region
+from litemapy import BlockState, Region
 
 from minecraft_v.placement_engine.builder import _GreedyRouter, _KeepoutMap, _RouteJob, _terminal_halo
 from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTERVAL
@@ -188,3 +188,34 @@ def test_bank_leads_only_for_the_bank_pins_and_channel():
     east, back = leads
     assert east[1:] == (4, 120) and east[0] > 100
     assert back[0] > 100 and back[1] == 6 and back[2] < 99  # the channel's mouth, away from the face
+
+
+def test_net_ticks_count_the_deepest_branch_not_every_repeater():
+    from minecraft_v.placement_engine.builder import _net_wire_ticks
+    from minecraft_v.placement_engine.ir import (
+        Component, ComponentList, ComponentType, CURRENT_SCHEMA_VERSION, NetConnection, NetEndpoint,
+    )
+    ws = Region(0, 0, 0, 21, 3, 3)
+    dust = BlockState("minecraft:redstone_wire")
+    rep = BlockState("minecraft:repeater", facing="west", delay="1")
+    owner = {}
+    for x in range(21):  # a line from x=10 both ways, 2 repeaters on each arm
+        ws[x, 0, 1] = rep if x in (2, 6, 14, 18) else dust
+        owner[(x, 0, 1)] = "n"
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="s", pin_name="y"),
+                        sinks=[NetEndpoint(component_id="t", pin_name="a")])
+    comp = ComponentList.model_construct(schema_version=CURRENT_SCHEMA_VERSION, components=[], nets=[net])
+    assert _net_wire_ticks(comp, owner, ws, {("s", "y"): (10, 0, 1)}) == {"n": 2}
+
+
+def test_tower_starting_where_a_powered_drop_lands_is_laid():
+    ws = Region(0, 0, 0, 14, 14, 14)
+    solid, owner = set(), {}
+    _lay_redstone_path(ws, solid, owner, [(6, 8, 6), (6, 4, 6), (6, 8, 8)], "n")
+    assert "repeater" in ws[6, 4, 7].id  # the tower's repeater
+    assert (6, 7, 8) in owner  # and its column
+
+
+def test_powered_drop_from_a_tower_top_cant_land_in_its_own_column():
+    with pytest.raises(ValueError):
+        _lay_redstone_path(Region(0, 0, 0, 14, 14, 14), set(), {}, [(6, 4, 6), (6, 8, 8), (6, 4, 8)], "n")

@@ -312,7 +312,7 @@ def _lay_redstone_path(
             _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
             continue
 
-        if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):
+        if (i in tower_top or i in p4_top) and i not in tower_bottom and i not in p4_bottom:
             continue  # already placed by their respective move handler
 
         if i in tower_bottom:
