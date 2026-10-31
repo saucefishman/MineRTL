@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from minecraft_v.placement_engine.builder import _wall_vias
+from minecraft_v.placement_engine.ir import Component, ComponentType, Footprint, NetConnection, NetEndpoint
+from minecraft_v.placement_engine.layout import _Placed
 from minecraft_v.placement_engine.macro import _lane_plane, _row_gap, _row_shift
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -128,3 +131,15 @@ def test_row_shift_keeps_the_rows_taps_apart():
     upright = {k * 54 + x for k in range(2) for x in (3, 20, 40)}
     turned = {k * 54 + shift + 50 - x for k in range(2) for x in (3, 20, 40)}
     assert min(abs(a - b) for a in upright for b in turned) >= 3
+
+
+@pytest.mark.parametrize("src_z, sink_z, near_far_edge", [(50, 250, lambda z: z >= 184), (250, 50, lambda z: z <= 115)])
+def test_wall_via_sits_by_the_far_edge(src_z, sink_z, near_far_edge):
+    wall = _Placed(Component(id="bank", type=ComponentType.CUSTOM, pins=[], footprint=Footprint(width=100, height=10, depth=100)),
+                   (0, 0, 100))
+    pins = {("g", "Y"): (50, 20, src_z), ("a", "A"): (50, 5, sink_z)}
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="g", pin_name="Y"),
+                        sinks=[NetEndpoint(component_id="a", pin_name="A")])
+    (_, y, z), = _wall_vias(net, pins, [wall])
+    assert y > 10
+    assert near_far_edge(z)

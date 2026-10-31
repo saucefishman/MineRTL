@@ -50,6 +50,7 @@ from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 IRON_TRAPDOOR = BlockState("minecraft:iron_trapdoor", open="false", half="bottom", facing="north")
 BARREL = BlockState("minecraft:barrel")
+_WALL_VIA_EDGE = 16  # how far from a macro's far edge its waypoints spread
 _WALL_VIA_LIFT = 4  # above a macro: clear of its keepout, with room for the wire's support
 _VIA_TRIES, _VIA_STEP = 8, 3  # search around a blocked waypoint
 _MACRO_SEEDS = 4  # placement seeds to try before giving up on a macro
@@ -805,6 +806,10 @@ class _GreedyRouter:
                         pending_sinks=pending,
                         **job.search_kwargs,
                     )
+                    if start != job.src and path[0] != start:
+                        # A search may begin beside its start. Past a via, the repeater walk needs
+                        # the link back to it, or it counts signal from nothing.
+                        path = [start, *path]
                     _lay_redstone_path(ws, self.solid, self.dust_owner, path, job.net_id,
                                        opaque_support_block=job.support_block,
                                        inverted_cells=self.inverted_cells,
@@ -1060,8 +1065,9 @@ def _wall_vias(
             top = max(w.origin[1] + w.component.footprint.height for w in walls
                       if w.origin[0] < ox + fp.width and ox < w.origin[0] + w.component.footprint.width
                       and w.origin[2] < oz + fp.depth and oz < w.origin[2] + w.component.footprint.depth)
-            via.append((over, top + _WALL_VIA_LIFT + 2 * (spread % 4),
-                        oz + (spread >> 8) % fp.depth))
+            # By the far edge: searches start here, and from near the first edge they drop back off it.
+            along = (spread >> 8) % min(_WALL_VIA_EDGE, fp.depth)
+            via.append((over, top + _WALL_VIA_LIFT + 2 * (spread % 4), z1 - along if src[2] < z0 else z0 + along))
     return via
 
 
