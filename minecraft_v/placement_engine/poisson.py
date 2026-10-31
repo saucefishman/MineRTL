@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 import time
 from collections import defaultdict
 
@@ -110,6 +111,7 @@ class _Field:
 
     def __init__(self, sizes: np.ndarray, dims: np.ndarray):
         self.dims = dims
+        self.fixed: np.ndarray | None = None  # fraction of each bin taken by fixed boxes
         mean = sizes.mean(axis=0)
         self.shape = tuple(int(max(1, min(128, round(_BINS_PER_BOX * dims[a] / mean[a])))) for a in range(3))
         self.h = dims / np.array(self.shape)
@@ -121,6 +123,16 @@ class _Field:
         eig = [(2 - 2 * np.cos(np.pi * np.arange(m) / m)) / self.h[a] ** 2 for a, m in enumerate(self.shape)]
         self.laplace = eig[0][:, None, None] + eig[1][None, :, None] + eig[2][None, None, :]
         self.laplace[0, 0, 0] = 1.0
+
+    def fix_box(self, lo: np.ndarray, size: np.ndarray) -> None:
+        """A solid box that never moves: it repels gates and takes up its bins."""
+        axes = []
+        for a in range(3):
+            edges = np.arange(self.shape[a]) * self.h[a]
+            axes.append(np.clip(np.minimum(edges + self.h[a], lo[a] + size[a]) - np.maximum(edges, lo[a]), 0.0, None)
+                        / self.h[a])
+        taken = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
+        self.fixed = taken if self.fixed is None else np.minimum(self.fixed + taken, 1.0)
 
     def _overlaps(self, pos: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray]]:
         """Per axis: the bins each box touches and its overlap length with them."""
@@ -145,8 +157,11 @@ class _Field:
                  + by[:, None, :, None] * self.shape[2] + bz[:, None, None, :])
         volume = float(np.prod(self.h))
         rho = np.bincount(index.ravel(), weight.ravel(), int(np.prod(self.shape))).reshape(self.shape) / volume
-        mean = self.charge.sum() / float(np.prod(self.dims))
-        overflow = float(np.maximum(rho - max(mean, _TARGET_DENSITY), 0.0).sum() * volume / self.charge.sum())
+        free = 1.0 if self.fixed is None else 1.0 - self.fixed
+        mean = self.charge.sum() / max(float((free * volume).sum() if self.fixed is not None else np.prod(self.dims)), 1.0)
+        overflow = float(np.maximum(rho - max(mean, _TARGET_DENSITY) * free, 0.0).sum() * volume / self.charge.sum())
+        if self.fixed is not None:
+            rho = rho + self.fixed
 
         coeff = fft.dctn(rho - rho.mean(), type=2, norm="ortho") / self.laplace
         coeff[0, 0, 0] = 0.0
@@ -300,12 +315,24 @@ def _quadratic_start(netlist: _Netlist, pos: np.ndarray) -> None:
 
 
 def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _IoPlacer, gates: list[Component],
-                  seed: int) -> np.ndarray:
-    """Electrostatic global placement; returns the origins of the padded boxes, inside the domain."""
+                  seed: int, fixed: dict[int, np.ndarray] | None = None,
+                  fixed_box: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
+    """Electrostatic global placement; returns the origins of the padded boxes, inside the domain.
+
+    fixed: components staying at these origins, whose pins still pull on the nets. fixed_box: where they repel gates.
+    """
     n, m = netlist.n_gates, len(netlist.comps)
-    field = _Field(sizes, dims)
+    fixed = fixed or {}
+    free = np.array([i for i in range(n) if i not in fixed], dtype=np.int64)
+    field = _Field(sizes[free], dims)
+    if fixed_box is not None:
+        field.fix_box(*fixed_box)
     pad = sizes / 2
     lo, hi = pad, np.maximum(dims - pad, pad)
+
+    def pin_fixed(p: np.ndarray) -> None:
+        for i, origin in fixed.items():
+            p[i] = origin + pad[i]
 
     def refresh_io(pos: np.ndarray) -> None:
         coords = io.place(gates, np.maximum(pos[:n] - pad, 0), dims[0], dims[2])
@@ -325,6 +352,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     start = origins(pos)
     _quadratic_start(netlist, start)
     pos[:n] = np.clip(start[:n] + pad + rng.normal(0.0, 0.01, (n, 3)) * dims, lo, hi)
+    pin_fixed(pos)
     refresh_io(pos)
 
     v = pos.copy()
@@ -340,24 +368,24 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     max_move = _MAX_STEP_BINS * field.h
     t0 = time.monotonic()
     for it in range(_MAX_ITERS):
-        force, overflow = field.forces(v[:n])
+        force, overflow = field.forces(v[free])
         gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
-        wire = netlist.wa_gradient(origins(v), gamma)[:n]
+        wire = netlist.wa_gradient(origins(v), gamma)[free]
         if lam is None:
             lam = np.abs(wire).sum() / max(np.abs(force).sum(), 1e-9)
-        g = (wire - lam * force) / np.maximum(1.0, netlist.degree[:n, None] + lam * field.charge[:, None])
+        g = (wire - lam * force) / np.maximum(1.0, netlist.degree[free, None] + lam * field.charge[:, None])
         if prev_g is not None:
-            dv, dg = v[:n] - prev_v, g - prev_g
+            dv, dg = v[free] - prev_v, g - prev_g
             step = np.linalg.norm(dv) / max(np.linalg.norm(dg), 1e-12)
-        prev_v, prev_g = v[:n].copy(), g
+        prev_v, prev_g = v[free].copy(), g
         move = step * g
         worst = (np.abs(move) / max_move).max()
         if worst > 1:
             move = move / worst
-        new = np.clip(v[:n] - move, lo, hi)
+        new = np.clip(v[free] - move, lo[free], hi[free])
         a_next = (1 + math.sqrt(1 + 4 * a * a)) / 2
-        v[:n] = np.clip(new + (a - 1) / a_next * (new - u[:n]), lo, hi)
-        u[:n] = new
+        v[free] = np.clip(new + (a - 1) / a_next * (new - u[free]), lo[free], hi[free])
+        u[free] = new
         a = a_next
 
         hpwl = netlist.hpwl(origins(u))
@@ -533,18 +561,28 @@ class _NetCost:
         return out[0], out[1], out[2]
 
 
-def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: bool, deadline: float) -> None:
-    """Greedy detailed placement: move each gate towards its optimal region if that lowers HPWL."""
+def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: bool, deadline: float,
+            fixed_box: tuple[np.ndarray, np.ndarray] | None = None) -> None:
+    """Greedy detailed placement: move each gate towards its optimal region if that lowers HPWL.
+
+    fixed_box: banks stay put, and the gates stay out of this box around them.
+    """
     n = netlist.n_gates
-    occ = _Occupancy(sizes)
+    pinned = {i for i in range(n) if netlist.comps[i].metadata.get("bank")} if fixed_box is not None else set()
+    occ = _Occupancy(sizes if fixed_box is None else np.vstack([sizes, fixed_box[1]]))
+    if fixed_box is not None:
+        occ.add(n, tuple(int(v) for v in fixed_box[0]))
     for i in range(n):
-        occ.add(i, tuple(int(v) for v in pos_all[i]))
+        if i not in pinned:
+            occ.add(i, tuple(int(v) for v in pos_all[i]))
     cost = _NetCost(netlist, pos_all)
     for _ in range(_REFINE_PASSES):
         moved = 0
         for i in range(n):
             if time.monotonic() >= deadline:
                 return
+            if i in pinned:
+                continue
             target = cost.median_target(i)
             target = (target[0], max(0, target[1]) if not flat else int(pos_all[i][1]), max(0, target[2]))
             now = tuple(int(v) for v in pos_all[i])
@@ -660,10 +698,45 @@ def _fix_banks(pos: np.ndarray, sizes: np.ndarray, gates: list[Component], banks
         return
     east = float((pos[banks, 0] + sizes[banks, 0]).max())
     pos[rest, 0] += east + channel - pos[rest, 0].min()
+    pos[rest, 1] -= float(pos[rest, 1].min())
     middle = (z - channel) / 2
     pos[rest, 2] += middle - (pos[rest, 2] + sizes[rest, 2] / 2).mean()
     pos[rest, 2] -= min(0.0, float(pos[rest, 2].min()))
-    pos[rest, 1] -= float(pos[rest, 1].min())
+
+
+def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Component], banks: list[int], io: _IoPlacer,
+                        seed: int, channel: int, east_room: float
+                        ) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray]]:
+    """Banks stacked at the origin as fixed charge and pins, with a channel on their pin faces; gates flow around them.
+
+    The domain is the box's footprint plus east_room in X, and as tall as the gates need.
+    """
+    width = max(gates[i].footprint.width for i in banks)
+    depth = max(gates[i].footprint.depth for i in banks)
+    fixed: dict[int, np.ndarray] = {}
+    y = 0.0
+    for i in banks:
+        fixed[i] = np.array([0.0, y, float(channel)])
+        y += gates[i].footprint.height + _BANK_Y_GAP
+    box = (np.zeros(3), np.array([width + channel, y, depth + 2.0 * channel]))
+    free = [i for i in range(len(gates)) if i not in fixed]
+    volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
+    dims = np.array([width + channel + east_room, 0.0, depth + 2.0 * channel])
+    dims[1] = max(volume / (dims[0] * dims[2]), y + float(sizes[free, 1].max()))
+    print(f"[place] poisson: real banks, domain {tuple(int(v) for v in dims)}")
+    pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, fixed, box))
+    occ = _Occupancy(np.vstack([sizes, box[1]]))
+    occ.add(len(gates), (0, 0, 0))
+    for i in fixed:
+        pos[i] = fixed[i]
+    for i in sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2])):
+        target = tuple(int(v) for v in pos[i])
+        spot = occ.nearest_free(i, (max(target[0], 0), max(target[1], 0), max(target[2], 0)), False, 20000)
+        if spot is None:
+            raise ValueError(f"no room for {gates[i].id} around the banks")
+        occ.add(i, spot)
+        pos[i] = spot
+    return pos, sizes, box
 
 
 def _turn_macro(netlist: _Netlist, gates: list[Component], i: int) -> None:
@@ -818,24 +891,36 @@ def _poisson_placement(
         walls = walls + banks
         if walls and len(walls) < len(gates):
             sizes[walls] = np.delete(sizes, walls, axis=0).max(axis=0)
+        real_banks = os.environ.get("BREAL")
+        fixed_box = None
         volume = float(np.prod(sizes, axis=1).sum()) / _TARGET_DENSITY
         height = 1.0 if flat else float(max(sizes[:, 1].max(), volume ** (1 / 3)))
         side = max(math.sqrt(volume / height), float(sizes[:, [0, 2]].max()))
         dims = np.array([side, height, side])
         io.lane_height = height
 
-        placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
-        pos = np.rint(placed_pos)
-        if banks:  # poisson's positions stand for the gates only: banks are fixed below, after compaction
+        if banks and real_banks is not None:
+            pos, sizes, fixed_box = _place_around_banks(netlist, real_sizes, gates, banks, io, seed, macro_channel,
+                                                        float(real_banks))
+            print(f"[place] poisson: real banks, legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}")
+            banks = []
+            placed_pos = None
+        else:
+            placed_pos = _global_place(netlist, sizes, dims, io, gates, seed)
+            pos = np.rint(placed_pos)
+        if placed_pos is None:
+            pass
+        elif banks:  # poisson's positions stand for the gates only: banks are fixed below, after compaction
             pos = _legalize(pos, sizes, flat)
         else:
             sizes = real_sizes
             pos = _legalize(pos, sizes, flat)
-        pos[:, 0] -= pos[:, 0].min()
-        for axis in (0, 2, 1):
-            _compact(pos, sizes, axis)
-        _face_macro_rows(netlist, pos, gates)
-        if _pin_side_pass(netlist, pos, sizes, gates):
+        if placed_pos is not None:
+            pos[:, 0] -= pos[:, 0].min()
+            for axis in (0, 2, 1):
+                _compact(pos, sizes, axis)
+            _face_macro_rows(netlist, pos, gates)
+        if placed_pos is not None and _pin_side_pass(netlist, pos, sizes, gates):
             pos = _legalize(pos, sizes, flat)
             pos[:, 0] -= pos[:, 0].min()
             for axis in (0, 2, 1):
@@ -852,6 +937,7 @@ def _poisson_placement(
     else:
         pos = np.zeros((0, 3))
         sizes = np.zeros((0, 3))
+        fixed_box = None
 
     def io_rows() -> np.ndarray:
         depth_end = float((pos[:, 2] + sizes[:, 2]).max()) if len(pos) else 0.0
@@ -860,7 +946,7 @@ def _poisson_placement(
         return np.array([coords[c.id] for c in netlist.comps[netlist.n_gates:]], dtype=float).reshape(-1, 3)
 
     pos_all = np.vstack([pos, io_rows()])
-    _refine(netlist, pos_all, sizes, flat, time.monotonic() + 10.0)
+    _refine(netlist, pos_all, sizes, flat, time.monotonic() + 10.0, fixed_box)
     pos = pos_all[:len(gates)]
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)

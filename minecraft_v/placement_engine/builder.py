@@ -1702,6 +1702,9 @@ def build_litematic_from_component_list(
         width, height, depth = _compute_workspace_dims(
             placed, base_y=base_y, io_margin=component_width_spacing, routing_headroom=routing_headroom,
         )
+        # Room past a bank's pin end, for the wire to its pins.
+        width = max([width, *(p.origin[0] + p.component.footprint.width + macro_channel for p in placed
+                              if p.component.metadata.get("bank"))])
     else:
         width, height, depth = workspace_size
     print(f"[layout] workspace {width}x{height}x{depth}")
