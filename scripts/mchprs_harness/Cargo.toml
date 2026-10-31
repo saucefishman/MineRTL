@@ -1,0 +1,14 @@
+# Runs a built schematic on MCHPRS's own redstone and redpiler code. Paths assume a local checkout.
+[package]
+name = "mchprs_harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+mchprs_world = { path = "/Users/saucefishman/Projects/MCHPRS/crates/world", features = ["testing"] }
+mchprs_blocks = { path = "/Users/saucefishman/Projects/MCHPRS/crates/blocks" }
+mchprs_redpiler = { path = "/Users/saucefishman/Projects/MCHPRS/crates/redpiler" }
+mchprs_redstone = { path = "/Users/saucefishman/Projects/MCHPRS/crates/redstone" }
+mchprs_schematic = { path = "/Users/saucefishman/Projects/MCHPRS/crates/schematic" }
