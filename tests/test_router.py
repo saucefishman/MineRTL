@@ -1,8 +1,11 @@
 import pytest
 from litemapy import BlockState, Region
 
-from minecraft_v.placement_engine.builder import _GreedyRouter, _KeepoutMap, _RouteJob, _terminal_halo
-from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTERVAL
+from minecraft_v.placement_engine import _astar
+from minecraft_v.placement_engine.builder import (
+    _GreedyRouter, _KeepoutMap, _RouteJob, _repair_faulty_nets, _terminal_halo,
+)
+from minecraft_v.placement_engine.constants import GLASS, STONE, _DELTA_TO_FACING, _HORIZ_DIRS, _REPEATER_INTERVAL
 from minecraft_v.placement_engine.pathfinding import _signal_depths
 from minecraft_v.placement_engine.ripup import Recorder, JournaledDict, JournaledSet
 from minecraft_v.placement_engine.verify import verify_signals
@@ -263,3 +266,71 @@ def test_slope_notch_checked_on_both_steps_of_a_2x_slope():
     with pytest.raises(LayConflict):
         _check_slope_notch(ws, {(6, 7, 7)}, (6, 7, 6), (6, 5, 8))
 
+
+
+def _tower_moves(pending):
+    """Where the kernel will build a tower from (5, 1, 5) in an empty world."""
+    pos_ids, pos_list, h_list, cache = {}, [], [], []
+    empty = frozenset()
+    world = _astar.World(empty, empty, empty, empty, {(x, 0, z) for x in range(24) for z in range(24)}, {}, "n",
+                         BOUNDS, BOUNDS[4], (20, 1, 20), 1, ("set", empty), ("set", empty), empty, empty, empty,
+                         empty, Region(0, 0, 0, 24, 8, 24), GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
+                         pos_ids, pos_list, h_list, cache, frozenset(pending))
+    world_id = len(pos_list)
+    pos_ids[(5, 1, 5)] = world_id
+    pos_list.append((5, 1, 5))
+    h_list.append(0)
+    cache.append(None)
+    moves, _ = world.static_moves(world_id)
+    return {pos_list[m[0]] for m in moves if pos_list[m[0]][1] == 5}
+
+
+def test_tower_keeps_clear_of_a_later_sinks_approach():
+    assert (7, 5, 5) in _tower_moves(())
+    # Diagonal to the inverted blocks at (7, 2..3, 5): every approach to this sink would touch them.
+    assert (7, 5, 5) not in _tower_moves([(6, 3, 4)])
+    # Straight along a line two cells off and two up or down from them, too.
+    assert (7, 5, 5) not in _tower_moves([(9, 1, 5)])
+    assert (7, 5, 5) in _tower_moves([(10, 3, 5)])
+
+
+def test_sink_a_job_cant_reach_is_retried_first():
+    router, *_ = _router()
+    job = _job("n", (1, 1, 1), [(3, 1, 1), (5, 1, 1)])
+    orders = []
+
+    def route_job(job, blocked, first=()):
+        orders.append(first)
+        if not first:
+            router.failed_goal[job.key] = (5, 1, 1)
+            raise ValueError("No route")
+
+    router.route_job = route_job
+    router.route_job_retrying(job)
+    assert orders == [(), ((5, 1, 1),)]
+
+
+def test_sink_failing_again_while_first_is_final():
+    router, *_ = _router()
+    job = _job("n", (1, 1, 1), [(3, 1, 1)])
+
+    def route_job(job, blocked, first=()):
+        router.failed_goal[job.key] = (3, 1, 1)
+        raise ValueError("No route")
+
+    router.route_job = route_job
+    with pytest.raises(ValueError):
+        router.route_job_retrying(job)
+
+
+def test_repair_reroutes_a_net_verify_finds_fault_with():
+    router, region, solid, dust_owner = _router()
+    job = _job("n", (2, 1, 2), [(8, 1, 2)])
+    assert router.run([job], "[test]") == []
+    assert verify_signals(region, {"n": (job.src, job.sinks)}, dust_owner) == []
+    # Something the search couldn't have known cut the wire: verify sees an open, repair re-routes.
+    cut = router.paths["n"][1][0][3]
+    region[cut] = STONE
+    dust_owner.pop(cut)
+    assert _repair_faulty_nets(router, [job], set(), frozenset(), None) == []
+    assert verify_signals(region, {"n": (job.src, job.sinks)}, dust_owner) == []

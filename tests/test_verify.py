@@ -15,7 +15,7 @@ Model (Java redstone, simplified to what the router builds):
 from litemapy import BlockState, Region
 
 from minecraft_v.placement_engine.constants import GLASS, REDSTONE, REDSTONE_TORCH, STONE, _DELTA_TO_FACING
-from minecraft_v.placement_engine.verify import Violation, verify_signals, verify_support
+from minecraft_v.placement_engine.verify import Violation, find_inverted_contacts, verify_signals, verify_support
 from minecraft_v.placement_engine.wire import _lay_redstone_path
 
 
@@ -310,3 +310,38 @@ def test_signal_running_out_is_weak():
     _wire(region, owner, "a", wire)
     assert "weak" in _kinds(verify_signals(region, {"a": (wire[0], [wire[-1]])}, owner))
     assert "weak" not in _kinds(verify_signals(region, {"a": (wire[0], [wire[14]])}, owner))
+
+
+# ---------------------------------------------------------------- polarity
+
+def _tower_net(region: Region, owner: dict) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """Source wire, a tower going +x and wire off its top; returns (source, sink)."""
+    solid: set = set()
+    _wire(region, owner, "n", _line_x(1, 2, 1, 5))
+    _lay_redstone_path(region, solid, owner, [(2, 1, 5), (4, 5, 5), (5, 5, 5), (6, 5, 5)], "n")
+    return (1, 1, 5), (6, 5, 5)
+
+
+def test_tower_alone_has_no_inverted_contact():
+    region, owner = _region(), {}
+    src, sink = _tower_net(region, owner)
+    assert verify_signals(region, {"n": (src, [sink])}, owner) == []
+
+
+def test_wire_beside_a_towers_inverted_block_is_flagged():
+    region, owner = _region(), {}
+    src, sink = _tower_net(region, owner)
+    # Own wire back down from the tower top, ending against the stone at y=3.
+    side = _wire(region, owner, "n", [(7, 4, 5), (6, 3, 5), (5, 3, 5)])
+    region[6, 4, 5] = GLASS
+    violations = verify_signals(region, {"n": (src, [sink])}, owner)
+    assert "inverted" in _kinds(violations)
+    assert side[-1] in find_inverted_contacts(region, src, [sink], frozenset())
+
+
+def test_sink_fed_only_through_the_inverted_block_is_flagged():
+    region, owner = _region(), {}
+    src, _ = _tower_net(region, owner)
+    sink = _wire(region, owner, "n", [(5, 3, 5)])[0]
+    region[5, 4, 5] = GLASS
+    assert sink in find_inverted_contacts(region, src, [sink], frozenset())

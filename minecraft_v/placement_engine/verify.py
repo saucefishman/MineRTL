@@ -5,7 +5,9 @@ structures the router builds) and searches from each net's source:
 - open:  a sink of the net that its source can't reach;
 - short: a cell reached from two nets' sources, or a cell owned by another net;
 - weak: a sink the source reaches, but with no signal strength left;
-- latch: a repeater whose own output reaches its input, so that it holds itself on.
+- latch: a repeater whose own output reaches its input, so that it holds itself on;
+- inverted: wire fed by both the net's signal and its opposite (a tower's middle blocks, the
+  inverted stage of a powered drop), or a sink that only gets the opposite.
 `verify_support` separately flags dust/repeaters/torches with nothing to stand on.
 
 Rules (see tests/test_verify.py):
@@ -21,7 +23,7 @@ Rules (see tests/test_verify.py):
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import networkx as nx
@@ -42,7 +44,7 @@ _MAX_SIGNAL = 15
 
 @dataclass(frozen=True)
 class Violation:
-    kind: str                 # "open" | "short" | "weak" | "latch" | "unsupported"
+    kind: str                 # "open" | "short" | "weak" | "latch" | "inverted" | "unsupported"
     nets: frozenset[str]
     pos: Pos
 
@@ -271,6 +273,41 @@ def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
     return []
 
 
+def find_inverted_contacts(region: Region, source: Pos, sinks: Iterable[Pos], stop: frozenset[Pos],
+                           blocked: frozenset[Pos] = frozenset(), visible: frozenset[Pos] = frozenset()) -> list[Pos]:
+    """_inverted_contacts for a net being routed; `blocked` cells are air unless `visible`."""
+    return _inverted_contacts(_World(region, blocked, visible), source, frozenset(sinks), stop)
+
+
+def _inverted_contacts(world: _World, source: Pos, sinks: frozenset[Pos], stop: frozenset[Pos]) -> list[Pos]:
+    """Where the opposite of source's signal gets into its wire. Follows signal with its polarity
+    (torches flip it): wire reached both ways where opposite signal enters from a block, a torch
+    or opposite-only wire, and sinks reached only opposite."""
+    start = ((source, _STRONG if world.kind(source) == _OPAQUE else ""), False)
+    seen = {start}
+    queue = deque([start])
+    polarities: dict[Pos, set[bool]] = {source: {False}}
+    feeds: list[tuple[Pos, Pos]] = []
+    while queue:
+        node, flipped = queue.popleft()
+        p = node[0]
+        if p in stop and p != source:
+            continue
+        out = flipped ^ (world.is_torch(p) and p != source)
+        for nxt in world.successors(node):
+            if out:
+                feeds.append((p, nxt[0]))
+            polarities.setdefault(nxt[0], set()).add(out)
+            if (nxt, out) not in seen:
+                seen.add((nxt, out))
+                queue.append((nxt, out))
+    wired = (_DUST, _REPEATER)
+    contacts = {q for p, q in feeds if len(polarities[q]) == 2 and world.kind(q) in wired
+                and (world.kind(p) not in wired or polarities[p] == {True})}
+    contacts |= {q for q in sinks if polarities.get(q) == {True}}
+    return sorted(contacts)
+
+
 def verify_signals(
         region: Region,
         nets: dict[str, tuple[Pos, list[Pos]]],
@@ -312,6 +349,8 @@ def verify_signals(
         latch = _latch_cycle(world, source, stop)
         if latch:
             violations.append(Violation("latch", frozenset({net_id}), latch[0]))
+        for pos in _inverted_contacts(world, source, frozenset(sinks), stop)[:1]:
+            violations.append(Violation("inverted", frozenset({net_id}), pos))
         for pos in reached:
             cell_owner = owner.get(pos)
             if cell_owner is not None and cell_owner != net_id and pos not in blocked:

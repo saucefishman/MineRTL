@@ -44,7 +44,7 @@ from .template import (
 )
 from .macro import Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import find_latch, verify_signals, verify_support
+from .verify import find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -689,10 +689,14 @@ def _net_sort_key(
 
 
 _LAY_RETRIES = 24  # per sink: re-searches after a path that couldn't be laid (LayConflict)
-_NET_RETRIES = 2  # per net: re-routes after no repeater fits a stretch
+_NET_RETRIES = 6  # per net: re-routes after no repeater fits a stretch, or a latch or inverted contact
+_SINK_RETRIES = 4  # per net: re-routes with a sink it couldn't reach moved to the front
 _BLOCKER_RADIUS = 3  # nets with cells this close to a failed sink get ripped up and re-queued
 _BLOCKER_MAX = 4
 _RIP_ROUNDS = 3  # per job: rip-and-retry rounds, each for a sink that hasn't had one yet
+_ESCALATE_RADIUS = 6  # a job out of retries gets this wider ring ripped, once, even nets ripped before
+_ESCALATE_MAX = 8
+_REPAIR_ROUNDS = 3  # re-routes of nets verify still finds fault with
 
 Pos = tuple[int, int, int]
 
@@ -712,6 +716,8 @@ class _RouteJob:
     search_kwargs: dict = field(default_factory=dict)
     via: list[Pos] = field(default_factory=list)  # reached first, so the sinks branch from there
     lead: list[Pos] = field(default_factory=list)  # short of a pin, for a straight last stretch
+    avoid: frozenset[Pos] = frozenset()  # cells verify found a fault at, kept out of re-routes
+    first: tuple[Pos, ...] = ()    # sinks verify found a fault at, routed first in re-routes
 
 
 class _GreedyRouter:
@@ -722,9 +728,12 @@ class _GreedyRouter:
       sink's partial path and search again without the conflicting cell.
     - per job: no repeater slot on a stretch (all slopes/turns): undo the job and route it
       again with that stretch blocked, keeping clear of the job's terminals.
+    - per job: a sink can be walled in by the job's own earlier wire: route it again with that
+      sink first.
     - per run: a sink search that fails is usually walled in by jobs routed earlier. Rip the
       jobs around the failed sink, route it again, then re-queue them. Up to _RIP_ROUNDS
-      times per job, once per failed sink (a repeat failure at the same sink is final).
+      times per job, once per failed sink (a repeat failure at the same sink is final). A job
+      out of those gets one wider ring ripped, whatever already happened to those jobs.
 
     A job that still fails is ripped up so its partial wire / support / repeaters don't
     block later jobs or show up as debris.
@@ -755,7 +764,7 @@ class _GreedyRouter:
         rip_up(self.rec, key, self.indexed, self.solid, self.dust_owner)
         self.paths.pop(key, None)
 
-    def route_job(self, job: _RouteJob, job_blocked: frozenset[Pos]) -> None:
+    def route_job(self, job: _RouteJob, job_blocked: frozenset[Pos], first: tuple[Pos, ...] = ()) -> None:
         rec, ws = self.rec, self.ws
         paths: list[list[Pos]] = []
         net_seeds = [pos for pos, owner in self.dust_owner.items()
@@ -766,7 +775,9 @@ class _GreedyRouter:
         # Nearest first; a lead comes before its pin, which is further on the same line.
         sinks = sorted([*job.sinks, *leads],
                        key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
-        for dst in [*vias, *sinks]:
+        sinks = [*first, *(p for p in sinks if p not in first)]
+        for dst_index, dst in enumerate([*vias, *sinks]):
+            pending = frozenset(job.sinks) & frozenset(sinks[max(0, dst_index - len(vias)):])
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
             start = job.src
             far_via = next((v for v in reached_vias if (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
@@ -791,6 +802,7 @@ class _GreedyRouter:
                         terminal_positions=self.terminal_positions,
                         blocked=frozenset(blocked),
                         seed_depths=seed_depths,
+                        pending_sinks=pending,
                         **job.search_kwargs,
                     )
                     _lay_redstone_path(ws, self.solid, self.dust_owner, path, job.net_id,
@@ -834,6 +846,13 @@ class _GreedyRouter:
         latch = find_latch(self.region, job.src, self.terminal_positions - {job.src, *job.sinks})
         if latch and all(self.dust_owner.get(cell, job.net_id) == job.net_id for cell in latch):
             raise LayConflict(f"Net '{job.net_id}': wire past a repeater feeds back into it (latch)", tuple(latch))
+        # The search only sees its own path's last few cells, and a tower or drop can land beside wire laid earlier.
+        own_cells = frozenset(e[2] for e in rec.journals[job.key] if e[0] == "block")
+        inverted = find_inverted_contacts(self.region, job.src, job.sinks,
+                                          self.terminal_positions - {job.src, *job.sinks},
+                                          self.footprint_blocked, self.terminal_positions | own_cells)
+        if inverted:
+            raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
         self.paths[job.key] = (job.net_id, paths)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
@@ -859,23 +878,31 @@ class _GreedyRouter:
     def route_job_retrying(self, job: _RouteJob) -> None:
         near_terminal = {(x + dx, y + dy, z + dz) for x, y, z in job.terminals
                          for dx, dy, dz in ((0, 0, 0), *_DIRS_6)}
-        job_blocked: frozenset[Pos] = frozenset()
-        for attempt in range(_NET_RETRIES + 1):
+        job_blocked = job.avoid
+        first = job.first
+        lay_attempts = 0
+        while True:
             mark = len(self.rec.journals[job.key])
             try:
-                self.route_job(job, job_blocked)
+                self.route_job(job, job_blocked, first)
                 return
             except LayConflict as e:
                 stretch = frozenset(e.cells) - near_terminal - job_blocked
-                if attempt == _NET_RETRIES or not stretch or not ("cannot place repeater" in str(e) or "(latch)" in str(e)):
+                lay_attempts += 1
+                if lay_attempts > _NET_RETRIES or not stretch or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)")):
                     raise
                 rollback(self.rec, job.key, mark)
                 job_blocked |= stretch
+            except ValueError:
+                goal = self.failed_goal.get(job.key)
+                if goal is None or goal not in job.sinks or goal in first or len(first) >= len(job.first) + _SINK_RETRIES:
+                    raise
+                rollback(self.rec, job.key, mark)
+                first = (*first, goal)
 
-    def blockers(self, goal: Pos, key: str, keys: set[str]) -> list[str]:
-        """Jobs (of keys) with wire or blocks within _BLOCKER_RADIUS of goal, nearest first."""
+    def blockers(self, goal: Pos, key: str, keys: set[str], r: int = _BLOCKER_RADIUS) -> list[str]:
+        """Jobs (of keys) with wire or blocks within r of goal, nearest first."""
         gx, gy, gz = goal
-        r = _BLOCKER_RADIUS
         dist: dict[str, int] = {}
         for dx in range(-r, r + 1):
             for dy in range(-r, r + 1):
@@ -902,6 +929,7 @@ class _GreedyRouter:
         cleared_for: dict[str, set[Pos]] = {}  # job key -> sinks whose blockers were ripped
         requeued: set[str] = set()
         ripped: set[str] = set()
+        escalated: set[str] = set()
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
                 i, job = queue.popleft()
@@ -933,6 +961,20 @@ class _GreedyRouter:
                             ripped.add(v)
                         queue.appendleft((i, job))
                         queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
+                        continue
+                    where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
+                    wider = [] if where is None or job.key in escalated or not rip_blockers else \
+                        self.blockers(where, job.key, keys, _ESCALATE_RADIUS)[:_ESCALATE_MAX]
+                    if wider:
+                        escalated.add(job.key)
+                        requeued.add(job.key)
+                        log(f"{label} {job.key}: {e}; ripping {len(wider)} nets around {where} and retrying")
+                        for v in wider:
+                            self.rip(v)
+                            ripped.add(v)
+                        queue = deque(entry for entry in queue if entry[1].key not in wider)
+                        queue.appendleft((i, job))
+                        queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in wider)
                         continue
                     if fail_fast:
                         raise RuntimeError(f"Routing failed for net {job.key}: {e}") from e
@@ -1074,7 +1116,45 @@ def _route_all_nets(
 
     failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot)
     print(f"[wire] done ({len(jobs)} nets, {len(failures)} failed)")
+    if not macros:
+        failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
+                                        frozenset(_component_interior(placed)), deadline)
     return failures, inverted_cells, router.paths
+
+
+def _repair_faulty_nets(
+        router: _GreedyRouter,
+        jobs: list[_RouteJob],
+        failed: set[str],
+        component_cells: frozenset[Pos],
+        deadline: float | None,
+) -> list[tuple[str, Exception]]:
+    """Re-route nets verify finds fault with, away from the fault. Routing can succeed yet leave one:
+    a later net's wire can touch an earlier one in a way only the two together show."""
+    order = {job.key: i for i, job in enumerate(jobs)}
+    by_key = {job.key: job for job in jobs}
+    failures: list[tuple[str, Exception]] = []
+    for _ in range(_REPAIR_ROUNDS):
+        spec = {job.key: (job.src, job.sinks) for job in jobs if job.key not in failed}
+        faults: dict[str, set[Pos]] = {}
+        for v in verify_signals(router.region, spec, router.dust_owner, component_cells):
+            # Of a short's two nets, moving the later one disturbs the least.
+            key = max((n for n in v.nets if n in by_key), key=order.__getitem__, default=None)
+            if key is not None and v.kind != "unsupported":
+                faults.setdefault(key, set()).add(v.pos)
+        if not faults:
+            return failures
+        log(f"[repair] re-routing {', '.join(sorted(faults))}")
+        requeue = sorted(faults, key=order.__getitem__)
+        for key in requeue:
+            router.rip(key)
+            job = by_key[key]
+            job.avoid |= frozenset(faults[key]) - job.terminals
+            job.first += tuple(p for p in sorted(faults[key]) if p in job.sinks and p not in job.first)
+        new = router.run([by_key[key] for key in requeue], "[repair]", deadline=deadline, rip_blockers=False)
+        failures += new
+        failed |= {key for key, _ in new}
+    return failures
 
 
 def _commit_route(
@@ -1870,6 +1950,8 @@ def build_litematic_from_component_list(
             print(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
+    if signal_violations and not macros and not allow_routing_failures:
+        raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
 
     if output_pin_targets:
         try:
