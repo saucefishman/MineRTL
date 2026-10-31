@@ -3,7 +3,8 @@
 Builds a directed "powers" relation over blocks (Java redstone, simplified to the
 structures the router builds) and searches from each net's source:
 - open:  a sink of the net that its source can't reach;
-- short: a cell reached from two nets' sources, or a cell owned by another net.
+- short: a cell reached from two nets' sources, or a cell owned by another net;
+- latch: a repeater whose own output reaches its input, so that it holds itself on.
 `verify_support` separately flags dust/repeaters/torches with nothing to stand on.
 
 Rules (see tests/test_verify.py):
@@ -22,6 +23,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import networkx as nx
 import numpy as np
 from litemapy import BlockState, Region
 
@@ -38,7 +40,7 @@ _STRONG, _WEAK = "S", "W"
 
 @dataclass(frozen=True)
 class Violation:
-    kind: str                 # "open" | "short" | "unsupported"
+    kind: str                 # "open" | "short" | "latch" | "unsupported"
     nets: frozenset[str]
     pos: Pos
 
@@ -222,6 +224,29 @@ def _reach(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
     return reached
 
 
+def _has_latch(world: _World, source: Pos, stop: frozenset[Pos]) -> Pos | None:
+    """A repeater in a signal cycle from source, if any: once on, it holds itself on."""
+    graph = nx.DiGraph()
+    start: tuple[Pos, str] = (source, _STRONG if world.kind(source) == _OPAQUE else "")
+    seen = {start}
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        if node[0] in stop and node[0] != source:
+            continue
+        for nxt in world.successors(node):
+            graph.add_edge(node, nxt)
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    for component in nx.strongly_connected_components(graph):
+        if len(component) > 1:
+            for pos, _ in component:
+                if world.kind(pos) == _REPEATER:
+                    return pos
+    return None
+
+
 def verify_signals(
         region: Region,
         nets: dict[str, tuple[Pos, list[Pos]]],
@@ -251,10 +276,14 @@ def verify_signals(
         # Stop at other nets' terminals (their pins lead into components); past this net's
         # own sinks there is only component interior, which `blocked` already hides.
         own = {source, *sinks}
-        reached = _reach(world, source, frozenset(t for t in terminals if t not in own))
+        stop = frozenset(t for t in terminals if t not in own)
+        reached = _reach(world, source, stop)
         for sink in sinks:
             if sink not in reached:
                 violations.append(Violation("open", frozenset({net_id}), sink))
+        latch = _has_latch(world, source, stop)
+        if latch is not None:
+            violations.append(Violation("latch", frozenset({net_id}), latch))
         for pos in reached:
             cell_owner = owner.get(pos)
             if cell_owner is not None and cell_owner != net_id and pos not in blocked:

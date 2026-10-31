@@ -354,6 +354,54 @@ def _check_slope_notch(
         raise LayConflict(f"Slope {prev} -> {cell} would be cut by the block at {notch}", (cell, prev))
 
 
+def _signal_returns(
+        workspace: Region,
+        dust_owner: dict[tuple[int, int, int], str],
+        net_id: str,
+        start: tuple[int, int, int],
+        target: tuple[int, int, int],
+        cut: tuple[int, int, int],
+) -> bool:
+    """Whether signal from start reaches target through net_id's wire and repeaters, avoiding cut."""
+    def block_at(pos: tuple[int, int, int]) -> BlockState | None:
+        try:
+            return workspace[pos] if pos[1] >= 0 else None
+        except IndexError:
+            return None
+
+    def input_side(block: BlockState) -> tuple[int, int]:
+        return next(d for d, f in _DELTA_TO_FACING.items() if f == block["facing"])
+
+    seen = {start, cut}
+    stack = [start]
+    while stack:
+        pos = stack.pop()
+        if pos == target:
+            return True
+        x, y, z = pos
+        block = block_at(pos)
+        if block is not None and _is_repeater(block):
+            dx, dz = input_side(block)
+            nexts = [(x - dx, y + dy, z - dz) for dy in (-1, 0, 1)]  # into wire, or wire on a block it powers
+        else:
+            nexts = [(x + dx, y + dy, z + dz) for dx, dz in _HORIZ_DIRS for dy in (-1, 0, 1)]
+        for nxt in nexts:
+            other = block_at(nxt)
+            if nxt in seen or other is None:
+                continue
+            if _is_redstone_wire(other):
+                follows = dust_owner.get(nxt) == net_id
+            elif _is_repeater(other) and block is not None and not _is_repeater(block):
+                dx, dz = input_side(other)
+                follows = dust_owner.get(nxt, net_id) == net_id and (nxt[0] + dx, nxt[2] + dz) == (x, z)
+            else:
+                follows = False
+            if follows:
+                seen.add(nxt)
+                stack.append(nxt)
+    return False
+
+
 def _place_repeaters_for_net(
         workspace: Region,
         dust_owner: dict[tuple[int, int, int], str],
@@ -396,6 +444,8 @@ def _place_repeaters_for_net(
             return False  # turn after repeater
         if path[j] in branch_points:
             return False  # branch point — repeater drives only one output
+        if _signal_returns(workspace, dust_owner, net_id, path[j + 1], path[j - 1], path[j]):
+            return False  # wire past the repeater also touches its input: it would latch on
         return True
 
     # upstream_seg[pos] = path segment [last_reset_cell, ..., pos] from the most recent

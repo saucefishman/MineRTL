@@ -293,3 +293,12 @@ def test_blocked_cells_skip_support_check():
     region, owner = _region(), {}
     region[3, 4, 5] = REDSTONE
     assert verify_support(region, owner, blocked=frozenset({(3, 4, 5)})) == []
+
+
+def test_repeater_feeding_itself_is_a_latch():
+    region, owner = _region(), {}
+    _wire(region, owner, "a", [(1, 1, 1), (2, 1, 1)])
+    region[3, 1, 1] = _repeater((-1, 0))
+    _wire(region, owner, "a", [(4, 1, 1), (4, 1, 2), (3, 1, 2), (2, 1, 2), (1, 1, 2)])
+    violations = verify_signals(region, {"a": ((1, 1, 1), [(4, 1, 2)])}, owner)
+    assert any(v.kind == "latch" for v in violations)

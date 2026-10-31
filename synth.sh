@@ -14,6 +14,8 @@ shift
 #                           give each parallel build its own
 args=()
 out_litematic_dir=""
+out_litematic="build/result.litematic"
+settle=true
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +35,20 @@ while [[ $# -gt 0 ]]; do
             out_litematic_dir="${1#*=}"
             shift
             ;;
+        --no-settle)
+            settle=false
+            shift
+            ;;
+        --out-litematic)
+            out_litematic="$2"
+            args+=("$1" "$2")
+            shift 2
+            ;;
+        --out-litematic=*)
+            out_litematic="${1#*=}"
+            args+=("$1")
+            shift
+            ;;
         *)
             args+=("$1")
             shift
@@ -41,7 +57,8 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ -n "$out_litematic_dir" ]]; then
     project_name="$(basename "${dir%/}")"
-    args+=(--out-litematic "${out_litematic_dir%/}/${project_name}.litematic")
+    out_litematic="${out_litematic_dir%/}/${project_name}.litematic"
+    args+=(--out-litematic "$out_litematic")
 fi
 set -- ${args[@]+"${args[@]}"}
 artifacts_dir="${artifacts_dir%/}"
@@ -86,3 +103,9 @@ stat
 "
 
 uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
+
+# Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it)
+if [[ "$settle" == true ]]; then
+    (cd scripts/mchprs_harness && cargo build --release --quiet --bin settle)
+    uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic"
+fi

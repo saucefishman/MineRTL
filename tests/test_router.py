@@ -6,7 +6,9 @@ from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTER
 from minecraft_v.placement_engine.pathfinding import _signal_depths
 from minecraft_v.placement_engine.ripup import Recorder, JournaledDict, JournaledSet
 from minecraft_v.placement_engine.verify import verify_signals
-from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch, _lay_redstone_path, _place_repeaters_for_net
+from minecraft_v.placement_engine.wire import (
+    LayConflict, _check_slope_notch, _lay_redstone_path, _place_repeaters_for_net, _signal_returns,
+)
 
 BOUNDS = (0, 0, 0, 23, 7, 23)
 
@@ -100,6 +102,23 @@ def test_slope2_lay_rejects_block_cutting_a_step(path, notch):
     solid.add(notch)
     with pytest.raises(LayConflict):
         _lay_redstone_path(region, solid, dust_owner, path, "a")
+
+
+def test_signal_returns_around_a_repeater_cell():
+    region = Region(0, 0, 0, 8, 4, 6)
+    owner = {}
+    from minecraft_v.placement_engine.constants import REDSTONE
+    def dust(*cells, net="a"):
+        for c in cells:
+            region[c] = REDSTONE
+            owner[c] = net
+    dust((1, 1, 1), (2, 1, 1), (3, 1, 1))  # 2 is the candidate repeater cell
+    assert not _signal_returns(region, owner, "a", (3, 1, 1), (1, 1, 1), (2, 1, 1))
+    dust((3, 1, 2), (2, 1, 2), (1, 1, 2))  # bypass from past it back to its input
+    assert _signal_returns(region, owner, "a", (3, 1, 1), (1, 1, 1), (2, 1, 1))
+    for c in ((3, 1, 2), (2, 1, 2), (1, 1, 2)):
+        owner[c] = "b"  # another net's wire is not this net's signal
+    assert not _signal_returns(region, owner, "a", (3, 1, 1), (1, 1, 1), (2, 1, 1))
 
 
 # --- greedy router ---------------------------------------------------------------------------
