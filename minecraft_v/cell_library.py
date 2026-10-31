@@ -80,11 +80,11 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
     ),
     ComponentType.DFFE: SchematicInfo(
         file_prefix="dffe",
-        footprint=Footprint(width=7, height=1, depth=4),
+        footprint=Footprint(width=8, height=2, depth=4),
         pins=[
-            PinRef(name="C", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 0)),
+            PinRef(name="C", direction=Direction.IN, side=CardinalDirection.EAST, offset=(7, 0, 0)),
             PinRef(name="D", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, 0, 0)),
-            PinRef(name="E", direction=Direction.IN, side=CardinalDirection.EAST, offset=(6, 0, 3)),
+            PinRef(name="E", direction=Direction.IN, side=CardinalDirection.EAST, offset=(7, 0, 3)),
             PinRef(name="Q", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(0, 0, 3)),
         ],
         propagation_delay_ticks=2
@@ -115,7 +115,8 @@ SCHEMATIC_MAP: dict[ComponentType, SchematicInfo] = {
 }
 
 
-# Template blocks to change for a flip-flop pasted holding a 1: the latched repeater and the
+# Blocks to change for a flip-flop pasted holding a 1, relative to the template's first non-air
+# corner: the latched repeater and the
 # path from it to Q. Everything past Q settles when the world first updates.
 INIT_HIGH_STATES: dict[ComponentType, dict[tuple[int, int, int], dict[str, str]]] = {
     ComponentType.DFF: {

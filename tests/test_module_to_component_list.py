@@ -146,7 +146,7 @@ class TestCellMapping:
         result = module_to_component_list(mod)
         comp = _comp(result, "ffe")
         assert comp.type == ComponentType.DFFE
-        assert comp.footprint.width == 7
+        assert comp.footprint.width == 8
         assert comp.footprint.depth == 4
         assert _pin(comp, "E").side == CardinalDirection.EAST
 

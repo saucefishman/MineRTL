@@ -102,7 +102,7 @@ def _paste_template(
 ) -> None:
     """Paste ``template``'s non-air blocks at ``dest_origin``; ``mirror_width`` reflects it in X
     within that width (see ``_mirror_component_x``). ``block_states`` overrides properties of
-    blocks at template positions, e.g. to paste a flip-flop already holding a 1."""
+    blocks by position relative to the template's first non-air corner, e.g. to paste a flip-flop already holding a 1."""
     tmin_x, tmin_y, tmin_z, _, _, _ = _non_air_bounds(template)
     dx, dy, dz = dest_origin
     placed: list[tuple[tuple[int, int, int], BlockState]] = []
@@ -111,9 +111,10 @@ def _paste_template(
         if _is_air(block):
             continue
         x, y, z = pos
-        if block_states is not None and pos in block_states:
-            block = block.with_properties(**block_states[pos])
         rx = x - tmin_x
+        relative = (rx, y - tmin_y, z - tmin_z)
+        if block_states is not None and relative in block_states:
+            block = block.with_properties(**block_states[relative])
         if mirror_width is not None:
             rx = mirror_width - 1 - rx
             block = _mirror_block_x(block)

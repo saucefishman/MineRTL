@@ -144,3 +144,15 @@ def test_init_high_flip_flop_pastes_powered(gate, cells):
         _paste_template(region, template, (1, 1, 1), set(), block_states=block_states)
         for x, y, z in cells:
             assert region[1 + x, 1 + y, 1 + z]["powered"] == want
+
+
+def test_dffe_template_fits_its_footprint_and_keeps_the_clock_dust():
+    from minecraft_v.cell_library import SCHEMATIC_MAP
+    from minecraft_v.placement_engine.template import _load_template_region, _non_air_bounds
+
+    info = SCHEMATIC_MAP[ComponentType.DFFE]
+    template = _load_template_region(SCHEMATICS_DIR, info.file_prefix)
+    x0, y0, z0, x1, y1, z1 = _non_air_bounds(template)
+    assert (x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1) == (info.footprint.width, info.footprint.height, info.footprint.depth)
+    # Dust on the quartz is what carries the clock into the gate past the lock tap.
+    assert template[x0 + 5, y0 + 1, z0 + 3].id == "minecraft:redstone_wire"
