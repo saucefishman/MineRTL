@@ -310,10 +310,13 @@ def _find_wire_path(
         time_limit: float | None = None,
         blocked: frozenset[tuple[int, int, int]] = frozenset(),
         seed_depths: dict[tuple[int, int, int], int] | None = None,
+        pending_sinks: frozenset[tuple[int, int, int]] = frozenset(),
 ) -> list[tuple[int, int, int]]:
     """A* wire route from start to goal.
 
     seed_depths: signal depth (_signal_depths) of tree seeds; missing seeds count as 0.
+
+    pending_sinks: this net's sinks still to route; inverted cells stay clear of their approaches.
 
     blocked: extra cells the path must not use, even inside the goal's relief zone (a
     retry after a path that couldn't be laid, see wire.LayConflict).
@@ -808,7 +811,7 @@ def _find_wire_path(
             ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
             goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,
             terminal_positions, workspace, GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
-            pos_ids, pos_list, h_list, move_cache)
+            pos_ids, pos_list, h_list, move_cache, pending_sinks)
 
     reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world)
     if reached is None and early_stop_reason is None and h_radius_pruned:
