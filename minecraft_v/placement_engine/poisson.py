@@ -645,7 +645,8 @@ def _face_macro_rows(netlist: _Netlist, pos: np.ndarray, gates: list[Component])
         netlist.pin_offset[at, 2] = c.footprint.depth - 1 - netlist.pin_offset[at, 2]
 
 
-def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component]) -> bool:
+def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates: list[Component],
+                   centre: bool = True) -> bool:
     """Move each connected group of gates in front of a macro's face holding most of its pins, in place.
 
     A long macro is a wall: wire can't reach a pin on its far face without climbing over it. Wirelength doesn't
@@ -700,9 +701,9 @@ def _pin_side_pass(netlist: _Netlist, pos: np.ndarray, sizes: np.ndarray, gates:
             shift_z = south - lo if to_south else north - hi
             if (to_south and lo >= south) or (not to_south and hi <= north):
                 shift_z = 0.0
-            centre = (pos[members, 0] + sizes[members, 0] / 2).mean()
             pos[members, 2] += shift_z
-            pos[members, 0] += pos[m, 0] + sizes[m, 0] / 2 - centre
+            if centre:
+                pos[members, 0] += pos[m, 0] + sizes[m, 0] / 2 - (pos[members, 0] + sizes[members, 0] / 2).mean()
             moved = True
     pos[:, 0] -= min(0.0, pos[:, 0].min())
     return moved
@@ -763,6 +764,9 @@ def _poisson_placement(
             pos[:, 0] -= pos[:, 0].min()
             for axis in (0, 2, 1):
                 _compact(pos, sizes, axis)
+            # Compaction slides gates under and over a wall, where wire can't reach its far face. No compaction after this.
+            _pin_side_pass(netlist, pos, sizes, gates, centre=False)
+            pos = _legalize(pos, sizes, flat)
         print(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:
