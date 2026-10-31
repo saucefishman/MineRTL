@@ -16,6 +16,7 @@ args=()
 out_litematic_dir=""
 out_litematic="build/result.litematic"
 settle=true
+synth_only=false
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +34,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --out-litematic-dir=*)
             out_litematic_dir="${1#*=}"
+            shift
+            ;;
+        --synth-only)  # stop after writing the netlist
+            synth_only=true
             shift
             ;;
         --no-settle)
@@ -101,6 +106,10 @@ opt_clean
 write_json ${artifacts_dir}/netlist.json
 stat
 "
+
+if [[ "$synth_only" == true ]]; then
+    exit 0
+fi
 
 uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
 
