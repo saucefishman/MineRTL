@@ -124,6 +124,7 @@ INIT_HIGH_STATES: dict[ComponentType, dict[tuple[int, int, int], dict[str, str]]
         (0, 0, 0): {"powered": "true"},
     },
     ComponentType.DFFE: {
+        (0, 0, 3): {"powered": "true"},  # captures here while clock and enable are high, so it must agree at rest
         (0, 0, 2): {"powered": "true"},
         (0, 0, 1): {"power": "15"},
         (0, 0, 0): {"powered": "true"},

@@ -3,12 +3,12 @@
 Follows MCHPRS's redstone code (crates/redstone), with no delays. Which blocks read which is compiled into a graph
 once, then each torch, repeater, comparator, lamp and connected run of dust is re-evaluated when something it reads
 changes, until nothing changes. Repeaters locked by their sides keep their saved state, which is how flip-flops hold
-their values.
+their values. Latches go last, once what locks them is still, so flip-flops settle at whatever level their clock rests,
+and nothing they hold is overwritten on the way.
 """
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
 
 import numpy as np
 from litemapy import BlockState, Region
@@ -67,16 +67,15 @@ def _cells(mask: np.ndarray) -> list[Pos]:
 
 
 class _Propagation:
-    def __init__(self, region: Region, cuts: Iterable[Pos]):
+    def __init__(self, region: Region):
         palette = region._Region__palette
         blocks = region._Region__blocks
-        cut = set(cuts)
         solid = np.array([_is_solid(b) for b in palette])[blocks]
         transparent = np.array([_is_transparent(b) for b in palette])[blocks]
-        self.solid = set(_cells(solid)) - cut
-        self.transparent = set(_cells(transparent)) - cut
+        self.solid = set(_cells(solid))
+        self.transparent = set(_cells(transparent))
         kinds = np.array([_KINDS.get(b.id, -1) for b in palette])[blocks]
-        self.cells = [p for p in _cells(kinds >= 0) if p not in cut]
+        self.cells = _cells(kinds >= 0)
         self.index = {p: i for i, p in enumerate(self.cells)}
         self.kind = [int(kinds[p]) for p in self.cells]
         self.block = [palette[blocks[p]] for p in self.cells]
@@ -335,8 +334,8 @@ class _Propagation:
         return lines
 
 
-def propagate_states(region: Region, cuts: Iterable[Pos]) -> list[str]:
-    """Settled states of region's blocks, with `cuts` cells taken out."""
-    propagation = _Propagation(region, cuts)
+def propagate_states(region: Region) -> list[str]:
+    """Settled states of region's blocks."""
+    propagation = _Propagation(region)
     propagation.run()
     return propagation.states()

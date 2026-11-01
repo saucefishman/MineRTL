@@ -1,9 +1,11 @@
 """Rewrite a built schematic so it pastes already settled, with nothing left to transition.
 
 Otherwise blocks paste in states that don't match their inputs, and the pulses while they settle
-can clock flip-flops. Flip-flops go to their clock-low state holding their initial value, their
-clock inputs are cut while signal propagates through the rest from the inputs, and the result is saved.
---simulate gets the states by running MCHPRS's redstone code on ticks instead, which needs mchprs_headless.
+can clock flip-flops. Signal propagates through the build from its inputs, which leaves flip-flops
+holding their initial values at whatever level their clocks rest, and the result is saved.
+
+--simulate runs MCHPRS's redstone code on ticks instead, which needs mchprs_headless. There flip-flops
+go to their clock-low state and their clock inputs are cut, so clocks that rest high lose state.
 
 Usage: settle_schematic.py <in.litematic> <component_layout.json> <out.litematic> [--simulate]
 """
@@ -63,25 +65,7 @@ def macro_clock_cell(region, terminal: tuple[int, int, int]) -> tuple[int, int, 
     raise ValueError(f"no clock repeater beside {terminal}")
 
 
-def simulated_states(region, cuts: list[tuple[int, int, int]]) -> list[str]:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        with phase("[settle] simulating"):
-            status("saving input")
-            # Without any generated clock region: it would never settle, and the clock counts as low.
-            Schematic(name="settle", regions={"main": region}).save(str(tmp / "in.litematic"))
-            (tmp / "cuts.txt").write_text("".join(f"{x} {y} {z}\n" for x, y, z in cuts))
-            status("running mchprs_headless")
-            result = subprocess.run([headless_binary(), "settle", tmp / "in.litematic", tmp / "cuts.txt", tmp / "states.txt"],
-                                    check=True, capture_output=True, text=True)
-        log(result.stdout.strip())
-        return (tmp / "states.txt").read_text().splitlines()
-
-
-def settle(in_path: str, layout_path: str, out_path: str, simulate: bool = False) -> None:
-    with phase("[settle] loading schematic"):
-        schematic = Schematic.load(in_path)
-    region = schematic.regions["main"]
+def simulated_states(region, layout_path: str) -> list[str]:
     cuts = []
     for comp in json.load(open(layout_path)):
         if comp["type"] not in ("DFF", "DFFE"):
@@ -95,20 +79,39 @@ def settle(in_path: str, layout_path: str, out_path: str, simulate: bool = False
     if macro_clocks.exists():
         for terminal in json.load(open(macro_clocks)):
             cuts.append(macro_clock_cell(region, tuple(terminal)))
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        with phase("[settle] simulating"):
+            status("saving input")
+            # Without any generated clock region: it would never settle, and the clock counts as low.
+            Schematic(name="settle", regions={"main": region}).save(str(tmp / "in.litematic"))
+            (tmp / "cuts.txt").write_text("".join(f"{x} {y} {z}\n" for x, y, z in cuts))
+            status("running mchprs_headless")
+            result = subprocess.run([headless_binary(), "settle", tmp / "in.litematic", tmp / "cuts.txt", tmp / "states.txt"],
+                                    check=True, capture_output=True, text=True)
+        log(result.stdout.strip())
+        lines = (tmp / "states.txt").read_text().splitlines()
+    # Settled with their inputs cut, so back in their clock-low state.
+    cut = {f"{x} {y} {z} " for x, y, z in cuts}
+    for x, y, z in cuts:
+        region[x, y, z] = region[x, y, z].with_properties(powered="false", locked="false")
+    return [line for line in lines if " ".join(line.split()[:3]) + " " not in cut]
+
+
+def settle(in_path: str, layout_path: str, out_path: str, simulate: bool = False) -> None:
+    with phase("[settle] loading schematic"):
+        schematic = Schematic.load(in_path)
+    region = schematic.regions["main"]
     if simulate:
-        lines = simulated_states(region, cuts)
+        lines = simulated_states(region, layout_path)
     else:
         with phase("[settle] propagating"):
-            lines = propagate_states(region, cuts)
-    cut = set(cuts)
+            lines = propagate_states(region)
     with ProgressBar("[settle] applying states", len(lines)) as bar:
         for line in lines:
             bar.update()
             x, y, z, kind, *values = line.split()
             pos = (int(x), int(y), int(z))
-            if pos in cut:  # settled with its input cut, so back in its clock-low state
-                region[pos] = region[pos].with_properties(powered="false", locked="false")
-                continue
             flag = lambda v: "true" if v == "1" else "false"
             if kind == "powered":
                 props = {"powered": flag(values[0]), "locked": flag(values[1])}

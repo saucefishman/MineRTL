@@ -3,11 +3,11 @@ from litemapy import BlockState, Region
 from minecraft_v.placement_engine.propagate import propagate_states
 
 
-def _states(blocks: dict[tuple[int, int, int], BlockState], cuts=()) -> dict[tuple[int, int, int], list[str]]:
+def _states(blocks: dict[tuple[int, int, int], BlockState]) -> dict[tuple[int, int, int], list[str]]:
     region = Region(0, 0, 0, 12, 6, 6)
     for pos, block in blocks.items():
         region[pos] = block
-    lines = (line.split() for line in propagate_states(region, cuts))
+    lines = (line.split() for line in propagate_states(region))
     return {(int(x), int(y), int(z)): rest for x, y, z, *rest in lines}
 
 
@@ -59,15 +59,3 @@ def test_dust_passes_signal_up_over_glass_but_not_down():
     blocks = {(1, 0, 0): STONE, lower: DUST, (2, 1, 0): BlockState("minecraft:glass"), upper: DUST}
     assert _states({**blocks, (0, 1, 0): REDSTONE_BLOCK})[upper] == ["power", "14"]
     assert _states({**blocks, (3, 2, 0): REDSTONE_BLOCK})[lower] == ["power", "0"]
-
-
-def test_cut_cell_is_taken_out():
-    blocks = {
-        (0, 1, 0): REDSTONE_BLOCK,
-        (1, 0, 0): STONE,
-        (1, 1, 0): repeater("west"),
-        (2, 0, 0): STONE,
-        (2, 1, 0): DUST,
-    }
-    assert _states(blocks)[(2, 1, 0)] == ["power", "15"]
-    assert _states(blocks, cuts=[(1, 1, 0)])[(2, 1, 0)] == ["power", "0"]
