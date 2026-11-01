@@ -316,7 +316,7 @@ cdef inline int exempt_code(int ox, int oy, int oz) noexcept nogil:
 
 
 cdef class World:
-    cdef object non_air, wire, torch, repeater, solid, inverted, terminal, fp_relief, fp
+    cdef object non_air, wire, torch, repeater, solid, inverted, terminal, fp_relief, fp, pending
     cdef dict dust_owner
     cdef object net_id
     cdef int min_x, min_y, min_z, max_x, max_y, max_z, max_bridge_y
@@ -332,12 +332,14 @@ cdef class World:
 
     def __init__(self, non_air, wire, torch, repeater, solid, dust_owner, net_id, bounds,
                  int max_bridge_y, goal, int x_h_factor, eprot, prot, fp_relief, fp, inverted, terminal,
-                 workspace, glass, facing, dict pos_ids, list pos_list, list h_list, list move_cache):
-        for s in (non_air, wire, torch, repeater, solid, fp_relief, fp, inverted, terminal):
+                 workspace, glass, facing, dict pos_ids, list pos_list, list h_list, list move_cache,
+                 pending=frozenset()):
+        for s in (non_air, wire, torch, repeater, solid, fp_relief, fp, inverted, terminal, pending):
             if not isinstance(s, (set, frozenset)):
                 raise TypeError(f"World needs sets, got {type(s).__name__}")
         self.non_air, self.wire, self.torch, self.repeater = non_air, wire, torch, repeater
         self.solid, self.inverted, self.terminal, self.fp_relief, self.fp = solid, inverted, terminal, fp_relief, fp
+        self.pending = pending
         if not isinstance(dust_owner, dict):
             raise TypeError(f"World needs a dict dust_owner, got {type(dust_owner).__name__}")
         self.dust_owner = <dict>dust_owner  # subclasses (JournaledDict, OverlayDict) keep dict.get
@@ -480,7 +482,7 @@ cdef class World:
 
     cdef bint wire_walkable(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt,
                             bint with_inv_fp) except -1:
-        """_wire_walkable; with_inv_fp False = no inverted cells / footprint (mid_walkable).
+        """_wire_walkable; with_inv_fp False = no footprint checks (mid_walkable).
         Only the boolean matters, so each neighbour cell is fetched once and all its checks run
         together (the Python version's check order differs; its result doesn't)."""
         cdef int d, dy, nx, ny, nz, vdy, vy
@@ -501,7 +503,7 @@ cdef class World:
             for dy in range(-1, 2):
                 nx, ny, nz = x + HORIZ[d][0], y + dy, z + HORIZ[d][1]
                 c = self.cell(nx, ny, nz)
-                if with_inv_fp and c.val & F_INV:
+                if c.val & F_INV:
                     return False
                 if has_exempt and nx == ex and ny == ey and nz == ez:
                     continue
@@ -743,11 +745,23 @@ cdef class World:
 
     cdef bint next_to_terminal(self, int x, int y, int z) except -1:
         """Whether an inverted cell here would make a pin terminal unwalkable (wire_walkable
-        rejects cells beside inverted ones); own-net terminals of later sinks aren't keepout."""
+        rejects cells beside inverted ones); own-net terminals of later sinks aren't keepout.
+        Sinks this net has yet to reach also need their approach cells walkable, and those are
+        one step further out, so an inverted cell can wall a pin off from a diagonal."""
         cdef int k, ddy
         for k in range(4):
             for ddy in range(-1, 2):
                 if self.flag(x + HORIZ[k][0], y + ddy, z + HORIZ[k][1], F_TERM):
+                    return True
+        if not self.pending:
+            return False
+        for ddy in range(-2, 3):
+            if PySet_Contains(self.pending, (x, y + ddy, z)):
+                return True
+            for k in range(4):
+                if (PySet_Contains(self.pending, (x + 2 * HORIZ[k][0], y + ddy, z + 2 * HORIZ[k][1]))
+                        or PySet_Contains(self.pending, (x + HORIZ[k][0] + HORIZ[k][1], y + ddy,
+                                                         z + HORIZ[k][1] - HORIZ[k][0]))):
                     return True
         return False
 

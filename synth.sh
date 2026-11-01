@@ -14,6 +14,9 @@ shift
 #                           give each parallel build its own
 args=()
 out_litematic_dir=""
+out_litematic="build/result.litematic"
+settle=true
+synth_only=false
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +36,24 @@ while [[ $# -gt 0 ]]; do
             out_litematic_dir="${1#*=}"
             shift
             ;;
+        --synth-only)  # stop after writing the netlist
+            synth_only=true
+            shift
+            ;;
+        --no-settle)
+            settle=false
+            shift
+            ;;
+        --out-litematic)
+            out_litematic="$2"
+            args+=("$1" "$2")
+            shift 2
+            ;;
+        --out-litematic=*)
+            out_litematic="${1#*=}"
+            args+=("$1")
+            shift
+            ;;
         *)
             args+=("$1")
             shift
@@ -41,7 +62,8 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ -n "$out_litematic_dir" ]]; then
     project_name="$(basename "${dir%/}")"
-    args+=(--out-litematic "${out_litematic_dir%/}/${project_name}.litematic")
+    out_litematic="${out_litematic_dir%/}/${project_name}.litematic"
+    args+=(--out-litematic "$out_litematic")
 fi
 set -- ${args[@]+"${args[@]}"}
 artifacts_dir="${artifacts_dir%/}"
@@ -69,13 +91,13 @@ hierarchy -check -top main
 flatten -noscopeinfo
 proc
 memory_map
-dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 -cell \$_DLATCH_P_ 0
+dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
 techmap -map techmap/dlatch_map.v
 opt
 techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
 techmap -map techmap/fa_map.v
 techmap
-dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFFE_PP_ 0 -cell \$_DLATCH_P_ 0
+dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
 techmap -map techmap/dffe_pn_decompose.v
 opt -nosdff
 techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
@@ -85,4 +107,19 @@ write_json ${artifacts_dir}/netlist.json
 stat
 "
 
+if [[ "$synth_only" == true ]]; then
+    exit 0
+fi
+
 uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
+
+# Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it).
+# Optional: needs MCHPRS's mchprs_headless.
+if [[ "$settle" == true ]]; then
+    headless="${MCHPRS_HEADLESS:-${MCHPRS_DIR:-$HOME/Projects/MCHPRS}/target/release/mchprs_headless}"
+    if [[ -x "$headless" ]]; then
+        MCHPRS_HEADLESS="$headless" uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic"
+    else
+        echo "[settle] skipped: no mchprs_headless at $headless. The build works, but flip-flops can lose their values at power-up." >&2
+    fi
+fi

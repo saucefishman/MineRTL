@@ -41,6 +41,35 @@ def _mirror_block_x(block: BlockState) -> BlockState:
     return block.with_properties(**changed) if changed else block
 
 
+_OPPOSITE_DIR = {"north": "south", "south": "north", "east": "west", "west": "east"}
+
+
+def _rotate_block_180(block: BlockState) -> BlockState:
+    """``block`` turned half way about Y: every horizontal ``facing`` and wire side swaps with its opposite."""
+    props = dict(block.properties())
+    changed = {}
+    if props.get("facing") in _OPPOSITE_DIR:
+        changed["facing"] = _OPPOSITE_DIR[props["facing"]]
+    for a, b in (("east", "west"), ("north", "south")):
+        if a in props and b in props:
+            changed[a], changed[b] = props[b], props[a]
+    return block.with_properties(**changed) if changed else block
+
+
+def _rotate_component_180(component: Component) -> Component:
+    """Copy of ``component`` turned half way about Y within its footprint; ``metadata['rotate_180']`` tells the stamp."""
+    w, d = component.footprint.width, component.footprint.depth
+    pins = [
+        pin.model_copy(update={
+            "offset": (w - 1 - pin.offset[0], pin.offset[1], d - 1 - pin.offset[2]),
+            "side": CardinalDirection(_OPPOSITE_DIR[pin.side.value]) if pin.side is not None else None,
+        })
+        for pin in component.pins
+    ]
+    metadata = {**component.metadata, "rotate_180": not component.metadata.get("rotate_180", False)}
+    return component.model_copy(update={"pins": pins, "metadata": metadata})
+
+
 def _mirror_component_x(component: Component) -> Component:
     """Copy of ``component`` mirrored in X within its footprint; mirroring twice restores it.
 
@@ -69,9 +98,11 @@ def _paste_template(
         schematic_net_id: str | None = None,
         pin_positions: frozenset[tuple[int, int, int]] = frozenset(),
         mirror_width: int | None = None,
+        block_states: dict[tuple[int, int, int], dict[str, str]] | None = None,
 ) -> None:
     """Paste ``template``'s non-air blocks at ``dest_origin``; ``mirror_width`` reflects it in X
-    within that width (see ``_mirror_component_x``)."""
+    within that width (see ``_mirror_component_x``). ``block_states`` overrides properties of
+    blocks by position relative to the template's first non-air corner, e.g. to paste a flip-flop already holding a 1."""
     tmin_x, tmin_y, tmin_z, _, _, _ = _non_air_bounds(template)
     dx, dy, dz = dest_origin
     placed: list[tuple[tuple[int, int, int], BlockState]] = []
@@ -81,6 +112,9 @@ def _paste_template(
             continue
         x, y, z = pos
         rx = x - tmin_x
+        relative = (rx, y - tmin_y, z - tmin_z)
+        if block_states is not None and relative in block_states:
+            block = block.with_properties(**block_states[relative])
         if mirror_width is not None:
             rx = mirror_width - 1 - rx
             block = _mirror_block_x(block)

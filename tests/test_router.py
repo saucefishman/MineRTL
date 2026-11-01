@@ -1,12 +1,17 @@
 import pytest
-from litemapy import Region
+from litemapy import BlockState, Region
 
-from minecraft_v.placement_engine.builder import _GreedyRouter, _KeepoutMap, _RouteJob, _terminal_halo
-from minecraft_v.placement_engine.constants import GLASS, STONE, _REPEATER_INTERVAL
+from minecraft_v.placement_engine import _astar, builder
+from minecraft_v.placement_engine.builder import (
+    _GreedyRouter, _KeepoutMap, _RouteJob, _repair_faulty_nets, _terminal_halo,
+)
+from minecraft_v.placement_engine.constants import GLASS, STONE, _DELTA_TO_FACING, _HORIZ_DIRS, _REPEATER_INTERVAL
 from minecraft_v.placement_engine.pathfinding import _signal_depths
 from minecraft_v.placement_engine.ripup import Recorder, JournaledDict, JournaledSet
 from minecraft_v.placement_engine.verify import verify_signals
-from minecraft_v.placement_engine.wire import LayConflict, _check_slope_notch, _place_repeaters_for_net
+from minecraft_v.placement_engine.wire import (
+    LayConflict, _check_slope_notch, _lay_redstone_path, _place_repeaters_for_net, _signal_returns,
+)
 
 BOUNDS = (0, 0, 0, 23, 7, 23)
 
@@ -85,6 +90,40 @@ def test_slope_notch_check(prev, cell, notch):
     _check_slope_notch(region, solid, prev, (cell[0], prev[1], cell[2]))  # flat: no notch
 
 
+@pytest.mark.parametrize("path, notch", [
+    ([(1, 5, 1), (3, 3, 1)], (2, 5, 1)),  # 2x down: above the middle cell
+    ([(1, 5, 1), (3, 3, 1)], (3, 4, 1)),  # 2x down: above the dest
+    ([(1, 3, 1), (3, 5, 1)], (1, 4, 1)),  # 2x up: above the launch
+    ([(1, 3, 1), (3, 5, 1)], (2, 5, 1)),  # 2x up: above the middle cell
+])
+def test_slope2_lay_rejects_block_cutting_a_step(path, notch):
+    rec = Recorder()
+    region = Region(0, 0, 0, 7, 8, 7)
+    solid = JournaledSet(rec, name="solid")
+    dust_owner = JournaledDict(rec)
+    region[notch] = STONE
+    solid.add(notch)
+    with pytest.raises(LayConflict):
+        _lay_redstone_path(region, solid, dust_owner, path, "a")
+
+
+def test_signal_returns_around_a_repeater_cell():
+    region = Region(0, 0, 0, 8, 4, 6)
+    owner = {}
+    from minecraft_v.placement_engine.constants import REDSTONE
+    def dust(*cells, net="a"):
+        for c in cells:
+            region[c] = REDSTONE
+            owner[c] = net
+    dust((1, 1, 1), (2, 1, 1), (3, 1, 1))  # 2 is the candidate repeater cell
+    assert not _signal_returns(region, owner, "a", (3, 1, 1), (1, 1, 1), (2, 1, 1))
+    dust((3, 1, 2), (2, 1, 2), (1, 1, 2))  # bypass from past it back to its input
+    assert _signal_returns(region, owner, "a", (3, 1, 1), (1, 1, 1), (2, 1, 1))
+    for c in ((3, 1, 2), (2, 1, 2), (1, 1, 2)):
+        owner[c] = "b"  # another net's wire is not this net's signal
+    assert not _signal_returns(region, owner, "a", (3, 1, 1), (1, 1, 1), (2, 1, 1))
+
+
 # --- greedy router ---------------------------------------------------------------------------
 
 def test_router_routes_tree_and_records_paths():
@@ -159,3 +198,161 @@ def test_router_breaks_long_descent_for_repeaters(drop, horiz):
                     terminals={src, sink})
     assert router.run([job], "[test]") == []
     assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
+
+
+def test_slope_notch_checked_when_cell_starts_a_longer_move():
+    """A cell that a 1-step slope lands on can also start a 2x slope; the notch check still applies."""
+    workspace = Region(0, 0, 0, 12, 16, 12)
+    notch = (2, 11, 2)
+    workspace[notch] = STONE
+    path = [(1, 11, 2), (2, 10, 2), (4, 8, 2)]
+    with pytest.raises(LayConflict, match="would be cut"):
+        _lay_redstone_path(workspace, {notch}, {}, path, "n")
+
+
+def test_bank_leads_only_for_the_bank_pins_and_channel():
+    from minecraft_v.placement_engine.builder import _bank_pin_leads
+    from minecraft_v.placement_engine.layout import _Placed
+    from minecraft_v.placement_engine.ir import (
+        Component, ComponentType, Footprint, NetConnection, NetEndpoint,
+    )
+    bank = _Placed(component=Component(id="bank", type=ComponentType.CUSTOM, pins=[], footprint=Footprint(width=100, height=20, depth=50),
+                                       metadata={"bank": True}), origin=(0, 0, 100))
+    terminals = {("s", "y"): (200, 5, 120), ("b", "east"): (100, 4, 120), ("g", "a"): (150, 4, 120),
+                 ("b", "back"): (30, 6, 99)}
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="s", pin_name="y"), sinks=[
+        NetEndpoint(component_id=c, pin_name=p) for c, p in (("b", "east"), ("g", "a"), ("b", "back"))])
+    leads = _bank_pin_leads(net, terminals, [bank], [bank])
+    assert len(leads) == 2
+    east, back = leads
+    assert east[1:] == (4, 120) and east[0] > 100
+    assert back[0] > 100 and back[1] == 6 and back[2] < 99  # the channel's mouth, away from the face
+
+
+def test_net_ticks_count_the_deepest_branch_not_every_repeater():
+    from minecraft_v.placement_engine.builder import _net_wire_ticks
+    from minecraft_v.placement_engine.ir import (
+        Component, ComponentList, ComponentType, CURRENT_SCHEMA_VERSION, NetConnection, NetEndpoint,
+    )
+    ws = Region(0, 0, 0, 21, 3, 3)
+    dust = BlockState("minecraft:redstone_wire")
+    rep = BlockState("minecraft:repeater", facing="west", delay="1")
+    owner = {}
+    for x in range(21):  # a line from x=10 both ways, 2 repeaters on each arm
+        ws[x, 0, 1] = rep if x in (2, 6, 14, 18) else dust
+        owner[(x, 0, 1)] = "n"
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="s", pin_name="y"),
+                        sinks=[NetEndpoint(component_id="t", pin_name="a")])
+    comp = ComponentList.model_construct(schema_version=CURRENT_SCHEMA_VERSION, components=[], nets=[net])
+    assert _net_wire_ticks(comp, owner, ws, {("s", "y"): (10, 0, 1)}) == {"n": 2}
+
+
+def test_tower_starting_where_a_powered_drop_lands_is_laid():
+    ws = Region(0, 0, 0, 14, 14, 14)
+    solid, owner = set(), {}
+    _lay_redstone_path(ws, solid, owner, [(6, 8, 6), (6, 4, 6), (6, 8, 8)], "n")
+    assert "repeater" in ws[6, 4, 7].id  # the tower's repeater
+    assert (6, 7, 8) in owner  # and its column
+
+
+def test_powered_drop_from_a_tower_top_cant_land_in_its_own_column():
+    with pytest.raises(ValueError):
+        _lay_redstone_path(Region(0, 0, 0, 14, 14, 14), set(), {}, [(6, 4, 6), (6, 8, 8), (6, 4, 8)], "n")
+
+
+def test_slope_notch_checked_on_both_steps_of_a_2x_slope():
+    ws = Region(0, 0, 0, 14, 14, 14)
+    ws[6, 7, 7] = STONE
+    with pytest.raises(LayConflict):
+        _check_slope_notch(ws, {(6, 7, 7)}, (6, 7, 6), (6, 5, 8))
+
+
+
+def _tower_moves(pending):
+    """Where the kernel will build a tower from (5, 1, 5) in an empty world."""
+    pos_ids, pos_list, h_list, cache = {}, [], [], []
+    empty = frozenset()
+    world = _astar.World(empty, empty, empty, empty, {(x, 0, z) for x in range(24) for z in range(24)}, {}, "n",
+                         BOUNDS, BOUNDS[4], (20, 1, 20), 1, ("set", empty), ("set", empty), empty, empty, empty,
+                         empty, Region(0, 0, 0, 24, 8, 24), GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
+                         pos_ids, pos_list, h_list, cache, frozenset(pending))
+    world_id = len(pos_list)
+    pos_ids[(5, 1, 5)] = world_id
+    pos_list.append((5, 1, 5))
+    h_list.append(0)
+    cache.append(None)
+    moves, _ = world.static_moves(world_id)
+    return {pos_list[m[0]] for m in moves if pos_list[m[0]][1] == 5}
+
+
+def test_tower_keeps_clear_of_a_later_sinks_approach():
+    assert (7, 5, 5) in _tower_moves(())
+    # Diagonal to the inverted blocks at (7, 2..3, 5): every approach to this sink would touch them.
+    assert (7, 5, 5) not in _tower_moves([(6, 3, 4)])
+    # Straight along a line two cells off and two up or down from them, too.
+    assert (7, 5, 5) not in _tower_moves([(9, 1, 5)])
+    assert (7, 5, 5) in _tower_moves([(10, 3, 5)])
+
+
+def test_sink_a_job_cant_reach_is_retried_first():
+    router, *_ = _router()
+    job = _job("n", (1, 1, 1), [(3, 1, 1), (5, 1, 1)])
+    orders = []
+
+    def route_job(job, blocked, first=()):
+        orders.append(first)
+        if not first:
+            router.failed_goal[job.key] = (5, 1, 1)
+            raise ValueError("No route")
+
+    router.route_job = route_job
+    router.route_job_retrying(job)
+    assert orders == [(), ((5, 1, 1),)]
+
+
+def test_sink_failing_again_while_first_is_final():
+    router, *_ = _router()
+    job = _job("n", (1, 1, 1), [(3, 1, 1)])
+
+    def route_job(job, blocked, first=()):
+        router.failed_goal[job.key] = (3, 1, 1)
+        raise ValueError("No route")
+
+    router.route_job = route_job
+    with pytest.raises(ValueError):
+        router.route_job_retrying(job)
+
+
+def test_failed_sink_keeps_the_jobs_branches_and_rips_only_blockers(monkeypatch):
+    router, *_ = _router()
+    blocker = _job("blocker", (1, 1, 10), [(9, 1, 10)])
+    net = _job("n", (1, 1, 1), [(3, 1, 1), (5, 1, 1), (9, 1, 7)])
+    find = builder._find_wire_path
+    searches = []
+
+    def failing_once(ws, solid, owner, start, dst, net_id, *args, **kwargs):
+        searches.append((net_id, dst))
+        if (net_id, dst) == ("n", (9, 1, 7)) and searches.count(("n", (9, 1, 7))) == 1:
+            raise ValueError("No route")
+        return find(ws, solid, owner, start, dst, net_id, *args, **kwargs)
+
+    monkeypatch.setattr(builder, "_find_wire_path", failing_once)
+    assert router.run([blocker, net], "[test]") == []
+    assert searches.count(("n", (3, 1, 1))) == 1 and searches.count(("n", (5, 1, 1))) == 1  # not routed again
+    assert searches.count(("n", (9, 1, 7))) == 2
+    assert searches.count(("blocker", (9, 1, 10))) == 2  # ripped, then routed after n
+    assert not router.kept and not router.has_kept_wire
+    assert len(router.paths["n"][1]) == 3
+
+
+def test_repair_reroutes_a_net_verify_finds_fault_with():
+    router, region, solid, dust_owner = _router()
+    job = _job("n", (2, 1, 2), [(8, 1, 2)])
+    assert router.run([job], "[test]") == []
+    assert verify_signals(region, {"n": (job.src, job.sinks)}, dust_owner) == []
+    # Something the search couldn't have known cut the wire: verify sees an open, repair re-routes.
+    cut = router.paths["n"][1][0][3]
+    region[cut] = STONE
+    dust_owner.pop(cut)
+    assert _repair_faulty_nets(router, [job], set(), frozenset(), None) == []
+    assert verify_signals(region, {"n": (job.src, job.sinks)}, dust_owner) == []

@@ -126,3 +126,47 @@ def test_output_pin_target_layer_wiring(tmp_path: Path, capsys):
 )
 def test_single_gate_routes_clean(tmp_path: Path, capsys, gate_type, kwargs, placer):
     _build(_single_gate_module(gate_type, **kwargs), tmp_path / "gate.litematic", capsys, placer=placer)
+
+
+@pytest.mark.parametrize("gate, cells", [
+    ("DFF", [(0, 0, 1), (0, 0, 0)]),
+    ("DFFE", [(0, 0, 2), (0, 0, 0)]),
+])
+def test_init_high_flip_flop_pastes_powered(gate, cells):
+    from litemapy import Region
+    from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
+    from minecraft_v.placement_engine.template import _load_template_region, _paste_template
+
+    kind = ComponentType[gate]
+    template = _load_template_region(SCHEMATICS_DIR, SCHEMATIC_MAP[kind].file_prefix)
+    for block_states, want in ((None, "false"), (INIT_HIGH_STATES[kind], "true")):
+        region = Region(0, 0, 0, 12, 3, 8)
+        _paste_template(region, template, (1, 1, 1), set(), block_states=block_states)
+        for x, y, z in cells:
+            assert region[1 + x, 1 + y, 1 + z]["powered"] == want
+
+
+def test_dffe_template_fits_its_footprint_and_keeps_the_clock_dust():
+    from minecraft_v.cell_library import SCHEMATIC_MAP
+    from minecraft_v.placement_engine.template import _load_template_region, _non_air_bounds
+
+    info = SCHEMATIC_MAP[ComponentType.DFFE]
+    template = _load_template_region(SCHEMATICS_DIR, info.file_prefix)
+    x0, y0, z0, x1, y1, z1 = _non_air_bounds(template)
+    assert (x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1) == (info.footprint.width, info.footprint.height, info.footprint.depth)
+    # Dust on the quartz is what carries the clock into the gate past the lock tap.
+    assert template[x0 + 5, y0 + 1, z0 + 3].id == "minecraft:redstone_wire"
+
+
+def test_synth_works_without_mchprs_headless(tmp_path: Path):
+    import os
+    import subprocess
+
+    out = tmp_path / "result.litematic"
+    run = subprocess.run(
+        ["./synth.sh", "examples/counter", "--artifacts-dir", str(tmp_path / "artifacts"), "--route-passes", "1",
+         "--out-litematic", str(out)],
+        env={**os.environ, "MCHPRS_HEADLESS": str(tmp_path / "missing")}, capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+    assert "[settle] skipped" in run.stderr
+    assert out.exists()

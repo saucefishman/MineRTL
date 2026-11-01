@@ -303,14 +303,22 @@ def _lay_redstone_path(
                     (delta in _HORIZ_DIRS and dy in (-1, 0, 1))
                 or (i in tower_top and delta == (0, 0) and dy == 1)
             ):
-                raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]}")
+                raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]} (move {i + 1} of {n - 1})")
 
     for i, cell in enumerate(cells):
+        if i > 0:  # before the move handlers: this cell may also start a 2x slope, tower or powered drop
+            _check_slope_notch(workspace, solid, cells[i - 1], cell)
         if i in slope2_bottom:
-            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], BlockState("minecraft:sandstone"))
+            if i > 0:
+                _check_slope_notch(workspace, solid, cells[i - 1], cell)
+            top = cells[i + 1]
+            mid = ((cell[0] + top[0]) // 2, (cell[1] + top[1]) // 2, (cell[2] + top[2]) // 2)
+            _check_slope_notch(workspace, solid, cell, mid)
+            _check_slope_notch(workspace, solid, mid, top)
+            _lay_slope2_move(workspace, solid, dust_owner, net_id, cell, top, BlockState("minecraft:sandstone"))
             continue
 
-        if (i in tower_top and i not in tower_bottom) or (i in p4_top and i not in p4_bottom):
+        if (i in tower_top or i in p4_top) and i not in tower_bottom and i not in p4_bottom:
             continue  # already placed by their respective move handler
 
         if i in tower_bottom:
@@ -321,8 +329,6 @@ def _lay_redstone_path(
                                      inverted_cells, goal, terminal_positions, path_cells)
 
         else:
-            if i > 0:
-                _check_slope_notch(workspace, solid, cells[i - 1], cell)
             _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
 
 
@@ -336,11 +342,64 @@ def _check_slope_notch(
     checks that against the world, but an earlier part of the same path (outside its local
     snapshot) may have put a support block there since; the link would silently break."""
     (ax, ay, az), (bx, by, bz) = prev, cell
+    if (bx - ax, bz - az) in _TOWER_2BLOCK and abs(by - ay) == 2:  # a 2x slope is two of them
+        mid = ((ax + bx) // 2, (ay + by) // 2, (az + bz) // 2)
+        _check_slope_notch(workspace, solid, prev, mid)
+        _check_slope_notch(workspace, solid, mid, cell)
+        return
     if (bx - ax, bz - az) not in _HORIZ_DIRS or abs(by - ay) != 1:
         return
     notch = (bx, by + 1, bz) if by < ay else (ax, ay + 1, az)
     if notch in solid and _block_str(workspace[notch]) != "minecraft:glass":
         raise LayConflict(f"Slope {prev} -> {cell} would be cut by the block at {notch}", (cell, prev))
+
+
+def _signal_returns(
+        workspace: Region,
+        dust_owner: dict[tuple[int, int, int], str],
+        net_id: str,
+        start: tuple[int, int, int],
+        target: tuple[int, int, int],
+        cut: tuple[int, int, int],
+) -> bool:
+    """Whether signal from start reaches target through net_id's wire and repeaters, avoiding cut."""
+    def block_at(pos: tuple[int, int, int]) -> BlockState | None:
+        try:
+            return workspace[pos] if pos[1] >= 0 else None
+        except IndexError:
+            return None
+
+    def input_side(block: BlockState) -> tuple[int, int]:
+        return next(d for d, f in _DELTA_TO_FACING.items() if f == block["facing"])
+
+    seen = {start, cut}
+    stack = [start]
+    while stack:
+        pos = stack.pop()
+        if pos == target:
+            return True
+        x, y, z = pos
+        block = block_at(pos)
+        if block is not None and _is_repeater(block):
+            dx, dz = input_side(block)
+            nexts = [(x - dx, y + dy, z - dz) for dy in (-1, 0, 1)]  # into wire, or wire on a block it powers
+        else:
+            nexts = [(x + dx, y + dy, z + dz) for dx, dz in _HORIZ_DIRS for dy in (-1, 0, 1)]
+        for nxt in nexts:
+            other = block_at(nxt)
+            if nxt in seen or other is None:
+                continue
+            if _is_redstone_wire(other):
+                follows = dust_owner.get(nxt) == net_id
+            elif _is_repeater(other) and block is not None and not _is_repeater(block):
+                dx, dz = input_side(other)
+                follows = dust_owner.get(nxt, net_id) == net_id and (nxt[0] + dx, nxt[2] + dz) == (x, z)
+            else:
+                follows = False
+            if follows:
+                seen.add(nxt)
+                stack.append(nxt)
+    return False
 
 
 def _place_repeaters_for_net(
@@ -385,22 +444,27 @@ def _place_repeaters_for_net(
             return False  # turn after repeater
         if path[j] in branch_points:
             return False  # branch point — repeater drives only one output
+        if _signal_returns(workspace, dust_owner, net_id, path[j + 1], path[j - 1], path[j]):
+            return False  # wire past the repeater also touches its input: it would latch on
         return True
 
     # upstream_seg[pos] = path segment [last_reset_cell, ..., pos] from the most recent
-    # reset point to pos. Prepended to tree-seed paths so the backward cap search can
+    # reset point to pos, never past it: a walk counts signal from its first cell. Prepended
+    # to tree-seed paths so the backward cap search can
     # reach viable repeater positions in the already-laid upstream wire.
     upstream_seg: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
+    upstream_dist: dict[tuple[int, int, int], int] = {}  # signal already spent at that reset cell
 
     for orig_path in ordered_paths:
         path: list[tuple[int, int, int]] = list(orig_path)
         start = path[0]
         # Prepend upstream segment so the cap search can look back into prior wire.
-        if start in upstream_seg and len(upstream_seg[start]) > 1:
+        if start in upstream_seg:
             path = upstream_seg[start][:-1] + path  # upstream[:-1] avoids duplicating start
 
 
-        reset_depth = 0 # path will always start at reset location
+        # A path starts at a reset location, some signal past it after a tower or torch
+        reset_depth = -upstream_dist.get(start, 0)
         reset_idx = 0
         depth = 0
         depths = []
@@ -429,7 +493,8 @@ def _place_repeaters_for_net(
 
             depths.append(depth)
             dist = depth - reset_depth
-            upstream_seg[pos] = path[max(reset_idx - _REPEATER_INTERVAL, 0):pos_idx + 1]
+            upstream_seg[pos] = path[reset_idx:pos_idx + 1]
+            upstream_dist[pos] = depths[reset_idx] - reset_depth
             if dist >= _REPEATER_INTERVAL:
                 # Scan backward in signal-depth units, not path-index units.
                 # cap = highest j where the repeater can actually receive signal.

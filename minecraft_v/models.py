@@ -23,9 +23,16 @@ class Cell(BaseModel):
     connections: dict[str, Bits]
 
 
+class NetName(BaseModel):
+    bits: Bits
+    # Values are binary bit-vector strings; "init" is a register's initial value, LSB last
+    attributes: dict[str, str | int] = Field(default_factory=dict)
+
+
 class Module(BaseModel):
     ports: dict[str, Port]
     cells: dict[str, Cell]
+    netnames: dict[str, NetName] = Field(default_factory=dict)
 
 
 class Netlist(BaseModel):
