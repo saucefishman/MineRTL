@@ -9,9 +9,12 @@ and nothing they hold is overwritten on the way.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 
 import numpy as np
 from litemapy import BlockState, Region
+
+from minecraft_v.progress import log
 
 Pos = tuple[int, int, int]
 
@@ -21,6 +24,8 @@ _TOP, _BOTTOM = _FACES[:2]
 _HORIZONTAL = _FACES[2:]
 _FACING: dict[str, Pos] = {"north": (0, 0, -1), "south": (0, 0, 1), "west": (-1, 0, 0), "east": (1, 0, 0)}
 _SIDE_PROPERTY = {(0, 0, -1): "north", (0, 0, 1): "south", (-1, 0, 0): "west", (1, 0, 0): "east"}
+
+_MAX_STEPS_PER_ITEM = 1000
 
 _DUST, _REPEATER, _COMPARATOR, _TORCH, _WALL_TORCH, _LAMP, _LEVER, _REDSTONE_BLOCK = range(8)
 _KINDS = {
@@ -304,7 +309,13 @@ class _Propagation:
         queue.extend(i for i in steppers if i not in latches)
         waiting = deque(latches)
         queued = {*queue, *waiting}
+        # A loop of torches never goes still.
+        steps_left = _MAX_STEPS_PER_ITEM * len(queued)
         while queue or waiting:
+            steps_left -= 1
+            if steps_left < 0:
+                log("[settle] signal never went still, is there an oscillator? Saving the states as they are.")
+                return
             item = queue.popleft() if queue else waiting.popleft()
             queued.discard(item)
             if item >= offset:
@@ -339,3 +350,24 @@ def propagate_states(region: Region) -> list[str]:
     propagation = _Propagation(region)
     propagation.run()
     return propagation.states()
+
+
+def apply_states(region: Region, lines: Iterable[str]) -> None:
+    """Writes states in the form propagate_states and `mchprs_headless settle` give them."""
+    flag = lambda v: "true" if v == "1" else "false"
+    for line in lines:
+        x, y, z, kind, *values = line.split()
+        pos = (int(x), int(y), int(z))
+        if kind == "powered":
+            props = {"powered": flag(values[0]), "locked": flag(values[1])}
+        elif kind == "power":
+            props = {"power": values[0]}
+        else:
+            props = {"lit": flag(values[0])}
+        region[pos] = region[pos].with_properties(**props)
+
+
+def settle(region: Region) -> None:
+    """Puts region's blocks in the states they settle to, so nothing transitions when it's pasted. Otherwise the
+    pulses while blocks settle can clock flip-flops."""
+    apply_states(region, propagate_states(region))

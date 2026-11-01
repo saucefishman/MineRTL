@@ -39,6 +39,7 @@ from .anneal import _optimize_placement
 from .poisson import _poisson_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
+from .propagate import settle as settle_blocks
 from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
@@ -2028,6 +2029,7 @@ def build_litematic_from_component_list(
         place_seed: int = 0,
         place_workers: int = 1,
         flat: bool = False,
+        settled: bool = True,
         macros: dict[str, Macro] | None = None,
         flat_comp: ComponentList | None = None,
         capture: dict | None = None,
@@ -2339,6 +2341,10 @@ def build_litematic_from_component_list(
         server_path = out_path.with_suffix(SERVER_FILE_SUFFIX)
         write_server_file(server_path, size, resolved_probes, clock_entry)
         log(f"[server] {server_path}")
+
+    if settled:
+        with phase("[settle] propagating"):
+            settle_blocks(workspace)
 
     schematic = Schematic(
         name=schematic_name,

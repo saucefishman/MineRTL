@@ -1,6 +1,7 @@
 from litemapy import BlockState, Region
 
-from minecraft_v.placement_engine.propagate import propagate_states
+from minecraft_v.placement_engine import propagate
+from minecraft_v.placement_engine.propagate import propagate_states, settle
 
 
 def _states(blocks: dict[tuple[int, int, int], BlockState]) -> dict[tuple[int, int, int], list[str]]:
@@ -59,3 +60,20 @@ def test_dust_passes_signal_up_over_glass_but_not_down():
     blocks = {(1, 0, 0): STONE, lower: DUST, (2, 1, 0): BlockState("minecraft:glass"), upper: DUST}
     assert _states({**blocks, (0, 1, 0): REDSTONE_BLOCK})[upper] == ["power", "14"]
     assert _states({**blocks, (3, 2, 0): REDSTONE_BLOCK})[lower] == ["power", "0"]
+
+
+def test_settle_writes_states_into_region():
+    region = Region(0, 0, 0, 3, 4, 1)
+    for pos, block in {(1, 0, 0): STONE, (1, 1, 0): TORCH, (1, 2, 0): STONE, (1, 3, 0): TORCH}.items():
+        region[pos] = block
+    settle(region)
+    assert region[1, 1, 0]["lit"] == "true"
+    assert region[1, 3, 0]["lit"] == "false"
+
+
+def test_oscillator_stops_instead_of_hanging(monkeypatch):
+    # The torch lights dust that runs into a repeater, which powers the torch's own block.
+    messages = []
+    monkeypatch.setattr(propagate, "log", messages.append)
+    _states({(0, 0, 0): STONE, (0, 1, 0): TORCH, (1, 1, 0): DUST, (1, 0, 0): repeater("east"), (2, 0, 0): DUST})
+    assert "oscillator" in messages[0]

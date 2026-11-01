@@ -25,11 +25,10 @@ def build(example: str, out: Path, seed: str, script_text: str) -> tuple[Path, P
     env = {**os.environ, "MINECRAFT_V_ARTIFACTS_DIR": str(out)}
     subprocess.run([ROOT / "synth.sh", ROOT / "examples" / example, "--artifacts-dir", out, "--synth-only"], check=True, stdout=subprocess.DEVNULL)
     pins, raw, settled = out / "pins.txt", out / "unsettled.litematic", out / "settled.litematic"
-    subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", out / "netlist.json", "--route-passes", "1",
-                    "--no-macros", "--no-debug-prints", "--generate-clock", "none", "--place-seed", seed, "--out-litematic", raw],
-                   check=True, env=env, stdout=subprocess.DEVNULL)
-    subprocess.run([sys.executable, ROOT / "scripts/settle_schematic.py", raw, out / "component_layout.json", settled],
-                   check=True, stdout=subprocess.DEVNULL)
+    for flag, litematic in (("--no-settle", raw), ("--settle", settled)):
+        subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", out / "netlist.json", "--route-passes", "1",
+                        "--no-macros", "--no-debug-prints", "--generate-clock", "none", "--place-seed", seed, flag, "--out-litematic", litematic],
+                       check=True, env=env, stdout=subprocess.DEVNULL)
     script = out / "run.txt"
     script.write_text(script_text)
     return raw, settled, pins, script

@@ -43,8 +43,6 @@ def main() -> int:
     subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", netlist, "--route-passes", "1",
                     "--no-macros", "--generate-clock", "none", "--place-seed", seed, "--out-litematic", litematic, *args],
                    check=True, env=env, stdout=subprocess.DEVNULL if os.environ.get("QUIET") else None)
-    subprocess.run([sys.executable, ROOT / "scripts/settle_schematic.py", litematic,
-                    out / f"s{seed}_artifacts/component_layout.json", litematic], check=True)
     script_path = out / f"s{seed}.script"
     script_path.write_text(script())
     return subprocess.run([headless_binary(), "test", litematic, pins, script_path, "--modes", "noupdate,redstone,redpiler"]).returncode

@@ -1,13 +1,9 @@
-"""Rewrite a built schematic so it pastes already settled, with nothing left to transition.
+"""Settle a build made with --no-settle by running MCHPRS's redstone code on ticks, to compare with the build's own settling.
 
-Otherwise blocks paste in states that don't match their inputs, and the pulses while they settle
-can clock flip-flops. Signal propagates through the build from its inputs, which leaves flip-flops
-holding their initial values at whatever level their clocks rest, and the result is saved.
+Flip-flops go to their clock-low state and their clock inputs are cut, so clocks that rest high lose state.
+Needs mchprs_headless.
 
---simulate runs MCHPRS's redstone code on ticks instead, which needs mchprs_headless. There flip-flops
-go to their clock-low state and their clock inputs are cut, so clocks that rest high lose state.
-
-Usage: settle_schematic.py <in.litematic> <component_layout.json> <out.litematic> [--simulate]
+Usage: settle_schematic.py <in.litematic> <component_layout.json> <out.litematic>
 """
 import json
 import os
@@ -16,8 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from minecraft_v.placement_engine.propagate import propagate_states
-from minecraft_v.progress import ProgressBar, log, phase, status
+from minecraft_v.placement_engine.propagate import apply_states
+from minecraft_v.progress import log, phase, status
 
 with phase("[settle] starting"):
     from litemapy import Schematic
@@ -98,32 +94,16 @@ def simulated_states(region, layout_path: str) -> list[str]:
     return [line for line in lines if " ".join(line.split()[:3]) + " " not in cut]
 
 
-def settle(in_path: str, layout_path: str, out_path: str, simulate: bool = False) -> None:
+def settle(in_path: str, layout_path: str, out_path: str) -> None:
     with phase("[settle] loading schematic"):
         schematic = Schematic.load(in_path)
     region = schematic.regions["main"]
-    if simulate:
-        lines = simulated_states(region, layout_path)
-    else:
-        with phase("[settle] propagating"):
-            lines = propagate_states(region)
-    with ProgressBar("[settle] applying states", len(lines)) as bar:
-        for line in lines:
-            bar.update()
-            x, y, z, kind, *values = line.split()
-            pos = (int(x), int(y), int(z))
-            flag = lambda v: "true" if v == "1" else "false"
-            if kind == "powered":
-                props = {"powered": flag(values[0]), "locked": flag(values[1])}
-            elif kind == "power":
-                props = {"power": values[0]}
-            else:
-                props = {"lit": flag(values[0])}
-            region[pos] = region[pos].with_properties(**props)
+    lines = simulated_states(region, layout_path)
+    with phase("[settle] applying states"):
+        apply_states(region, lines)
     with phase("[settle] saving litematic"):
         schematic.save(out_path)
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--simulate"]
-    settle(*args[:3], simulate="--simulate" in sys.argv)
+    settle(*sys.argv[1:4])

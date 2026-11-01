@@ -15,8 +15,6 @@ shift
 args=()
 out_litematic_dir=""
 out_litematic="build/result.litematic"
-settle=true
-settle_args=()
 synth_only=false
 debug_prints=true
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
@@ -50,14 +48,6 @@ while [[ $# -gt 0 ]]; do
         --no-debug-prints)  # also passed on to minecraft_v
             debug_prints=false
             args+=("$1")
-            shift
-            ;;
-        --no-settle)
-            settle=false
-            shift
-            ;;
-        --simulate-settle)  # settle in MCHPRS's redstone code instead of propagating, needs mchprs_headless
-            settle_args+=(--simulate)
             shift
             ;;
         --out-litematic)
@@ -183,8 +173,3 @@ if [[ "$synth_only" == true ]]; then
 fi
 
 uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
-
-# Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it).
-if [[ "$settle" == true ]]; then
-    MCHPRS_HEADLESS="$headless" uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic" ${settle_args[@]+"${settle_args[@]}"}
-fi

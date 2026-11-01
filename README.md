@@ -43,6 +43,7 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
    - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).
    - `--allow-routing-failures True`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
    - `--no-macros`: Routes every gate on its own. By default repeated subcircuits are routed once and stamped, which on `examples/cpu` builds about 2.4x faster and takes about 3x the volume. Designs without enough repeats stay as gates.
+   - `--no-settle`: Saves blocks as built instead of in the states they settle to. Without settling, power-up pulses can overwrite flip-flops.
    - `--no-debug-prints`: Removes `$write`/`$display`. By default they stay when they're in a clocked block, inside macros too: blocks they read stand on or hang from lime concrete, and `<out>.server.json` is written next to the litematic for MCHPRS `/watch` and `mchprs_headless test --probes`. Non-constant `$sformatf` isn't supported by Yosys: use `$display` directly.
    - `--output-pin-targets-json <file.json>`: Path to a JSON file explicitly dictating output coordinates. Note: `synth.sh` will _automatically_ use `pin_targets.json` if it finds it in your specific project directory.
    - `--generate-clock`: Select the pin to be the clock pin and automatically generate a redstone clock for it. (Default: `clk`)
