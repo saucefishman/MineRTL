@@ -21,6 +21,7 @@ import networkx as nx
 from litemapy import BlockState, Region, Schematic
 from networkx.algorithms.isomorphism import DiGraphMatcher
 
+from minecraft_v.progress import log
 from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION, CardinalDirection, Component, ComponentList, ComponentType, Direction, Footprint,
     NetConnection, NetEndpoint, PinRef,
@@ -784,7 +785,7 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
                 macro, instance = build_array(name, tile, row, ports)
             macros[name] = macro
             fp = macro.footprint
-            print(f"[macro] {name}: {len(row.instances)} x {tile_name}, footprint {fp.width}x{fp.height}x{fp.depth}, "
+            log(f"[macro] {name}: {len(row.instances)} x {tile_name}, footprint {fp.width}x{fp.height}x{fp.depth}, "
                   f"{len(macro.pins)} pins")
             hidden_cells.update(instance.cell_map)
             instances.append(instance)

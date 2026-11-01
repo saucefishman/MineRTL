@@ -85,7 +85,35 @@ if [[ -f "$default_pin_targets_json" && "$has_output_pin_targets_flag" == false 
     set -- "$@" --output-pin-targets-json "$default_pin_targets_json"
 fi
 
-yosys -q -p "
+# Spinner with the current yosys pass, until killed.
+yosys_log="${artifacts_dir}/yosys.log"
+yosys_err="${artifacts_dir}/yosys.err"
+yosys_spinner() {
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) i=0 start=$SECONDS pass
+    while true; do
+        pass="$(grep -E '^[0-9]+\. Executing' "$yosys_log" 2>/dev/null | tail -n 1 | cut -c1-60 || true)"
+        printf '\r%s [yosys] %ds %s\033[K' "${frames[i++ % 10]}" "$((SECONDS - start))" "$pass" >&2
+        sleep 0.1
+    done
+}
+spinner_pid=""
+stop_spinner() {
+    if [[ -n "$spinner_pid" ]]; then
+        kill "$spinner_pid" 2>/dev/null || true
+        wait "$spinner_pid" 2>/dev/null || true
+        spinner_pid=""
+        printf '\r\033[K' >&2
+    fi
+}
+trap stop_spinner EXIT
+: > "$yosys_log"
+if [[ -t 2 ]]; then
+    yosys_spinner &
+    spinner_pid=$!
+fi
+
+yosys_status=0
+yosys -q -l "$yosys_log" -p "
 read_verilog -sv ${dir}/*.v
 hierarchy -check -top main
 flatten -noscopeinfo
@@ -105,7 +133,12 @@ techmap -map techmap/dffe_pn_decompose.v
 opt_clean
 write_json ${artifacts_dir}/netlist.json
 stat
-"
+" > "$yosys_err" 2>&1 || yosys_status=$?
+stop_spinner
+cat "$yosys_err"
+if [[ $yosys_status -ne 0 ]]; then
+    exit "$yosys_status"
+fi
 
 if [[ "$synth_only" == true ]]; then
     exit 0

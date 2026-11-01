@@ -14,6 +14,7 @@ from libcpp.vector cimport vector
 from cython.operator cimport dereference
 from cpython.set cimport PySet_Contains
 import time
+from minecraft_v.progress import pulse
 
 cdef extern from *:
     """
@@ -1032,6 +1033,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if has_deadline and pops & 255 == 0 and time.monotonic() > deadline:
             early_stop_reason = f"timeout ({time_limit}s)"
             break
+        if pops & 16383 == 0:
+            pulse(pops)
         e = heap_pop(heap)
         # f-cap per seed group; stop once past every group's.
         f_wire = e.f - e.g + e.g_wire

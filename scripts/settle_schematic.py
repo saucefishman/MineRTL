@@ -13,7 +13,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from litemapy import Schematic
+from minecraft_v.progress import ProgressBar, log, phase, status
+
+with phase("[settle] starting"):
+    from litemapy import Schematic
 
 def headless_binary() -> str:
     """MCHPRS's headless runner: $MCHPRS_HEADLESS, else under $MCHPRS_DIR (default ~/Projects/MCHPRS)."""
@@ -48,7 +51,8 @@ def component_blocks(comp: dict) -> tuple[tuple[int, int, int], callable]:
 
 
 def settle(in_path: str, layout_path: str, out_path: str) -> None:
-    schematic = Schematic.load(in_path)
+    with phase("[settle] loading schematic"):
+        schematic = Schematic.load(in_path)
     region = schematic.regions["main"]
     cuts = []
     for comp in json.load(open(layout_path)):
@@ -61,28 +65,35 @@ def settle(in_path: str, layout_path: str, out_path: str) -> None:
                 region[world(x, z)] = region[world(x, z)].with_properties(**props)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        # Without any generated clock region: it would never settle, and the clock counts as low.
-        Schematic(name="settle", regions={"main": region}).save(str(tmp / "in.litematic"))
-        (tmp / "cuts.txt").write_text("".join(f"{x} {y} {z}\n" for x, y, z in cuts))
-        result = subprocess.run([headless_binary(), "settle", tmp / "in.litematic", tmp / "cuts.txt", tmp / "states.txt"],
-                                check=True, capture_output=True, text=True)
-        print(result.stdout.strip())
+        with phase("[settle] simulating"):
+            status("saving input")
+            # Without any generated clock region: it would never settle, and the clock counts as low.
+            Schematic(name="settle", regions={"main": region}).save(str(tmp / "in.litematic"))
+            (tmp / "cuts.txt").write_text("".join(f"{x} {y} {z}\n" for x, y, z in cuts))
+            status("running mchprs_headless")
+            result = subprocess.run([headless_binary(), "settle", tmp / "in.litematic", tmp / "cuts.txt", tmp / "states.txt"],
+                                    check=True, capture_output=True, text=True)
+        log(result.stdout.strip())
         cut = set(cuts)
-        for line in (tmp / "states.txt").read_text().splitlines():
-            x, y, z, kind, *values = line.split()
-            pos = (int(x), int(y), int(z))
-            if pos in cut:  # settled with its input cut, so back in its clock-low state
-                region[pos] = region[pos].with_properties(powered="false", locked="false")
-                continue
-            flag = lambda v: "true" if v == "1" else "false"
-            if kind == "powered":
-                props = {"powered": flag(values[0]), "locked": flag(values[1])}
-            elif kind == "power":
-                props = {"power": values[0]}
-            else:
-                props = {"lit": flag(values[0])}
-            region[pos] = region[pos].with_properties(**props)
-    schematic.save(out_path)
+        lines = (tmp / "states.txt").read_text().splitlines()
+        with ProgressBar("[settle] applying states", len(lines)) as bar:
+            for line in lines:
+                bar.update()
+                x, y, z, kind, *values = line.split()
+                pos = (int(x), int(y), int(z))
+                if pos in cut:  # settled with its input cut, so back in its clock-low state
+                    region[pos] = region[pos].with_properties(powered="false", locked="false")
+                    continue
+                flag = lambda v: "true" if v == "1" else "false"
+                if kind == "powered":
+                    props = {"powered": flag(values[0]), "locked": flag(values[1])}
+                elif kind == "power":
+                    props = {"power": values[0]}
+                else:
+                    props = {"lit": flag(values[0])}
+                region[pos] = region[pos].with_properties(**props)
+    with phase("[settle] saving litematic"):
+        schematic.save(out_path)
 
 
 if __name__ == "__main__":
