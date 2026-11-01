@@ -10,6 +10,7 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
+from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION,
     Component,
@@ -209,6 +210,11 @@ def main():
                         help="--macros: layers kept above the tallest macro")
     parser.add_argument("--macro-bank-columns", type=int, default=4,
                         help="--macros: tiles per row in fixed two-row banks facing one lane plane; 0 = off")
+    parser.add_argument("--resume-dir", type=str, default=None,
+                        help="Testing: save the placement and routed paths here and reuse them on the next build. "
+                             "Use a new directory after changing the placer or netlist")
+    parser.add_argument("--resume-reroute", type=str, default="",
+                        help="--resume-dir: comma-separated nets to search again instead of reusing their paths")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")
     args = parser.parse_args()
@@ -290,6 +296,8 @@ def main():
                                         place_workers=args.place_workers,
                                         flat=args.flat,
                                         macros=macros,
+                                        resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))
+                                        if args.resume_dir else None,
                                         macro_channel=args.macro_channel,
                                         macro_east_room=args.macro_east_room,
                                         macro_headroom=args.macro_headroom,

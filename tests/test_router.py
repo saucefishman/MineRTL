@@ -1,7 +1,7 @@
 import pytest
 from litemapy import BlockState, Region
 
-from minecraft_v.placement_engine import _astar
+from minecraft_v.placement_engine import _astar, builder
 from minecraft_v.placement_engine.builder import (
     _GreedyRouter, _KeepoutMap, _RouteJob, _repair_faulty_nets, _terminal_halo,
 )
@@ -321,6 +321,28 @@ def test_sink_failing_again_while_first_is_final():
     router.route_job = route_job
     with pytest.raises(ValueError):
         router.route_job_retrying(job)
+
+
+def test_failed_sink_keeps_the_jobs_branches_and_rips_only_blockers(monkeypatch):
+    router, *_ = _router()
+    blocker = _job("blocker", (1, 1, 10), [(9, 1, 10)])
+    net = _job("n", (1, 1, 1), [(3, 1, 1), (5, 1, 1), (9, 1, 7)])
+    find = builder._find_wire_path
+    searches = []
+
+    def failing_once(ws, solid, owner, start, dst, net_id, *args, **kwargs):
+        searches.append((net_id, dst))
+        if (net_id, dst) == ("n", (9, 1, 7)) and searches.count(("n", (9, 1, 7))) == 1:
+            raise ValueError("No route")
+        return find(ws, solid, owner, start, dst, net_id, *args, **kwargs)
+
+    monkeypatch.setattr(builder, "_find_wire_path", failing_once)
+    assert router.run([blocker, net], "[test]") == []
+    assert searches.count(("n", (3, 1, 1))) == 1 and searches.count(("n", (5, 1, 1))) == 1  # not routed again
+    assert searches.count(("n", (9, 1, 7))) == 2
+    assert searches.count(("blocker", (9, 1, 10))) == 2  # ripped, then routed after n
+    assert not router.kept and not router.has_kept_wire
+    assert len(router.paths["n"][1]) == 3
 
 
 def test_repair_reroutes_a_net_verify_finds_fault_with():

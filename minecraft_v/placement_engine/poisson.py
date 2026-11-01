@@ -681,6 +681,13 @@ def _long_macros(gates: list[Component]) -> list[int]:
 _BANK_LOG_EVERY = 200
 _BANK_SPOT_TRIES = (20000, 200000, 2000000)
 _BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
+_BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
+                            # spill onto later gates' targets and each search walks through all that's piled there
+
+
+def _stretch_above(ys: np.ndarray, floor: float, factor: float) -> np.ndarray:
+    """Scale heights above floor by factor, to whole blocks; lower ones stay."""
+    return np.where(ys > floor, np.rint(floor + (ys - floor) * factor), ys)
 
 
 def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Component], banks: list[int], io: _IoPlacer,
@@ -708,6 +715,8 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     occ.add(len(gates), (0, 0, 0))
     for i in fixed:
         pos[i] = fixed[i]
+    if len(free) >= _DENSE_GATES:  # few boxes pack fine, and stay nearer their nets
+        pos[free, 1] = _stretch_above(pos[free, 1], y, _BANK_TARGET_STRETCH)
     started = time.monotonic()
     wide_searches = 0
     for placed, i in enumerate(sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2]))):

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from litemapy import BlockState, Region, Schematic
 
+from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
 from minecraft_v.progress import ProgressBar, log
@@ -721,6 +722,22 @@ class _RouteJob:
     first: tuple[Pos, ...] = ()    # sinks verify found a fault at, routed first in re-routes
 
 
+@dataclass
+class _KeptBranches:
+    """A job's laid branches and where it stopped, while the jobs around a failed sink get ripped."""
+    paths: list[list[Pos]]
+    reached_vias: list[Pos]
+    vias: list[Pos]
+    leads: list[Pos]
+    sinks: list[Pos]
+    next_target: int
+
+
+_LOG_EVERY_SECONDS = 30.0     # routing progress in the log
+_LOG_SLOW_SEARCH_SECONDS = 5.0
+_LOG_SLOW_JOB_SECONDS = 10.0
+
+
 class _GreedyRouter:
     """Greedy, journaled routing of _RouteJobs with the retry layers that make it robust:
 
@@ -731,7 +748,9 @@ class _GreedyRouter:
       again with that stretch blocked, keeping clear of the job's terminals.
     - per job: a sink can be walled in by the job's own earlier wire: route it again with that
       sink first.
-    - per run: a sink search that fails is usually walled in by jobs routed earlier. Rip the
+    - per sink: a sink search that fails is usually walled in by jobs routed earlier. Keep the
+      job's branches, rip the jobs around that sink, and search for it again. Once per sink.
+    - per run: if that didn't help, or there was nothing to rip, the whole job goes. Rip the
       jobs around the failed sink, route it again, then re-queue them. Up to _RIP_ROUNDS
       times per job, once per failed sink (a repeat failure at the same sink is final). A job
       out of those gets one wider ring ripped, whatever already happened to those jobs.
@@ -743,7 +762,9 @@ class _GreedyRouter:
     def __init__(self, region: Region, rec: Recorder, solid: JournaledSet, dust_owner: JournaledDict,
                  inverted_cells: JournaledSet, footprint_blocked: frozenset[Pos], max_bridge_y: int,
                  terminal_positions: frozenset[Pos],
-                 paths: dict[str, tuple[str, list[list[Pos]]]] | None = None):
+                 paths: dict[str, tuple[str, list[list[Pos]]]] | None = None,
+                 resume: ResumeStore | None = None):
+        self.resume = resume
         self.region = region
         self.rec = rec
         self.solid = solid
@@ -757,33 +778,49 @@ class _GreedyRouter:
         # job key -> (net id, ordered sink paths): what _place_repeaters_for_net walks.
         self.paths: dict[str, tuple[str, list[list[Pos]]]] = {} if paths is None else paths
         self.failed_goal: dict[str, Pos] = {}  # job key -> sink whose search/laying raised
+        self.kept: dict[str, _KeptBranches] = {}  # jobs to carry on from their failed sink
+        self.has_kept_wire: set[str] = set()  # those, and jobs whose kept wire a whole retry has to clear
+        self.sinks_cleared: dict[str, set[Pos]] = {}  # job key -> sinks that have had their one per-sink rip
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
         return [p for nid, ps in self.paths.values() if nid == net_id for p in ps]
 
     def rip(self, key: str) -> None:
+        self.kept.pop(key, None)
+        self.has_kept_wire.discard(key)
         rip_up(self.rec, key, self.indexed, self.solid, self.dust_owner)
         self.paths.pop(key, None)
 
     def route_job(self, job: _RouteJob, job_blocked: frozenset[Pos], first: tuple[Pos, ...] = ()) -> None:
         rec, ws = self.rec, self.ws
-        paths: list[list[Pos]] = []
+        kept = self.kept.pop(job.key, None)
+        paths: list[list[Pos]] = kept.paths if kept else []
         net_seeds = [pos for pos, owner in self.dust_owner.items()
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
-        reached_vias: list[Pos] = []
-        vias = [v for v in (self._open_via(v, job) for v in job.via) if v is not None]
-        leads = [v for v in (self._open_via(v, job) for v in job.lead) if v is not None]
-        # Nearest first; a lead comes before its pin, which is further on the same line.
-        sinks = sorted([*job.sinks, *leads],
-                       key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
-        sinks = [*first, *(p for p in sinks if p not in first)]
+        reached_vias: list[Pos] = kept.reached_vias if kept else []
+        if kept:
+            vias, leads, sinks = kept.vias, kept.leads, kept.sinks
+        else:
+            vias = [v for v in (self._open_via(v, job) for v in job.via) if v is not None]
+            leads = [v for v in (self._open_via(v, job) for v in job.lead) if v is not None]
+            # Nearest first; a lead comes before its pin, which is further on the same line.
+            sinks = sorted([*job.sinks, *leads],
+                           key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
+            sinks = [*first, *(p for p in sinks if p not in first)]
         for dst_index, dst in enumerate([*vias, *sinks]):
+            if kept and dst_index < kept.next_target:
+                continue
             pending = frozenset(job.sinks) & frozenset(sinks[max(0, dst_index - len(vias)):])
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
             start = job.src
             far_via = next((v for v in reached_vias if (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
+            trunk: frozenset[Pos] = frozenset()
             if far_via is not None:  # searching from the near side too would only flood the wall's face
-                start, tree_seeds = far_via, [far_via]
+                # Back along the wire to the via would branch off every cell of it, leaving no repeater slot.
+                start = far_via
+                near = [c for c in tree_seeds if (c[2] - far_via[2]) * (job.src[2] - far_via[2]) >= 0 and c != far_via]
+                trunk = frozenset(near)
+                tree_seeds = [far_via, *(c for c in tree_seeds if c not in trunk and c != far_via)]
             seed_depths = _signal_depths((self.net_paths(job.net_id) if net_seeds else []) + paths)
             self.failed_goal[job.key] = dst  # cleared when the sink is laid
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
@@ -791,22 +828,47 @@ class _GreedyRouter:
             attempts = 0
             while True:
                 mark = len(rec.journals[job.key])
+                search_started = time.monotonic()
+                saved = self.resume.path_for(job.key, dst) if self.resume else None
                 try:
-                    path = _find_wire_path(
-                        ws, self.solid, self.dust_owner,
-                        start, dst, job.net_id,
-                        job.bounds, self.max_bridge_y,
-                        tree_seeds=tree_seeds,
-                        protected=job.protected,
-                        footprint_blocked=self.footprint_blocked,
-                        inverted_cells=frozenset(self.inverted_cells),
-                        terminal_positions=self.terminal_positions,
-                        blocked=frozenset(blocked),
-                        seed_depths=seed_depths,
-                        pending_sinks=pending,
-                        **job.search_kwargs,
-                    )
-                    if start != job.src and path[0] != start:
+                    try:
+                        def search() -> list[Pos]:
+                            return _find_wire_path(
+                                ws, self.solid, self.dust_owner,
+                                start, dst, job.net_id,
+                                job.bounds, self.max_bridge_y,
+                                tree_seeds=tree_seeds,
+                                protected=job.protected,
+                                footprint_blocked=self.footprint_blocked,
+                                inverted_cells=frozenset(self.inverted_cells),
+                                terminal_positions=self.terminal_positions,
+                                blocked=frozenset(blocked | trunk),
+                                seed_depths=seed_depths,
+                                pending_sinks=pending,
+                                **job.search_kwargs,
+                            )
+
+                        path = saved
+                        if path is None:
+                            try:
+                                path = search()
+                            except ValueError:
+                                if start == job.src:
+                                    raise
+                                start, trunk = job.src, frozenset()  # past the via there's no way on: from the whole tree
+                                tree_seeds = net_seeds + [pos for p in paths for pos in p]
+                                path = search()
+                    finally:
+                        if time.monotonic() - search_started >= _LOG_SLOW_SEARCH_SECONDS:
+                            log(f"[wire] {job.key}: slow search, {time.monotonic() - search_started:.1f}s, "
+                                f"target {dst_index + 1}/{len(vias) + len(sinks)}")
+                    beside_start = saved is None and start != job.src and path[0] != start and path[0] not in tree_seeds
+                    if beside_start and path[0][0] == start[0] and path[0][2] == start[2]:
+                        # Began right above or below the via: no move links that, so search from the tree instead.
+                        start, trunk = job.src, frozenset()
+                        tree_seeds = net_seeds + [pos for p in paths for pos in p]
+                        continue
+                    if beside_start:
                         # A search may begin beside its start. Past a via, the repeater walk needs
                         # the link back to it, or it counts signal from nothing.
                         path = [start, *path]
@@ -815,8 +877,12 @@ class _GreedyRouter:
                                        inverted_cells=self.inverted_cells,
                                        goal=dst,
                                        terminal_positions=self.terminal_positions)
+                    if self.resume:
+                        self.resume.remember(job.key, dst, path)
                     break
                 except LayConflict as e:
+                    if self.resume:
+                        self.resume.forget(job.key, dst)
                     cell = next((c for c in e.cells if c not in ends and c not in blocked), None)
                     if cell is None or len(blocked) >= len(job_blocked) + _LAY_RETRIES:
                         if dst not in leads:
@@ -833,7 +899,13 @@ class _GreedyRouter:
                     else:
                         blocked.add(cell)
                 except ValueError:
+                    if self.resume:
+                        self.resume.forget(job.key, dst)
                     if dst not in leads:
+                        if dst in job.sinks:
+                            rollback(rec, job.key, mark)
+                            self.kept[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, dst_index)
+                            self.has_kept_wire.add(job.key)
                         raise
                     rollback(rec, job.key, mark)
                     path = None  # only a hint: the pin itself may still be reachable
@@ -859,6 +931,7 @@ class _GreedyRouter:
         if inverted:
             raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
         self.paths[job.key] = (job.net_id, paths)
+        self.has_kept_wire.discard(job.key)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
         """Whether a waypoint is free: air with air around it, so no other net's wire is near."""
@@ -896,14 +969,27 @@ class _GreedyRouter:
                 lay_attempts += 1
                 if lay_attempts > _NET_RETRIES or not stretch or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)")):
                     raise
-                rollback(self.rec, job.key, mark)
+                self._undo_job(job.key, mark)
                 job_blocked |= stretch
             except ValueError:
                 goal = self.failed_goal.get(job.key)
+                if job.key in self.kept:
+                    cleared = self.sinks_cleared.setdefault(job.key, set())
+                    if goal not in cleared:
+                        cleared.add(goal)  # run() rips around it and carries on from this sink
+                        raise
+                    del self.kept[job.key]
                 if goal is None or goal not in job.sinks or goal in first or len(first) >= len(job.first) + _SINK_RETRIES:
                     raise
-                rollback(self.rec, job.key, mark)
+                self._undo_job(job.key, mark)
                 first = (*first, goal)
+
+    def _undo_job(self, key: str, mark: int) -> None:
+        """Back to routing the job from nothing. Wire kept across a rip predates mark and goes too."""
+        if key in self.has_kept_wire:
+            self.rip(key)
+        else:
+            rollback(self.rec, key, mark)
 
     def blockers(self, goal: Pos, key: str, keys: set[str], r: int = _BLOCKER_RADIUS) -> list[str]:
         """Jobs (of keys) with wire or blocks within r of goal, nearest first."""
@@ -935,20 +1021,52 @@ class _GreedyRouter:
         requeued: set[str] = set()
         ripped: set[str] = set()
         escalated: set[str] = set()
+        started = last_log = time.monotonic()
+        attempts = 0
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
+                now = time.monotonic()
+                if now - last_log >= _LOG_EVERY_SECONDS:
+                    last_log = now
+                    if self.resume:
+                        self.resume.save_paths()
+                    log(f"{label} {bar.n}/{len(jobs)} started, {attempts} attempts, {len(ripped)} ripped, "
+                        f"{len(failures)} failed, {len(queue)} queued ({now - started:.0f}s)")
+                attempts += 1
                 i, job = queue.popleft()
                 bar.update(n=0 if job.key in ripped or job.key in requeued else 1, info=job.key)
                 if deadline is not None and time.monotonic() > deadline:
                     if fail_fast:
                         raise RuntimeError(f"Routing failed for net {job.key}: route deadline reached")
                     failures.append((job.key, ValueError("route deadline reached")))
+                    self.rip(job.key)  # may hold branches from before a rip
                     continue
                 self.failed_goal.pop(job.key, None)
+                job_started = time.monotonic()
                 try:
                     with self.rec.recording(job.key):
                         self.route_job_retrying(job)
+                    if time.monotonic() - job_started >= _LOG_SLOW_JOB_SECONDS:
+                        log(f"{label} {job.key}: {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                 except Exception as e:
+                    log(f"{label} {job.key}: failed after {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
+                    if job.key in self.kept:
+                        goal = self.failed_goal.get(job.key)
+                        victims = [v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX] \
+                            if rip_blockers else []
+                        requeued.add(job.key)
+                        if victims:
+                            log(f"{label} {job.key}: {e}; keeping its branches, ripping {', '.join(victims)} "
+                                f"and retrying that sink")
+                            for v in victims:
+                                self.rip(v)
+                                ripped.add(v)
+                            queue = deque(entry for entry in queue if entry[1].key not in victims)
+                            queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
+                        else:
+                            self.rip(job.key)
+                        queue.appendleft((i, job))
+                        continue
                     self.rip(job.key)
                     goal = self.failed_goal.get(job.key)
                     cleared = cleared_for.get(job.key, set())
@@ -987,6 +1105,10 @@ class _GreedyRouter:
                     log(f"[error] skipped net {job.key}: {e}")
                 if on_done is not None:
                     on_done(i, job)
+        if self.resume:
+            self.resume.save_paths()
+            log(f"{label} resume: {self.resume.reused} paths reused, {self.resume.searched} searched "
+                f"({time.monotonic() - started:.0f}s)")
         return failures
 
 
@@ -1087,6 +1209,7 @@ def _route_all_nets(
         fail_fast: bool = False,
         terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None,
         placed: list[_Placed] = (),
+        resume: ResumeStore | None = None,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]], dict[str, tuple[str, list[list[Pos]]]]]:
     """Greedy routing of every net (_GreedyRouter); returns (failures, inverted cells, paths).
 
@@ -1099,7 +1222,7 @@ def _route_all_nets(
              and (p.component.metadata.get("bank")
                   or p.component.footprint.width >= 2 * p.component.footprint.depth)]  # others are easy to go around
     router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
-                           frozenset(pin_terminal.values()))
+                           frozenset(pin_terminal.values()), resume=resume)
     jobs = [
         _RouteJob(
             key=net.net_id, net_id=net.net_id,
@@ -1790,6 +1913,7 @@ def build_litematic_from_component_list(
         macro_east_room: int = 20,
         macro_headroom: int = 32,
         io_lane_pins: bool = True,
+        resume: ResumeStore | None = None,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""
     if macros:  # an array is a wall across the layout: wires get past it overhead
@@ -1812,6 +1936,9 @@ def build_litematic_from_component_list(
             routing_gutter=6 if component_depth_spacing is None else component_depth_spacing, flat=flat,
             output_x_order=output_x_order,
         )
+    elif resume is not None and resume.load_placed(place_seed) is not None:
+        placed = resume.load_placed(place_seed)
+        print(f"[resume] placement from {resume.dir}")
     elif placer == "poisson":
         placed = _poisson_placement(
             comp.components, comp.nets,
@@ -1829,6 +1956,8 @@ def build_litematic_from_component_list(
             mirror_moves=place_mirror, seed=place_seed,
             clock_pin=clock_pin, workers=place_workers, flat=flat, output_x_order=output_x_order,
         )
+    if resume is not None:
+        resume.save_placed(place_seed, placed)
     if output_pin_targets:
         # Reserve z=0 for output extensions by shifting the existing build one layer forward.
         placed = [
@@ -1926,6 +2055,7 @@ def build_litematic_from_component_list(
             fail_fast=not allow_routing_failures,
             terminal_approach=terminal_approach,
             placed=placed,
+            resume=resume,
         )
     else:
         net_paths = {}  # negotiated mode keeps no ordered paths

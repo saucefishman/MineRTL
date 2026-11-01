@@ -162,6 +162,11 @@ def test_forces_push_apart():
     assert force[0, 0] < 0 < force[1, 0]
 
 
+def test_stretch_above_leaves_lower_heights():
+    out = poisson._stretch_above(np.array([0.0, 80.0, 90.0, 180.0]), 80.0, 1.4)
+    assert out.tolist() == [0.0, 80.0, 94.0, 220.0]
+
+
 def test_legalize_separates_stacked_boxes():
     sizes = np.tile([10.0, 4.0, 8.0], (20, 1))
     out = poisson._legalize(np.zeros((20, 3)) + np.arange(20)[:, None] * 0.01, sizes, flat=False)
