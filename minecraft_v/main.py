@@ -174,7 +174,7 @@ def main():
     parser.add_argument("--server-clock", type=int, nargs="?", const=0, default=None, metavar="HALF_PERIOD",
                         help="Save the space of the generated clock: give the clock pin a lever, and MCHPRS toggles "
                              "it every HALF_PERIOD redstone ticks (default: from the critical path, the generated "
-                             "clock's period). synth.sh turns this on when it finds mchprs_headless")
+                             "clock's period). synth.sh turns this on when its mchprs_headless has --run-clock")
     parser.add_argument("--no-server-clock", dest="server_clock", action="store_const", const=None,
                         help="Generate the clock even if synth.sh finds mchprs_headless")
     parser.add_argument("--route-passes", type=int, default=None,

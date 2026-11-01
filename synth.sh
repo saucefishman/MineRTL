@@ -102,7 +102,7 @@ if [[ -f "$default_pin_targets_json" && "$has_output_pin_targets_flag" == false 
     set -- "$@" --output-pin-targets-json "$default_pin_targets_json"
 fi
 
-# With MCHPRS around it can drive the clock, which saves the generated clock's space. An explicit clock flag wins.
+# An MCHPRS with clock support can drive the clock, which saves the generated clock's space. An explicit clock flag wins.
 headless="${MCHPRS_HEADLESS:-${MCHPRS_DIR:-$HOME/Projects/MCHPRS}/target/release/mchprs_headless}"
 has_clock_flag=false
 for arg in "$@"; do
@@ -113,8 +113,9 @@ for arg in "$@"; do
             ;;
     esac
 done
-if [[ -x "$headless" && "$has_clock_flag" == false ]]; then
+if [[ -x "$headless" && "$has_clock_flag" == false ]] && [[ "$("$headless" test --help 2>/dev/null || true)" == *--run-clock* ]]; then
     set -- "$@" --server-clock
+    echo "[clock] MCHPRS drives the clock. If it stays still: rebuild and restart the server, and stand on the plot (plots only tick with a player)." >&2
 fi
 
 # Spinner with the current yosys pass, until killed.

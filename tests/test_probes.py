@@ -89,6 +89,13 @@ def test_server_clock_lever(tmp_path):
     assert lever.id == "minecraft:lever" and lever["powered"] == "false"
 
 
+def fake_headless(tmp_path, help_text="--run-clock"):
+    headless = tmp_path / "headless"
+    headless.write_text(f"#!/bin/sh\necho '{help_text}'\n")
+    headless.chmod(0o755)
+    return headless
+
+
 def synth_auto(tmp_path, headless, design=QUIET):
     """synth.sh with no clock flag, seeing `headless` as MCHPRS's binary."""
     (tmp_path / "src").mkdir(exist_ok=True)
@@ -101,10 +108,7 @@ def synth_auto(tmp_path, headless, design=QUIET):
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_server_clock_automatic_with_mchprs(tmp_path):
-    headless = tmp_path / "headless"
-    headless.write_text("#!/bin/sh\n")
-    headless.chmod(0o755)
-    out = synth_auto(tmp_path, headless)
+    out = synth_auto(tmp_path, fake_headless(tmp_path))
     assert json.loads(out.with_suffix(".server.json").read_text())["clock"]["half_period_ticks"] > 0
     assert "clock" not in Schematic.load(str(out)).regions
 
@@ -118,8 +122,12 @@ def test_generated_clock_without_mchprs(tmp_path):
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_server_clock_without_clock_pin(tmp_path):
-    headless = tmp_path / "headless"
-    headless.write_text("#!/bin/sh\n")
-    headless.chmod(0o755)
-    out = synth_auto(tmp_path, headless, design="module main(input a, output o);\n    assign o = ~a;\nendmodule\n")
+    out = synth_auto(tmp_path, fake_headless(tmp_path), design="module main(input a, output o);\n    assign o = ~a;\nendmodule\n")
     assert out.exists() and not out.with_suffix(".server.json").exists()
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_generated_clock_with_old_mchprs(tmp_path):
+    out = synth_auto(tmp_path, fake_headless(tmp_path, "--probes"))
+    assert not out.with_suffix(".server.json").exists()
+    assert "clock" in Schematic.load(str(out)).regions
