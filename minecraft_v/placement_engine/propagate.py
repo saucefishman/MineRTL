@@ -16,6 +16,8 @@ from litemapy import BlockState, Region
 
 from minecraft_v.progress import log
 
+from .block_utils import palette_writer
+
 Pos = tuple[int, int, int]
 
 _NON_SOLID_MARKERS = ("air", "redstone_wire", "repeater", "comparator", "torch", "lever", "sign", "redstone_block", "glass")
@@ -355,6 +357,7 @@ def propagate_states(region: Region) -> list[str]:
 def apply_states(region: Region, lines: Iterable[str]) -> None:
     """Writes states in the form propagate_states and `mchprs_headless settle` give them."""
     flag = lambda v: "true" if v == "1" else "false"
+    write = palette_writer(region)
     for line in lines:
         x, y, z, kind, *values = line.split()
         pos = (int(x), int(y), int(z))
@@ -364,7 +367,7 @@ def apply_states(region: Region, lines: Iterable[str]) -> None:
             props = {"power": values[0]}
         else:
             props = {"lit": flag(values[0])}
-        region[pos] = region[pos].with_properties(**props)
+        write(pos, region[pos].with_properties(**props))
 
 
 def settle(region: Region) -> None:

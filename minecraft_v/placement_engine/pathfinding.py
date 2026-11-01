@@ -10,7 +10,7 @@ from typing import Callable
 import numpy as np
 from litemapy import BlockState, Region
 
-from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
+from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
 from .wire import LayConflict
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
     _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
@@ -89,13 +89,15 @@ def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, i
 def _signal_depths(
         paths: list[list[tuple[int, int, int]]],
         known: dict[tuple[int, int, int], int] | None = None,
+        in_place: bool = False,
 ) -> dict[tuple[int, int, int], int]:
     """Signal depth (_signal_step) at each cell of a net's ordered paths, for tree seeds.
 
     Each path starts at the source (depth 0) or at a cell of an earlier path or of known
     (depths of the net's wire routed before). A branch start is never a repeater slot.
+    in_place: add to known instead of copying it.
     """
-    depths: dict[tuple[int, int, int], int] = dict(known or {})
+    depths: dict[tuple[int, int, int], int] = known if in_place else dict(known or {})
     for path in paths:
         depth, cand = depths.get(path[0], 0), 0
         depths.setdefault(path[0], depth)
@@ -194,6 +196,7 @@ class IndexedWorkspace:
     def __init__(self, region: Region):
         self.region = region
         self._index = _BlockIndex(region)
+        self._write = palette_writer(region)
 
     def __getitem__(self, pos) -> BlockState:
         return self.region[pos]
@@ -201,7 +204,7 @@ class IndexedWorkspace:
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
         self._index.update(pos, self.region[pos], block)
-        self.region[pos] = block
+        self._write(pos, block)
 
     def __getattr__(self, name):
         return getattr(self.region, name)
