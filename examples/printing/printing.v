@@ -1,4 +1,4 @@
-// Prints "Hello!" and a lap count forever. Build with --debug-prints and run with
+// Prints "Hello!" and a lap count forever. Run with
 // mchprs_headless test --probes to see the output.
 module main (
     input clk,

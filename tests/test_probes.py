@@ -10,6 +10,7 @@ from litemapy import Schematic
 from minecraft_v.placement_engine.probes import PROBE_MARKER, parse_format
 
 ROOT = Path(__file__).resolve().parent.parent
+QUIET = "module main(input clk, input a, output reg o);\n    always @(posedge clk) o <= a;\nendmodule\n"
 DESIGN = """module main(input clk, input en, input [3:0] a, output reg o);
     wire [3:0] sum = a + 4'd3;
     always @(posedge clk) begin
@@ -32,9 +33,9 @@ def test_parse_format():
         parse_format("{0:> t}")
 
 
-def build(tmp_path, *flags):
+def build(tmp_path, *flags, design=DESIGN):
     (tmp_path / "src").mkdir(exist_ok=True)
-    (tmp_path / "src/main.v").write_text(DESIGN)
+    (tmp_path / "src/main.v").write_text(design)
     out = tmp_path / "out.litematic"
     subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--artifacts-dir", tmp_path / "art", "--no-settle",
                     "--out-litematic", out, *flags], cwd=ROOT, check=True)
@@ -42,16 +43,16 @@ def build(tmp_path, *flags):
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
-def test_prints_stripped_by_default(tmp_path):
+def test_prints_stripped_when_off(tmp_path):
     (tmp_path / "out.probes.json").write_text("{}")
-    out = build(tmp_path)
+    out = build(tmp_path, "--no-debug-prints")
     assert out.exists() and not out.with_suffix(".probes.json").exists()
     assert "$print" not in (tmp_path / "art/netlist.json").read_text()
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_probes_tap_marked_blocks(tmp_path):
-    out = build(tmp_path, "--debug-prints")
+    out = build(tmp_path)
     sidecar = json.loads(out.with_suffix(".probes.json").read_text())
     assert sidecar["version"] == 1
     write, display = sidecar["probes"]
@@ -67,3 +68,10 @@ def test_probes_tap_marked_blocks(tmp_path):
         for entry in (probe["trigger"], probe["enable"], *probe["data"]):
             if "pos" in entry:
                 assert "repeater" in region[tuple(entry["pos"])].id or "torch" in region[tuple(entry["pos"])].id
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_no_prints_no_sidecar(tmp_path):
+    (tmp_path / "out.probes.json").write_text("{}")
+    out = build(tmp_path, design=QUIET)
+    assert out.exists() and not out.with_suffix(".probes.json").exists()

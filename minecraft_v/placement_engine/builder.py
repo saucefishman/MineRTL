@@ -2181,7 +2181,7 @@ def build_litematic_from_component_list(
                         workspace[wx, wy, target[2]] = clock_region[x, y, 0]
             break
 
-    if probes is not None:
+    if probes:
         probe_path = out_path.with_suffix(".probes.json")
         positions = dict(pin_world_map)
         positions.update({(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,

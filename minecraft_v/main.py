@@ -210,9 +210,9 @@ def main():
     parser.add_argument("--debug", type=_true_or_false, nargs="?", const=True, default=False,
                         help="Log progress and slow searches, save litematic snapshots during routing to "
                              "<artifacts>/snapshots (slow), print A* counters")
-    parser.add_argument("--debug-prints", action="store_true",
-                        help="Keep $write/$display: mark the blocks they read and write <out>.probes.json for "
-                             "mchprs_headless --probes (default: synth.sh removes them; no --macros)")
+    parser.add_argument("--debug-prints", action=argparse.BooleanOptionalAction, default=None,
+                        help="Keep $write/$display: mark the blocks they read and write <out>.probes.json for MCHPRS "
+                             "/watch and mchprs_headless --probes (default: on, off with --macros)")
     parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=False,
                         help="Route repeated subcircuits once and stamp them; the rest routes around them (default: off; "
                              "needs --placer poisson, ignored with --flat)")
@@ -238,8 +238,8 @@ def main():
     if out_litematic.is_dir():
         raise SystemExit(f"--out-litematic path is a directory: '{args.out_litematic}'")
     out_litematic.parent.mkdir(parents=True, exist_ok=True)
-    if not args.debug_prints:  # MCHPRS loads a sibling sidecar: one from an older build would read wrong blocks
-        out_litematic.with_suffix(".probes.json").unlink(missing_ok=True)
+    # MCHPRS loads a sibling sidecar: one from an older build would read wrong blocks
+    out_litematic.with_suffix(".probes.json").unlink(missing_ok=True)
 
     with phase("[load] reading netlist"), open(args.netlist) as f:
         netlist = Netlist.model_validate_json(f.read())
@@ -251,7 +251,8 @@ def main():
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
-    probes = extract_probes(module) if args.debug_prints else None
+    debug_prints = not args.macros if args.debug_prints is None else args.debug_prints
+    probes = extract_probes(module) if debug_prints else None
     if probes and args.macros:
         raise SystemExit("--debug-prints can't tap inside macros: leave out --macros")
 
