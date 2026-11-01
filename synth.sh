@@ -113,11 +113,13 @@ fi
 
 uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
 
-# Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it)
+# Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it).
+# Optional: needs MCHPRS's mchprs_headless.
 if [[ "$settle" == true ]]; then
-    mchprs_dir="${MCHPRS_DIR:-$HOME/Projects/MCHPRS}"
-    if [[ -z "${MCHPRS_HEADLESS:-}" && ! -x "$mchprs_dir/target/release/mchprs_headless" ]]; then
-        (cd "$mchprs_dir" && cargo build --release --quiet -p mchprs_headless)
+    headless="${MCHPRS_HEADLESS:-${MCHPRS_DIR:-$HOME/Projects/MCHPRS}/target/release/mchprs_headless}"
+    if [[ -x "$headless" ]]; then
+        MCHPRS_HEADLESS="$headless" uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic"
+    else
+        echo "[settle] skipped: no mchprs_headless at $headless. The build works, but flip-flops can lose their values at power-up." >&2
     fi
-    uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic"
 fi

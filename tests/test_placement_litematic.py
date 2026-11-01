@@ -156,3 +156,17 @@ def test_dffe_template_fits_its_footprint_and_keeps_the_clock_dust():
     assert (x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1) == (info.footprint.width, info.footprint.height, info.footprint.depth)
     # Dust on the quartz is what carries the clock into the gate past the lock tap.
     assert template[x0 + 5, y0 + 1, z0 + 3].id == "minecraft:redstone_wire"
+
+
+def test_synth_works_without_mchprs_headless(tmp_path: Path):
+    import os
+    import subprocess
+
+    out = tmp_path / "result.litematic"
+    run = subprocess.run(
+        ["./synth.sh", "examples/counter", "--artifacts-dir", str(tmp_path / "artifacts"), "--route-passes", "1",
+         "--out-litematic", str(out)],
+        env={**os.environ, "MCHPRS_HEADLESS": str(tmp_path / "missing")}, capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+    assert "[settle] skipped" in run.stderr
+    assert out.exists()
