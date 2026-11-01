@@ -1754,6 +1754,9 @@ def _net_wire_ticks(
     return ticks
 
 
+_SETUP_TICKS = 1  # data settled at a flip-flop before its clock rises
+
+
 def _gate_delay(c: Component) -> int:
     return SCHEMATIC_MAP[c.type].propagation_delay_ticks if c.type in SCHEMATIC_MAP else 0
 
@@ -1824,7 +1827,7 @@ def _compute_critical_path(
         nid = queue.popleft()
         processed += 1
         if nid.endswith("\x00q"):
-            out_t = 0  # registered Q: always t=0
+            out_t = _gate_delay(comp_by_id[nid[:-2]])  # clock to Q, from the flip-flop's own clock edge
         elif nid in comp_by_id:
             out_t = arrival[nid] + _gate_delay(comp_by_id[nid])
         else:
@@ -1851,7 +1854,10 @@ def _compute_critical_path(
     # A print reads these at the clock edge, even if nothing else uses them.
     endpoints += [arrival[cid] + _gate_delay(comp_by_id[cid]) for cid in probed
                   if comp_by_id[cid].type not in _SEQUENTIAL and comp_by_id[cid].type != ComponentType.INPUT_PIN]
-    return max(endpoints)
+    # Launch and capture clocks differ by at most the clock wire: the slowest branch against none.
+    skew = max((net_ticks[n.net_id] for n in comp.nets
+                if any(s.pin_name == "C" and comp_by_id[s.component_id].type in _SEQUENTIAL for s in n.sinks)), default=0)
+    return max(endpoints) + skew + _SETUP_TICKS
 
 
 def _construct_clock_region(
@@ -1859,7 +1865,7 @@ def _construct_clock_region(
         critical_path_ticks: int,
         arm_wire_length: int = 4
 ) -> Region:
-    num_repeaters = ceil(critical_path_ticks // _REPEATER_MAX_DELAY / 2) * 2
+    num_repeaters = ceil(critical_path_ticks / _REPEATER_MAX_DELAY / 2) * 2  # period = 4 ticks per repeater
     region_depth = num_repeaters + arm_wire_length + 2  # repeaters split across sides, 2 blocks for each repeater for connecting
     region_width = 4
     region_height = 2
