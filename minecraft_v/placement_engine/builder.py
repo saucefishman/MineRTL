@@ -816,6 +816,10 @@ class _GreedyRouter:
                         if time.monotonic() - search_started >= _LOG_SLOW_SEARCH_SECONDS:
                             log(f"[wire] {job.key}: slow search, {time.monotonic() - search_started:.1f}s, "
                                 f"target {dst_index + 1}/{len(vias) + len(sinks)}")
+                    if start != job.src and path[0][0] == start[0] and path[0][2] == start[2] and path[0] != start:
+                        # Began right above or below the via: no move links that, so search from the tree instead.
+                        start, tree_seeds = job.src, net_seeds + [pos for p in paths for pos in p]
+                        continue
                     if start != job.src and path[0] != start:
                         # A search may begin beside its start. Past a via, the repeater walk needs
                         # the link back to it, or it counts signal from nothing.
