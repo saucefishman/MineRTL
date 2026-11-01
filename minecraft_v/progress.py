@@ -7,6 +7,7 @@ import time
 
 _REDRAW_INTERVAL = 0.05
 _active: ProgressBar | None = None
+_debug = False
 
 
 class ProgressBar:
@@ -53,6 +54,17 @@ class ProgressBar:
         if self.live:
             sys.stderr.write("\r\x1b[K")
             sys.stderr.flush()
+
+
+def set_debug(on: bool) -> None:
+    global _debug
+    _debug = on
+
+
+def debug(msg: str) -> None:
+    """log(), only with --debug."""
+    if _debug:
+        log(msg)
 
 
 def log(msg: str) -> None:

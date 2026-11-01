@@ -1,16 +1,19 @@
 import argparse
+import atexit
 import json
 import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 from minecraft_v.build_utils import save_build_artifacts
 from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
-from minecraft_v.placement_engine import build_litematic_from_component_list
+from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
 from minecraft_v.placement_engine.resume import ResumeStore
+from minecraft_v.progress import set_debug
 from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION,
     Component,
@@ -135,9 +138,22 @@ def module_to_component_list(module: Module) -> ComponentList:
     )
 
 
+_MACRO_FANOUT = 2  # nets above this fanout are shared between instances, not grouped into them
+_MACRO_MIN_CELLS = 8  # smallest repeated subcircuit worth a macro
+_MACRO_ROW_TILES = 0  # instances per array, sharing lanes; 0 = all instances of a pattern in one array
+_MACRO_BANK_COLUMNS = 4  # tiles per row in fixed two-row banks facing one lane plane
+_MACRO_CHANNEL = 24  # Z kept clear past a long macro's input face
+_MACRO_EAST_ROOM = 20  # X past a bank stack's pin end where gates may go; the rest go on top
+_MACRO_HEADROOM = 32  # layers kept above the tallest macro
 _BANK_GUTTER = 12
 _BANK_ROUTING_GUTTER = 12
 _BANK_Y_SPACING = 5
+
+
+def _true_or_false(value: str) -> bool:
+    if value.lower() not in ("true", "false"):
+        raise argparse.ArgumentTypeError(f"expected True or False, got '{value}'")
+    return value.lower() == "true"
 
 
 def main():
@@ -161,8 +177,6 @@ def main():
     parser.add_argument("--route-deadline", type=float, default=None,
                         help="Seconds of routing before giving up on remaining nets (writes a partial result; "
                              "use with --allow-routing-failures True)")
-    parser.add_argument("--snapshots", action="store_true",
-                        help="Save debug litematic snapshots during routing to <artifacts>/snapshots (slow)")
     parser.add_argument("--placer", choices=("legacy", "bary", "sa", "poisson"), default="poisson",
                         help="Gate placement: legacy list order, barycenter row ordering, barycenter + "
                              "simulated annealing, or electrostatic 3D placement without rows")
@@ -190,26 +204,15 @@ def main():
                         help="extra Y between levels beyond the tallest component (default 3)")
     parser.add_argument("--no-pin-extensions", action="store_true",
                         help="ignore --output-pin-targets-json (no output pin extensions)")
-    parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=True,
-                        help="Route repeated subcircuits once and stamp them; the rest routes around them (default: on; "
+    parser.add_argument("--debug", type=_true_or_false, nargs="?", const=True, default=False,
+                        help="Log progress and slow searches, save litematic snapshots during routing to "
+                             "<artifacts>/snapshots (slow), print A* counters")
+    parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=False,
+                        help="Route repeated subcircuits once and stamp them; the rest routes around them (default: off; "
                              "needs --placer poisson, ignored with --flat)")
-    parser.add_argument("--macro-fanout", type=int, default=2,
-                        help="--macros: nets above this fanout are shared between instances, not grouped into them")
-    parser.add_argument("--macro-min-cells", type=int, default=8,
-                        help="--macros: smallest repeated subcircuit worth a macro")
     parser.add_argument("--macro-min-instances", type=int, default=None,
                         help="--macros: use macros only if some pattern repeats this often (default: enough for a "
                              "bank; designs with only small repeats route better as gates)")
-    parser.add_argument("--macro-row-tiles", type=int, default=0,
-                        help="--macros: instances per array, sharing lanes; 0 = all instances of a pattern in one array")
-    parser.add_argument("--macro-channel", type=int, default=24,
-                        help="--macros: Z kept clear past a long macro's input face")
-    parser.add_argument("--macro-east-room", type=int, default=20,
-                        help="--macro-bank-columns: X past a bank stack's pin end where gates may go; the rest go on top")
-    parser.add_argument("--macro-headroom", type=int, default=32,
-                        help="--macros: layers kept above the tallest macro")
-    parser.add_argument("--macro-bank-columns", type=int, default=4,
-                        help="--macros: tiles per row in fixed two-row banks facing one lane plane; 0 = off")
     parser.add_argument("--resume-dir", type=str, default=None,
                         help="Testing: save the placement and routed paths here and reuse them on the next build. "
                              "Use a new directory after changing the placer or netlist")
@@ -218,6 +221,10 @@ def main():
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
                         help="--macros: directory keeping routed macros between builds")
     args = parser.parse_args()
+
+    set_debug(args.debug)
+    if args.debug and pathfinding._astar is not None:
+        atexit.register(lambda: print(f"[astar-stats] {pathfinding._astar.stats()}", file=sys.stderr))
 
     out_litematic = Path(args.out_litematic)
     if out_litematic.suffix != ".litematic":
@@ -257,17 +264,17 @@ def main():
     if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
-                               cache_dir=Path(args.macro_cache) / f"row{args.macro_row_tiles}",
-                               io_lane_pins=args.macro_row_tiles != 1)
+                               cache_dir=Path(args.macro_cache) / f"row{_MACRO_ROW_TILES}",
+                               io_lane_pins=_MACRO_ROW_TILES != 1)
 
         def report(cls, macro):
             print(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")
 
-        component_list, macros, instances = extract_macros(component_list, build, args.macro_fanout, args.macro_min_cells,
-                                                           args.macro_row_tiles,
-                                                           args.macro_bank_columns,
+        component_list, macros, instances = extract_macros(component_list, build, _MACRO_FANOUT, _MACRO_MIN_CELLS,
+                                                           _MACRO_ROW_TILES,
+                                                           _MACRO_BANK_COLUMNS,
                                                            (args.macro_min_instances if args.macro_min_instances is not None
-                                                            else max(2, 2 * args.macro_bank_columns)),
+                                                            else max(2, 2 * _MACRO_BANK_COLUMNS)),
                                                            on_class=report)
         print(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")
@@ -286,7 +293,7 @@ def main():
                                         **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}),
                                         route_workers=args.route_workers,
                                         route_deadline=args.route_deadline,
-                                        snapshots=args.snapshots,
+                                        snapshots=args.debug,
                                         placer=args.placer,
                                         place_y_moves=args.place_y_moves,
                                         place_z_moves=args.place_z_moves,
@@ -298,9 +305,9 @@ def main():
                                         macros=macros,
                                         resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))
                                         if args.resume_dir else None,
-                                        macro_channel=args.macro_channel,
-                                        macro_east_room=args.macro_east_room,
-                                        macro_headroom=args.macro_headroom,
+                                        macro_channel=_MACRO_CHANNEL,
+                                        macro_east_room=_MACRO_EAST_ROOM,
+                                        macro_headroom=_MACRO_HEADROOM,
                                         **{k: v for k, v in (
                                             ("gutter", args.gutter),
                                             ("component_width_spacing", args.io_margin),

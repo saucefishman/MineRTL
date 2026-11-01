@@ -33,7 +33,7 @@ for s in 1 2 3 4 5 6 7 8; do uv run python scripts/bench_examples.py --out build
 uv run python scripts/bench_examples.py --out build/legacy
 ```
 
-Each build writes `build/<out>/<example>/log.txt` with lines `[error] skipped net ...`, `[verify] open|short ...`, `[verify] unsupported ...`. Add `--snapshots` to the extra args for per-10-net litematic snapshots. They're slow; use them only on a single repro.
+Each build writes `build/<out>/<example>/log.txt` with lines `[error] skipped net ...`, `[verify] open|short ...`, `[verify] unsupported ...`. Add `--debug True` to the extra args for per-10-net litematic snapshots. They're slow; use them only on a single repro.
 
 ## Headline findings
 
@@ -60,7 +60,7 @@ Counts are over 152 SA builds. Repro commands use the bench line above with the 
   1. A **tree-seed join** lands on a cell that doesn't propagate signal into the branch. Candidates: a repeater's side or output face, a tower or slope-2 intermediate, a glass ramp cell, an inverted (powered −4) cell, or dust whose connection shape changes when the branch is added. `_find_wire_path` admits every own-net path cell as a seed (`tree_seeds` filter only drops `solid` and out-of-bounds).
   2. `_place_repeaters_for_net` puts a repeater on a trunk cell that a **later-joined branch** needs to read from the side or upstream. `branch_points` is computed from `ordered_paths`, but a branch can join at a cell adjacent to the repeater, not on it.
   3. A later path's support block or dust changes an earlier slope connection, e.g. a solid block placed diagonally above a slope breaks the dust step.
-- Debug approach: in `verify.verify_signals`, dump the reached set for the open net and find the frontier, the last reached cell next to unreached own-net cells. Look at that block in a `--snapshots` litematic.
+- Debug approach: in `verify.verify_signals`, dump the reached set for the open net and find the frontier, the last reached cell next to unreached own-net cells. Look at that block in a `--debug True` litematic.
 - Better long-term: verify each net right after laying it (signal reach from source to that net's sinks) and treat an open as a routing failure. That makes it rip-up-and-retry instead of a silent bad build.
 
 ### 2. No viable repeater position — 17 occurrences (most common core-net failure)

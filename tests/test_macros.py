@@ -35,7 +35,7 @@ def _build(tmp: Path, project: Path, *flags: str) -> tuple[str, list[dict], Path
     env = {**os.environ, "PYTHONHASHSEED": "0"}
     run = subprocess.run(
         ["./synth.sh", str(project), "--artifacts-dir", str(tmp / "artifacts"), "--route-passes", "1",
-         "--allow-routing-failures", "True", "--out-litematic", str(out), "--macro-cache", str(tmp / "cache"), *flags],
+         "--allow-routing-failures", "True", "--out-litematic", str(out), "--macros", "--macro-cache", str(tmp / "cache"), *flags],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
     log = run.stdout + run.stderr
     assert run.returncode == 0, log[-2000:]
@@ -143,3 +143,13 @@ def test_wall_via_sits_by_the_far_edge(src_z, sink_z, near_far_edge):
     (_, y, z), = _wall_vias(net, pins, [wall])
     assert y > 10
     assert near_far_edge(z)
+
+
+def test_macros_are_off_by_default(tmp_path):
+    out = tmp_path / "result.litematic"
+    run = subprocess.run(
+        ["./synth.sh", str(_memory(tmp_path, 8, 16)), "--artifacts-dir", str(tmp_path / "artifacts"), "--route-passes", "1",
+         "--allow-routing-failures", "True", "--out-litematic", str(out)],
+        cwd=ROOT, env={**os.environ, "PYTHONHASHSEED": "0"}, capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+    assert "[macro]" not in run.stdout

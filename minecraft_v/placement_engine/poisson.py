@@ -24,6 +24,7 @@ from scipy.sparse.linalg import cg
 
 from minecraft_v.placement_engine.ir import Component, ComponentType, NetConnection
 from minecraft_v.placement_engine.layout import _BIT_INDEX_RE, _Placed, _assign_io_x_positions, _io_base_name
+from minecraft_v.progress import debug
 from minecraft_v.placement_engine.template import _mirror_component_x, _rotate_component_180
 
 _WEIGHTS = np.array([1.0, 2.0, 1.0])  # wirelength per block in X, Y, Z: Y needs slopes and towers
@@ -721,8 +722,8 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     wide_searches = 0
     for placed, i in enumerate(sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2]))):
         if placed % _BANK_LOG_EVERY == 0:
-            print(f"[place] around banks: {placed}/{len(free)} placed, {wide_searches} needed a wider search "
-                  f"({time.monotonic() - started:.1f}s)", flush=True)
+            debug(f"[place] around banks: {placed}/{len(free)} placed, {wide_searches} needed a wider search "
+                  f"({time.monotonic() - started:.1f}s)")
         target = tuple(int(v) for v in pos[i])
         # A macro has pins on its faces: not up against the output row.
         low_z = channel if gates[i].type == ComponentType.CUSTOM else 0
@@ -735,8 +736,8 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
                 break
             if attempt == 0:
                 wide_searches += 1
-            print(f"[place] around banks: no spot for {gates[i].id} near {wanted} in {tries} tries "
-                  f"({time.monotonic() - started:.1f}s)", flush=True)
+            debug(f"[place] around banks: no spot for {gates[i].id} near {wanted} in {tries} tries "
+                  f"({time.monotonic() - started:.1f}s)")
         if spot is None:
             raise ValueError(f"no room for {gates[i].id} around the banks")
         occ.add(i, spot)

@@ -16,7 +16,7 @@ from litemapy import BlockState, Region, Schematic
 from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
-from minecraft_v.progress import ProgressBar, log
+from minecraft_v.progress import ProgressBar, debug, log
 from minecraft_v.placement_engine.ir import (
     Component,
     ComponentList,
@@ -860,7 +860,7 @@ class _GreedyRouter:
                                 path = search()
                     finally:
                         if time.monotonic() - search_started >= _LOG_SLOW_SEARCH_SECONDS:
-                            log(f"[wire] {job.key}: slow search, {time.monotonic() - search_started:.1f}s, "
+                            debug(f"[wire] {job.key}: slow search, {time.monotonic() - search_started:.1f}s, "
                                 f"target {dst_index + 1}/{len(vias) + len(sinks)}")
                     beside_start = saved is None and start != job.src and path[0] != start and path[0] not in tree_seeds
                     if beside_start and path[0][0] == start[0] and path[0][2] == start[2]:
@@ -1030,7 +1030,7 @@ class _GreedyRouter:
                     last_log = now
                     if self.resume:
                         self.resume.save_paths()
-                    log(f"{label} {bar.n}/{len(jobs)} started, {attempts} attempts, {len(ripped)} ripped, "
+                    debug(f"{label} {bar.n}/{len(jobs)} started, {attempts} attempts, {len(ripped)} ripped, "
                         f"{len(failures)} failed, {len(queue)} queued ({now - started:.0f}s)")
                 attempts += 1
                 i, job = queue.popleft()
@@ -1047,9 +1047,9 @@ class _GreedyRouter:
                     with self.rec.recording(job.key):
                         self.route_job_retrying(job)
                     if time.monotonic() - job_started >= _LOG_SLOW_JOB_SECONDS:
-                        log(f"{label} {job.key}: {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
+                        debug(f"{label} {job.key}: {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                 except Exception as e:
-                    log(f"{label} {job.key}: failed after {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
+                    debug(f"{label} {job.key}: failed after {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                     if job.key in self.kept:
                         goal = self.failed_goal.get(job.key)
                         victims = [v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX] \
