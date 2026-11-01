@@ -771,8 +771,8 @@ class _GreedyRouter:
     - per sink: a path the search accepted can still fail to lay when it crosses its own
       earlier cells/supports outside the search's local snapshot (LayConflict). Undo that
       sink's partial path and search again without the conflicting cell.
-    - per job: no repeater slot on a stretch (all slopes/turns): undo the job and route it
-      again with that stretch blocked, keeping clear of the job's terminals.
+    - per job: no repeater slot on a stretch (all slopes/turns): rip the branch at its end and
+      route those sinks again with the stretch blocked, keeping clear of the job's terminals.
     - per job: a sink can be walled in by the job's own earlier wire: route it again with that
       sink first.
     - per sink: a sink search that fails is usually walled in by jobs routed earlier. Keep the
@@ -1052,6 +1052,8 @@ class _GreedyRouter:
             path_cells.append(self._cells_since(job.key, mark))
             if forked_paths:
                 laid_since_fork |= path_cells[-1]
+        # For route_job_retrying to keep, if a check below fails.
+        self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
@@ -1070,7 +1072,6 @@ class _GreedyRouter:
         if touching:
             raise LayConflict(f"Net '{job.net_id}': wire powers a gate's block at {touching[:4]} (gate contact)", tuple(touching))
         self.paths[job.key] = (job.net_id, paths)
-        self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         self.has_kept_wire.discard(job.key)
 
     def _search_sinks(self, job: _RouteJob, targets: list[Pos], sinks: list[Pos], first_index: int,
@@ -1159,9 +1160,16 @@ class _GreedyRouter:
             except LayConflict as e:
                 stretch = frozenset(e.cells) - near_terminal - job_blocked
                 lay_attempts += 1
-                if lay_attempts > _NET_RETRIES or not stretch or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)")):
+                # Kept wire can hold the fault, with nothing new to block: starting over clears it.
+                if (lay_attempts > _NET_RETRIES or (not stretch and job.key not in self.has_kept_wire)
+                        or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)"))):
                     raise
-                self._undo_job(job.key, mark)
+                if stretch and "cannot place repeater" in str(e):
+                    # Every sink is laid by now: only the branch at the fault has to go. The stretch can
+                    # run back up the wire feeding that branch, whose last cells are where it ran out.
+                    self.rip_branch(job, list(e.cells[-1:]))
+                else:  # a contact can involve any two branches
+                    self._undo_job(job.key, mark)
                 job_blocked |= stretch
             except ValueError:
                 goal = self.failed_goal.get(job.key)
@@ -1556,7 +1564,7 @@ def _route_all_nets(
     failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot,
                           workers=route_workers, sink_workers=sink_workers)
     wire = sum(len(path) for _, net_paths in router.paths.values() for path in net_paths)
-    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed, {time.monotonic() - started:.1f}s, {wire} path cells)")
+    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed) {time.monotonic() - started:.1f}s, {wire} path cells")
     if not macros:
         failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
                                         frozenset(_component_interior(placed)), deadline)
