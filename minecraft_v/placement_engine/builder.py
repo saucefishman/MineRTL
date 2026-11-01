@@ -934,9 +934,12 @@ class _GreedyRouter:
         self.has_kept_wire.discard(job.key)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
-        """Whether a waypoint is free: air with air around it, so no other net's wire is near."""
+        """Whether a waypoint is free: air with air around it, so no other net's wire is near, and outside other
+        nets' terminal keepouts, which a search can never enter."""
         x, y, z = via
         if not (0 <= x < self.region.width and 0 <= y < self.region.height - 2 and 0 <= z < self.region.length):
+            return False
+        if via in job.protected:
             return False
         cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
         return all(c not in self.footprint_blocked and self.dust_owner.get(c) in (None, job.net_id)

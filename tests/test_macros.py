@@ -5,10 +5,12 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from litemapy import Region
 
-from minecraft_v.placement_engine.builder import _wall_vias
+from minecraft_v.placement_engine.builder import _GreedyRouter, _wall_vias
 from minecraft_v.placement_engine.ir import Component, ComponentType, Footprint, NetConnection, NetEndpoint
 from minecraft_v.placement_engine.layout import _Placed
 from minecraft_v.placement_engine.macro import _lane_plane, _row_gap, _row_shift
@@ -143,6 +145,14 @@ def test_wall_via_sits_by_the_far_edge(src_z, sink_z, near_far_edge):
     (_, y, z), = _wall_vias(net, pins, [wall])
     assert y > 10
     assert near_far_edge(z)
+
+
+def test_waypoint_stays_out_of_other_nets_keepouts():
+    """A search can never enter such a cell, so a waypoint there would fail the whole net."""
+    router = SimpleNamespace(region=Region(0, 0, 0, 40, 40, 40), footprint_blocked=set(), dust_owner={})
+    router._via_open = lambda via, job: _GreedyRouter._via_open(router, via, job)
+    job = SimpleNamespace(net_id="n", protected={(20, 20, 20)})
+    assert _GreedyRouter._open_via(router, (20, 20, 20), job) not in (None, (20, 20, 20))
 
 
 def test_macros_are_off_by_default(tmp_path):
