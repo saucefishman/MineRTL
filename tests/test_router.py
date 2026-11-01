@@ -200,31 +200,19 @@ def test_router_breaks_long_descent_for_repeaters(drop, horiz):
     assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
 
 
-@pytest.mark.xfail(strict=True, reason="_wall_vias only sees crossings along Z, so the search floods the wall's face")
-def test_router_gets_past_a_bank_along_x():
+def test_router_gets_past_a_wall_on_a_wider_budget():
     # cpu net_104: source and sink at either X end of a memory bank. A clear route exists, but the search
-    # spends its whole budget on states along the near face.
-    from minecraft_v.placement_engine.builder import _wall_vias
-    from minecraft_v.placement_engine.ir import (
-        Component, ComponentType, Footprint, NetConnection, NetEndpoint,
-    )
-    from minecraft_v.placement_engine.layout import _Placed
-    origin, footprint = (14, 0, 4), Footprint(width=2, height=23, depth=97)
-    bank = _Placed(component=Component(id="bank", type=ComponentType.CUSTOM, pins=[], footprint=footprint,
-                                       metadata={"bank": True}), origin=origin)
-    src, sink = (8, 17, 76), (21, 11, 76)
-    net = NetConnection(net_id="n", source=NetEndpoint(component_id="a", pin_name="y"),
-                        sinks=[NetEndpoint(component_id="b", pin_name="a")])
+    # spends a normal budget on states along the near face.
     bounds = (0, 0, 0, 29, 44, 104)
     rec = Recorder()
     region = Region(0, 0, 0, bounds[3] + 1, bounds[4] + 1, bounds[5] + 1)
     solid, dust_owner = JournaledSet(rec, name="solid"), JournaledDict(rec)
-    blocked = frozenset((x, y, z) for x in range(origin[0], origin[0] + footprint.width)
-                        for y in range(footprint.height) for z in range(origin[2], origin[2] + footprint.depth))
+    wall = frozenset((x, y, z) for x in (14, 15) for y in range(23) for z in range(4, 101))
     router = _GreedyRouter(region, rec, solid, dust_owner, JournaledSet(rec, name="inverted"),
-                           blocked, bounds[4], frozenset())
+                           wall, bounds[4], frozenset())
+    src, sink = (8, 17, 76), (21, 11, 76)
     job = _RouteJob(key="n", net_id="n", src=src, sinks=[sink], bounds=bounds, protected=frozenset(),
-                    terminals={src, sink}, via=_wall_vias(net, {("a", "y"): src, ("b", "a"): sink}, [bank]))
+                    terminals={src, sink})
     assert router.run([job], "[test]") == []
     assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
 

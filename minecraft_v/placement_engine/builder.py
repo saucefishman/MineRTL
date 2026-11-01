@@ -28,7 +28,7 @@ from minecraft_v.placement_engine.ir import (
 from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
-    _ROUTE_STAGNATION_FIRST, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
+    _ROUTE_STAGNATION_FIRST, _ROUTE_RETRY_BUDGET, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
     _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT, _ROUTE_BATCH_PER_WORKER,
 )
 from .layout import (
@@ -797,6 +797,7 @@ class _GreedyRouter:
         self.has_kept_wire: set[str] = set()  # those, and jobs whose kept wire a whole retry has to clear
         self.sinks_cleared: dict[str, set[Pos]] = {}  # job key -> sinks that have had their one per-sink rip
         self.laid: dict[str, _KeptBranches] = {}  # finished jobs' branches, for rip_branch
+        self.wide_budget: set[str] = set()  # job keys on their last try, searching with _ROUTE_RETRY_BUDGET
         self.rips_blockers = True  # whether a failed sink can get room by ripping (run's rip_blockers)
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
@@ -925,6 +926,7 @@ class _GreedyRouter:
                                 seed_depths=seed_depths,
                                 pending_sinks=pending,
                                 stagnation=stagnation,
+                                budget=_ROUTE_RETRY_BUDGET if stagnation < 0 and job.key in self.wide_budget else 1,
                                 **job.search_kwargs,
                             )
 
@@ -1193,10 +1195,13 @@ class _GreedyRouter:
                     where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
                     wider = [] if where is None or job.key in escalated or not rip_blockers else \
                         self.blockers(where, job.key, keys, _ESCALATE_RADIUS)[:_ESCALATE_MAX]
-                    if wider:
+                    if wider or (where is not None and job.key not in escalated and rip_blockers
+                                 and not isinstance(e, LayConflict)):
                         escalated.add(job.key)
                         requeued.add(job.key)
-                        log(f"{label} {job.key}: {e}; ripping a branch of {len(wider)} nets around {where} and retrying")
+                        self.wide_budget.add(job.key)
+                        log(f"{label} {job.key}: {e}; ripping a branch of {len(wider)} nets around {where} "
+                            f"and retrying with a wider budget")
                         for v in wider:
                             self.rip_branch(by_key[v], [where])
                             ripped.add(v)
