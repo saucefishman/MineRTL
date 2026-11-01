@@ -155,11 +155,11 @@ def test_waypoint_stays_out_of_other_nets_keepouts():
     assert _GreedyRouter._open_via(router, (20, 20, 20), job) not in (None, (20, 20, 20))
 
 
-def test_macros_are_off_by_default(tmp_path):
+def test_macros_are_on_by_default(tmp_path):
     out = tmp_path / "result.litematic"
     run = subprocess.run(
         ["./synth.sh", str(_memory(tmp_path, 8, 16)), "--artifacts-dir", str(tmp_path / "artifacts"), "--route-passes", "1",
          "--allow-routing-failures", "True", "--out-litematic", str(out)],
         cwd=ROOT, env={**os.environ, "PYTHONHASHSEED": "0"}, capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
-    assert "[macro]" not in run.stdout
+    assert "[macro]" in run.stdout

@@ -219,10 +219,11 @@ def main():
                              "<artifacts>/snapshots (slow), print A* counters")
     parser.add_argument("--debug-prints", action=argparse.BooleanOptionalAction, default=None,
                         help="Keep $write/$display: mark the blocks they read and write <out>.server.json for MCHPRS "
-                             "/watch and mchprs_headless --probes (default: on, off with --macros)")
-    parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=False,
-                        help="Route repeated subcircuits once and stamp them; the rest routes around them (default: off; "
-                             "needs --placer poisson, ignored with --flat)")
+                             "/watch and mchprs_headless --probes (default: off; prints can't tap inside macros, so this turns "
+                             "macros off)")
+    parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=None,
+                        help="Route repeated subcircuits once and stamp them; the rest routes around them (default: on, "
+                             "off with --debug-prints; needs --placer poisson, ignored with --flat)")
     parser.add_argument("--macro-min-instances", type=int, default=None,
                         help="--macros: use macros only if some pattern repeats this often (default: enough for a "
                              "bank; designs with only small repeats route better as gates)")
@@ -259,6 +260,8 @@ def main():
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
+    if args.macros is None:
+        args.macros = not args.debug_prints
     debug_prints = not args.macros if args.debug_prints is None else args.debug_prints
     probes = extract_probes(module) if debug_prints else None
     if probes and args.macros:

@@ -53,7 +53,7 @@ def test_prints_stripped_when_off(tmp_path):
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_probes_tap_marked_blocks(tmp_path):
-    out = build(tmp_path)
+    out = build(tmp_path, "--debug-prints")
     sidecar = json.loads(out.with_suffix(".server.json").read_text())
     assert sidecar["version"] == 2
     write, display = sidecar["probes"]
