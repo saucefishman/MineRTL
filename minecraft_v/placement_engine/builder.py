@@ -26,7 +26,7 @@ from minecraft_v.placement_engine.ir import (
 from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
-    _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
+    _ROUTE_STAGNATION_FIRST, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
     _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT, _ROUTE_BATCH_PER_WORKER,
 )
 from .layout import (
@@ -752,6 +752,8 @@ class _GreedyRouter:
       sink first.
     - per sink: a sink search that fails is usually walled in by jobs routed earlier. Keep the
       job's branches, rip the jobs around that sink, and search for it again. Once per sink.
+      Searches start on a tight limit (_ROUTE_STAGNATION_FIRST) so that this comes early; a
+      sink past its rip, or with no rip to come, gets the full limit if the tight one fails.
     - per run: if that didn't help, or there was nothing to rip, the whole job goes. Rip the
       jobs around the failed sink, route it again, then re-queue them. Up to _RIP_ROUNDS
       times per job, once per failed sink (a repeat failure at the same sink is final). A job
@@ -787,6 +789,7 @@ class _GreedyRouter:
         self.has_kept_wire: set[str] = set()  # those, and jobs whose kept wire a whole retry has to clear
         self.sinks_cleared: dict[str, set[Pos]] = {}  # job key -> sinks that have had their one per-sink rip
         self.laid: dict[str, _KeptBranches] = {}  # finished jobs' branches, for rip_branch
+        self.rips_blockers = True  # whether a failed sink can get room by ripping (run's rip_blockers)
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
         return [p for nid, ps in self.paths.values() if nid == net_id for p in ps]
@@ -900,7 +903,7 @@ class _GreedyRouter:
                 saved = self.resume.path_for(job.key, dst) if self.resume else None
                 try:
                     try:
-                        def search() -> list[Pos]:
+                        def search(stagnation: int = -1) -> list[Pos]:
                             return _find_wire_path(
                                 ws, self.solid, self.dust_owner,
                                 start, dst, job.net_id,
@@ -913,19 +916,32 @@ class _GreedyRouter:
                                 blocked=frozenset(blocked | trunk),
                                 seed_depths=seed_depths,
                                 pending_sinks=pending,
+                                stagnation=stagnation,
                                 **job.search_kwargs,
                             )
+
+                        def search_tight_first() -> list[Pos]:
+                            # Failing fast is cheaper than searching hard while a rip could still make room.
+                            try:
+                                return search(_ROUTE_STAGNATION_FIRST)
+                            except ValueError:
+                                if dst in leads or (self.rips_blockers and dst in job.sinks
+                                                    and dst not in self.sinks_cleared.get(job.key, ())):
+                                    raise
+                                rollback(rec, job.key, mark)  # a failed search marks its way with lamps
+                                return search()
 
                         path = saved
                         if path is None:
                             try:
-                                path = search()
+                                path = search_tight_first()
                             except ValueError:
                                 if start == job.src:
                                     raise
                                 start, trunk = job.src, frozenset()  # past the via there's no way on: from the whole tree
                                 tree_seeds = net_seeds + [pos for p in paths for pos in p]
-                                path = search()
+                                rollback(rec, job.key, mark)
+                                path = search_tight_first()
                     finally:
                         if time.monotonic() - search_started >= _LOG_SLOW_SEARCH_SECONDS:
                             debug(f"[wire] {job.key}: slow search, {time.monotonic() - search_started:.1f}s, "
@@ -1045,13 +1061,14 @@ class _GreedyRouter:
                 job_blocked |= stretch
             except ValueError:
                 goal = self.failed_goal.get(job.key)
+                already_first = False  # nothing routed before it, so routing it first is the same search again
                 if job.key in self.kept:
                     cleared = self.sinks_cleared.setdefault(job.key, set())
-                    if goal not in cleared:
+                    if self.rips_blockers and goal not in cleared:
                         cleared.add(goal)  # run() rips around it and carries on from this sink
                         raise
-                    del self.kept[job.key]
-                if goal is None or goal not in job.sinks or goal in first or len(first) >= len(job.first) + _SINK_RETRIES:
+                    already_first = not self.kept.pop(job.key).paths
+                if already_first or goal is None or goal not in job.sinks or goal in first or len(first) >= len(job.first) + _SINK_RETRIES:
                     raise
                 self._undo_job(job.key, mark)
                 first = (*first, goal)
@@ -1086,6 +1103,7 @@ class _GreedyRouter:
         rip_blockers: False skips the rip-around-a-failed-sink layer.
         on_done(i, job): called after each job's attempt, i its 1-based position in jobs.
         """
+        self.rips_blockers = rip_blockers
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
         by_key = {job.key: job for job in jobs}

@@ -393,6 +393,56 @@ def test_rip_branch_leaves_later_nets_alone_and_rip_up_clean():
     assert _state(region, solid, dust_owner) == empty
 
 
+def _searches_with_limits(monkeypatch, fail_tight_at):
+    find = builder._find_wire_path
+    limits = []
+
+    def recording(ws, solid, owner, start, dst, net_id, *args, stagnation=-1, **kwargs):
+        limits.append((dst, stagnation))
+        if dst == fail_tight_at and stagnation >= 0:
+            ws[(dst[0], dst[1] + 3, dst[2])] = BlockState("minecraft:redstone_lamp")  # as a failed search does
+            raise ValueError("No route")
+        return find(ws, solid, owner, start, dst, net_id, *args, stagnation=stagnation, **kwargs)
+
+    monkeypatch.setattr(builder, "_find_wire_path", recording)
+    return limits
+
+
+def test_sink_gets_the_full_limit_after_its_rip(monkeypatch):
+    router, region, *_ = _router()
+    blocker = _job("blocker", (1, 1, 10), [(9, 1, 10)])
+    sink = (9, 1, 7)
+    limits = _searches_with_limits(monkeypatch, sink)
+    assert router.run([blocker, _job("n", (1, 1, 1), [sink])], "[test]") == []
+    tight, full = builder._ROUTE_STAGNATION_FIRST, -1
+    assert [limit for dst, limit in limits if dst == sink] == [tight, tight, full]  # tight, rip, tight, full
+    assert region[(9, 4, 7)].id == "minecraft:air"  # the failed searches' marks went
+
+
+def test_sink_with_no_rip_to_come_gets_the_full_limit_at_once(monkeypatch):
+    router, region, *_ = _router()
+    sink = (9, 1, 7)
+    limits = _searches_with_limits(monkeypatch, sink)
+    assert router.run([_job("n", (1, 1, 1), [sink])], "[test]", rip_blockers=False) == []
+    assert [limit for dst, limit in limits if dst == sink] == [builder._ROUTE_STAGNATION_FIRST, -1]
+    assert region[(9, 4, 7)].id == "minecraft:air"
+
+
+def test_failed_sink_with_nothing_to_change_is_not_searched_again(monkeypatch):
+    router, *_ = _router()
+    sink = (9, 1, 7)
+    searches = []
+
+    def failing(ws, solid, owner, start, dst, net_id, *args, stagnation=-1, **kwargs):
+        searches.append(stagnation)
+        raise ValueError("No route")
+
+    monkeypatch.setattr(builder, "_find_wire_path", failing)
+    failures = router.run([_job("n", (1, 1, 1), [sink])], "[test]", rip_blockers=False)
+    assert [key for key, _ in failures] == ["n"]
+    assert searches == [builder._ROUTE_STAGNATION_FIRST, -1]
+
+
 def test_repair_reroutes_a_net_verify_finds_fault_with():
     router, region, solid, dust_owner = _router()
     job = _job("n", (2, 1, 2), [(8, 1, 2)])

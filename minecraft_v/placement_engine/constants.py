@@ -31,6 +31,7 @@ WOOLS = list(BlockState(f"minecraft:{color}_wool") for color in (
 _REPEATER_INTERVAL = 15  # redstone signal range; repeater placed every N dust blocks
 _ROUTE_MAX_NODES = 10_000    # hard cap on unique XYZ positions expanded before declaring failure
 _ROUTE_STAGNATION = 100_000  # expansions since the search last reached a new position → early cut
+_ROUTE_STAGNATION_FIRST = 10_000  # the same, for a first try at a sink: failing here gets its blockers ripped
 _ROUTE_MAX_EXPANSIONS = 1_500_000  # hard cap on state expansions per search (~3-5s); bounds hopeless searches
 _ROUTE_BUDGET_FACTOR = 5     # f-score cap: max_f = initial_h * factor; prunes runaway detours
 _H_RADIUS_FACTOR = 2        # h-radius cull: discard nodes where h > best_h * factor
