@@ -183,7 +183,10 @@ def main():
                         help="Per-search A* time limit in seconds for non-final passes; 0 disables "
                              "(default: _ROUTE_SEARCH_TIMEOUT)")
     parser.add_argument("--route-workers", type=int, default=1,
-                        help="Processes for negotiation passes (needs --route-passes > 1); 1 = sequential")
+                        help="Processes routing nets speculatively in batches, or for negotiation passes with "
+                             "--route-passes > 1; 1 = sequential")
+    parser.add_argument("--route-spec-max-span", type=int, default=200,
+                        help="--route-workers: nets with more total distance to their sinks route sequentially")
     parser.add_argument("--route-deadline", type=float, default=None,
                         help="Seconds of routing before giving up on remaining nets (writes a partial result; "
                              "use with --allow-routing-failures True)")
@@ -318,6 +321,7 @@ def main():
                                         **({"route_passes": args.route_passes} if args.route_passes is not None else {}),
                                         **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}),
                                         route_workers=args.route_workers,
+                                        route_spec_max_span=args.route_spec_max_span,
                                         route_deadline=args.route_deadline,
                                         snapshots=args.debug,
                                         placer=args.placer,

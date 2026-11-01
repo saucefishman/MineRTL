@@ -38,7 +38,7 @@ from .layout import (
 from .anneal import _optimize_placement
 from .poisson import _poisson_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
-from .parallel import RouteWorkers, claims_of
+from .parallel import RouteWorkers, claims_of, run_forked
 from .propagate import settle as settle_blocks
 from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
@@ -705,6 +705,8 @@ _RIP_ROUNDS = 3  # per job: rip-and-retry rounds, each for a sink that hasn't ha
 _ESCALATE_RADIUS = 6  # a job out of retries gets this wider ring ripped, once, even nets ripped before
 _ESCALATE_MAX = 8
 _REPAIR_ROUNDS = 3  # re-routes of nets verify still finds fault with
+_SPEC_CLEARANCE = 2  # speculative jobs clash with blocks this close (per axis): dust through a block to dust
+_SPEC_MAX_SPAN = 200  # jobs longer than this (_RouteJob.span) aren't worth speculating: a redo costs too much
 
 Pos = tuple[int, int, int]
 
@@ -727,6 +729,11 @@ class _RouteJob:
     avoid: frozenset[Pos] = frozenset()  # cells verify found a fault at, kept out of re-routes
     first: tuple[Pos, ...] = ()    # sinks verify found a fault at, routed first in re-routes
 
+    @property
+    def span(self) -> int:
+        """Total Manhattan distance to the sinks: what sorts nets, and a rough guess at the cost of routing this."""
+        return sum(abs(self.src[0] - s[0]) + abs(self.src[1] - s[1]) + abs(self.src[2] - s[2]) for s in self.sinks)
+
 
 @dataclass
 class _KeptBranches:
@@ -739,6 +746,17 @@ class _KeptBranches:
     next_target: int
     targets: list[Pos]  # per path: the via, lead or sink it was laid for
     cells: list[frozenset[Pos]]  # per path: the blocks laying it wrote
+
+
+@dataclass
+class _Speculated:
+    """What routing a job in a forked worker left: enough to redo it here without searching."""
+    blocks: dict[Pos, tuple[str, tuple[tuple[str, str], ...]]]  # final block at each cell it wrote
+    solid: dict[Pos, bool]  # final membership of what it touched
+    inverted: dict[Pos, bool]
+    owner: dict[Pos, str | None]
+    paths: list[list[Pos]]
+    laid: _KeptBranches
 
 
 _LOG_EVERY_SECONDS = 30.0     # routing progress in the log
@@ -764,6 +782,10 @@ class _GreedyRouter:
       jobs around the failed sink, route it again, then re-queue them. Up to _RIP_ROUNDS
       times per job, once per failed sink (a repeat failure at the same sink is final). A job
       out of those gets one wider ring ripped, whatever already happened to those jobs.
+    - per batch, with workers: the next jobs route at once in forked workers, unable to see each
+      other. Taken in queue order, a result is kept unless it comes within _SPEC_CLEARANCE of a
+      block laid since the fork; otherwise, or if the worker failed, the job routes here as usual.
+      A rip throws away what's left of the batch, as a result may rest on what it removed.
 
     Ripping a job around a failure takes only its branch nearest that failure, and the branches
     that hang off it (rip_branch). The job is re-queued to search for those sinks alone.
@@ -798,6 +820,9 @@ class _GreedyRouter:
         self.sinks_cleared: dict[str, set[Pos]] = {}  # job key -> sinks that have had their one per-sink rip
         self.laid: dict[str, _KeptBranches] = {}  # finished jobs' branches, for rip_branch
         self.rips_blockers = True  # whether a failed sink can get room by ripping (run's rip_blockers)
+        self.speculated: dict[str, _Speculated | None] = {}  # this batch's results still to take; None: worker failed
+        self.laid_since_fork: set[Pos] = set()
+        self.spec_max_span = _SPEC_MAX_SPAN
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
         return [p for nid, ps in self.paths.values() if nid == net_id for p in ps]
@@ -1108,14 +1133,85 @@ class _GreedyRouter:
                             dist[owner] = min(dist.get(owner, d), d)
         return sorted(dist, key=lambda n: dist[n])
 
+    def _speculate_job(self, job: _RouteJob) -> _Speculated | None:
+        """In a forked worker: route the job, and report what that wrote."""
+        mark = len(self.rec.journals[job.key])
+        try:
+            with self.rec.recording(job.key):
+                self.route_job_retrying(job)
+        except Exception:
+            return None
+        blocks, solid, inverted, owner = {}, {}, {}, {}
+        for kind, target, key, _, _ in self.rec.journals[job.key][mark:]:
+            if kind == "block":
+                block = self.region[key]
+                blocks[key] = (block.id, tuple(sorted(block.properties())))
+            elif kind == "dict":
+                owner[key] = self.dust_owner.get(key)
+            else:
+                (solid if target is self.solid else inverted)[key] = key in target
+        return _Speculated(blocks, solid, inverted, owner, self.paths[job.key][1], self.laid[job.key])
+
+    def _speculate(self, queue: deque, workers: int) -> int:
+        """Route the jobs at the head of the queue in forked workers; returns how many.
+
+        A job past the span cutoff ends the batch, as does one carrying on from kept wire (its journal
+        predates the fork) or another job of the same net (its repeaters and signal depths are shared).
+        """
+        batch: list[_RouteJob] = []
+        for _, job in queue:
+            if (len(batch) == workers or job.span > self.spec_max_span
+                    or job.key in self.kept or job.key in self.has_kept_wire
+                    or any(job.net_id == other.net_id for other in batch)):
+                break
+            batch.append(job)
+        if len(batch) < 2:
+            return 0
+        results = run_forked([lambda job=job: self._speculate_job(job) for job in batch])
+        self.speculated = {job.key: result for job, result in zip(batch, results)}
+        self.laid_since_fork = set()
+        return len(batch)
+
+    def _take_speculated(self, job: _RouteJob, spec: _Speculated) -> bool:
+        """Redo a worker's result here, unless something laid since the fork is too close to it."""
+        r = range(-_SPEC_CLEARANCE, _SPEC_CLEARANCE + 1)
+        near = [(dx, dy, dz) for dx in r for dy in r for dz in r]
+        laid = self.laid_since_fork
+        if laid and any((x + dx, y + dy, z + dz) in laid for x, y, z in spec.blocks for dx, dy, dz in near):
+            return False
+        states: dict[tuple, BlockState] = {}
+        for pos, key in spec.blocks.items():
+            block = states.get(key)
+            if block is None:
+                block = states[key] = BlockState(key[0], **dict(key[1]))
+            self.ws[pos] = block
+        for target, cells in ((self.solid, spec.solid), (self.inverted_cells, spec.inverted)):
+            for pos, present in cells.items():
+                if present:
+                    target.add(pos)
+                else:
+                    target.discard(pos)
+        for pos, net_id in spec.owner.items():
+            if net_id is None:
+                self.dust_owner.pop(pos, None)
+            else:
+                self.dust_owner[pos] = net_id
+        self.paths[job.key] = (job.net_id, spec.paths)
+        self.laid[job.key] = spec.laid
+        if self.resume:
+            for target, path in zip(spec.laid.targets, spec.paths):
+                self.resume.remember(job.key, target, path)
+        return True
+
     def run(self, jobs: list[_RouteJob], label: str, deadline: float | None = None, fail_fast: bool = False,
             on_done: Callable[[int, _RouteJob], None] | None = None,
-            rip_blockers: bool = True) -> list[tuple[str, Exception]]:
+            rip_blockers: bool = True, workers: int = 1) -> list[tuple[str, Exception]]:
         """Route jobs in order; returns (job key, error) for the ones that failed.
 
         fail_fast: raise on the first job that fails instead of collecting failures.
         rip_blockers: False skips the rip-around-a-failed-sink layer.
         on_done(i, job): called after each job's attempt, i its 1-based position in jobs.
+        workers: above 1, route short jobs speculatively in batches of this many.
         """
         self.rips_blockers = rip_blockers
         failures: list[tuple[str, Exception]] = []
@@ -1128,6 +1224,9 @@ class _GreedyRouter:
         escalated: set[str] = set()
         started = last_log = time.monotonic()
         attempts = 0
+        self.speculated = {}
+        spec_stats = dict.fromkeys(("batches", "jobs", "kept", "clashed", "worker_failed", "discarded", "here"), 0)
+        spec_seconds = spec_take_seconds = spec_here_seconds = 0.0
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
                 now = time.monotonic()
@@ -1138,6 +1237,11 @@ class _GreedyRouter:
                     debug(f"{label} {bar.n}/{len(jobs)} started, {attempts} attempts, {len(ripped)} ripped, "
                         f"{len(failures)} failed, {len(queue)} queued ({now - started:.0f}s)")
                 attempts += 1
+                if workers > 1 and not self.speculated and (deadline is None or now <= deadline):
+                    forked = self._speculate(queue, workers)
+                    spec_stats["batches"] += forked > 0
+                    spec_stats["jobs"] += forked
+                    spec_seconds += time.monotonic() - now
                 i, job = queue.popleft()
                 bar.update(n=0 if job.key in ripped or job.key in requeued else 1, info=job.key)
                 if deadline is not None and time.monotonic() > deadline:
@@ -1148,12 +1252,31 @@ class _GreedyRouter:
                     continue
                 self.failed_goal.pop(job.key, None)
                 job_started = time.monotonic()
+                batched = job.key in self.speculated
+                spec = self.speculated.pop(job.key, None)
+                mark = len(self.rec.journals[job.key])
                 try:
                     with self.rec.recording(job.key):
-                        self.route_job_retrying(job)
+                        taken = spec is not None and self._take_speculated(job, spec)
+                        spec_take_seconds += time.monotonic() - job_started
+                        if not taken:
+                            here_started = time.monotonic()
+                            self.route_job_retrying(job)
+                            dt = time.monotonic() - here_started
+                            spec_here_seconds += dt
+                            if workers > 1 and dt > 0.3:
+                                debug(f"{label} sequential {job.key}: {dt:.2f}s, span {job.span}, batched {batched}")
+                    if batched:
+                        spec_stats["kept" if taken else "clashed" if spec is not None else "worker_failed"] += 1
+                    else:
+                        spec_stats["here"] += 1
+                    if self.speculated:
+                        self.laid_since_fork |= self._cells_since(job.key, mark)
                     if time.monotonic() - job_started >= _LOG_SLOW_JOB_SECONDS:
                         debug(f"{label} {job.key}: {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                 except Exception as e:
+                    spec_stats["discarded"] += len(self.speculated)
+                    self.speculated = {}
                     debug(f"{label} {job.key}: failed after {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                     if job.key in self.kept:
                         goal = self.failed_goal.get(job.key)
@@ -1210,6 +1333,10 @@ class _GreedyRouter:
                     log(f"[error] skipped net {job.key}: {e}")
                 if on_done is not None:
                     on_done(i, job)
+        if workers > 1:
+            log(f"{label} speculation: {spec_stats}, {spec_seconds:.1f}s in batches, "
+                f"{spec_take_seconds:.1f}s taking, {spec_here_seconds:.1f}s sequential, "
+                f"{time.monotonic() - started:.1f}s in all")
         if self.resume:
             self.resume.save_paths()
             log(f"{label} resume: {self.resume.reused} paths reused, {self.resume.searched} searched "
@@ -1315,10 +1442,13 @@ def _route_all_nets(
         terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None,
         placed: list[_Placed] = (),
         resume: ResumeStore | None = None,
+        route_workers: int = 1,
+        spec_max_span: int = _SPEC_MAX_SPAN,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]], dict[str, tuple[str, list[list[Pos]]]]]:
     """Greedy routing of every net (_GreedyRouter); returns (failures, inverted cells, paths).
 
     fail_fast: raise on the first net that fails instead of collecting failures.
+    route_workers: above 1, nets of up to spec_max_span route speculatively in batches (_GreedyRouter).
     """
     inverted_cells = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals, terminal_approach)
@@ -1330,6 +1460,7 @@ def _route_all_nets(
         router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                                frozenset(pin_terminal.values()), resume=resume,
                                gate_cells=frozenset(_component_interior(placed)))
+        router.spec_max_span = spec_max_span
         jobs = [
             _RouteJob(
                 key=net.net_id, net_id=net.net_id,
@@ -1350,8 +1481,10 @@ def _route_all_nets(
             safe_id = job.key.replace("/", "_").replace("\\", "_")
             save_schematic_artifact(f"net_{i:03d}_{safe_id}.litematic", workspace, snapshot_dir)
 
-    failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot)
-    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed)")
+    started = time.monotonic()
+    failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot,
+                          workers=route_workers)
+    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed, {time.monotonic() - started:.1f}s)")
     if not macros:
         failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
                                         frozenset(_component_interior(placed)), deadline)
@@ -2019,6 +2152,7 @@ def build_litematic_from_component_list(
         route_passes: int = _ROUTE_MAX_PASSES,
         wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
         route_workers: int = 1,
+        route_spec_max_span: int = _SPEC_MAX_SPAN,
         route_deadline: float | None = None,
         snapshots: bool = False,
         placer: str = "poisson",
@@ -2178,8 +2312,6 @@ def build_litematic_from_component_list(
         sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     if route_passes <= 1:
-        if route_workers > 1:
-            log("[wire] --route-workers ignored: needs --route-passes > 1")
         routing_failures, inverted_cells, net_paths = _route_all_nets(
             workspace, rec, solid, dust_owner,
             sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
@@ -2190,6 +2322,8 @@ def build_litematic_from_component_list(
             terminal_approach=terminal_approach,
             placed=placed,
             resume=resume,
+            route_workers=route_workers,
+            spec_max_span=route_spec_max_span,
         )
     else:
         net_paths = {}  # negotiated mode keeps no ordered paths
