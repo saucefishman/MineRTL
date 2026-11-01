@@ -678,6 +678,8 @@ def _long_macros(gates: list[Component]) -> list[int]:
             and not gates[i].metadata.get("bank")]
 
 
+_BANK_LOG_EVERY = 200
+_BANK_SPOT_TRIES = (20000, 200000, 2000000)
 _BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
 
 
@@ -706,11 +708,26 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     occ.add(len(gates), (0, 0, 0))
     for i in fixed:
         pos[i] = fixed[i]
-    for i in sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2])):
+    started = time.monotonic()
+    wide_searches = 0
+    for placed, i in enumerate(sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2]))):
+        if placed % _BANK_LOG_EVERY == 0:
+            print(f"[place] around banks: {placed}/{len(free)} placed, {wide_searches} needed a wider search "
+                  f"({time.monotonic() - started:.1f}s)", flush=True)
         target = tuple(int(v) for v in pos[i])
         # A macro has pins on its faces: not up against the output row.
         low_z = channel if gates[i].type == ComponentType.CUSTOM else 0
-        spot = occ.nearest_free(i, (max(target[0], 0), max(target[1], 0), max(target[2], low_z)), False, 20000)
+        wanted = (max(target[0], 0), max(target[1], 0), max(target[2], low_z))
+        # Dense areas can use up a small search long before the domain is full.
+        spot = None
+        for attempt, tries in enumerate(_BANK_SPOT_TRIES):
+            spot = occ.nearest_free(i, wanted, False, tries)
+            if spot is not None:
+                break
+            if attempt == 0:
+                wide_searches += 1
+            print(f"[place] around banks: no spot for {gates[i].id} near {wanted} in {tries} tries "
+                  f"({time.monotonic() - started:.1f}s)", flush=True)
         if spot is None:
             raise ValueError(f"no room for {gates[i].id} around the banks")
         occ.add(i, spot)
