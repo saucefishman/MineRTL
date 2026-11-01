@@ -47,7 +47,7 @@ def parse_format(fmt: str) -> list[dict]:
                 tokens.append({"text": text})
                 text = ""
             justify, pad, min_width, radix, sign = field.groups()
-            tokens.append({"bits": list(range(next_bit, next_bit + int(width))), "radix": radix, "signed": sign == "s",
+            tokens.append({"bits": list(range(next_bit, next_bit + int(width))), "radix": "x" if radix == "h" else radix, "signed": sign == "s",
                            "width": int(min_width or 0), "pad": pad, "justify": justify})
             next_bit += int(width)
             i = end + 1
@@ -131,9 +131,17 @@ def _mark(workspace: Region, pos: tuple[int, int, int]) -> None:
 
 
 def write_probes(path: Path, probes: list[dict], positions: dict[tuple[str, str], tuple[int, int, int]],
-                 workspace: Region, size: tuple[int, int, int]) -> int:
-    """Resolve drivers to blocks, mark them and write the sidecar. Returns the number of blocks tapped."""
+                 workspace: Region, regions: list[Region]) -> int:
+    """Resolve drivers to blocks, mark them and write the sidecar. Returns the number of blocks tapped.
+
+    Positions are relative to the schematic's minimum corner, across all its regions.
+    """
     tapped: set[tuple[int, int, int]] = set()
+    low = [min(r.x + min(r.range_x()) for r in regions), min(r.y + min(r.range_y()) for r in regions),
+           min(r.z + min(r.range_z()) for r in regions)]
+    high = [max(r.x + max(r.range_x()) for r in regions), max(r.y + max(r.range_y()) for r in regions),
+            max(r.z + max(r.range_z()) for r in regions)]
+    size = [hi - lo + 1 for lo, hi in zip(low, high)]
 
     def resolve(entry: dict) -> dict:
         if "const" in entry:
@@ -143,7 +151,7 @@ def write_probes(path: Path, probes: list[dict], positions: dict[tuple[str, str]
         if kind not in ("minecraft:repeater", "minecraft:redstone_torch", "minecraft:redstone_wall_torch"):
             raise RuntimeError(f"probe tap {entry['driver']} at {pos} is {kind}, not a torch or repeater")
         tapped.add(pos)
-        return {"pos": list(pos)}
+        return {"pos": [c - lo for c, lo in zip(pos, low)]}
 
     out = [{**p, "trigger": {**resolve(p["trigger"]), "edge": p["edge"]}, "enable": resolve(p["enable"]),
             "data": [resolve(d) for d in p["data"]]} for p in probes]
@@ -151,5 +159,5 @@ def write_probes(path: Path, probes: list[dict], positions: dict[tuple[str, str]
         del p["edge"]
     for pos in sorted(tapped):
         _mark(workspace, pos)
-    path.write_text(json.dumps({"version": PROBES_VERSION, "size": list(size), "probes": out}, indent=1) + "\n")
+    path.write_text(json.dumps({"version": PROBES_VERSION, "schematic_size": size, "probes": out}, indent=1) + "\n")
     return len(tapped)

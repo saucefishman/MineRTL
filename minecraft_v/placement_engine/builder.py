@@ -2183,7 +2183,7 @@ def build_litematic_from_component_list(
                                                                         _default_io_side(p.component, pin), bounds=io_bounds)
                           for p in placed if p.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
                           for pin in p.component.pins})
-        tapped = write_probes(probe_path, probes, positions, workspace, (width, height, workspace_depth))
+        tapped = write_probes(probe_path, probes, positions, workspace, list(regions.values()))
         log(f"[probes] {len(probes)} prints, {tapped} blocks tapped: {probe_path}")
 
     schematic = Schematic(
