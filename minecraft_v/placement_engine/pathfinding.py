@@ -311,8 +311,11 @@ def _find_wire_path(
         blocked: frozenset[tuple[int, int, int]] = frozenset(),
         seed_depths: dict[tuple[int, int, int], int] | None = None,
         pending_sinks: frozenset[tuple[int, int, int]] = frozenset(),
+        stagnation: int = -1,
 ) -> list[tuple[int, int, int]]:
     """A* wire route from start to goal.
+
+    stagnation: this search's stagnation limit (negative: _ROUTE_STAGNATION). Kernel only.
 
     seed_depths: signal depth (_signal_depths) of tree seeds; missing seeds count as 0.
 
@@ -813,13 +816,13 @@ def _find_wire_path(
             terminal_positions, workspace, GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
             pos_ids, pos_list, h_list, move_cache, pending_sinks)
 
-    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world)
+    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world, stagnation=stagnation)
     if reached is None and early_stop_reason is None and h_radius_pruned:
         # The open list ran dry only because the h-radius cull discarded detours (typically a
         # blocked approach close to the goal): search again without the cull.
         group_best_h[:] = initial_group_best_h
         reached, best_node, _, early_stop_reason, came_from = _run_search(
-            search_args, net_id, make_world, h_radius_factor=0)
+            search_args, net_id, make_world, h_radius_factor=0, stagnation=stagnation)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -1083,13 +1086,13 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1):
+def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
     if _astar is None or _ASTAR_MODE == "py":
         return _search_py(*args)
     world = make_world()
     if _ASTAR_MODE == "kernel":
-        return _astar.search(*args, world, h_radius_factor=h_radius_factor)
+        return _astar.search(*args, world, h_radius_factor=h_radius_factor, stagnation=stagnation)
     # check: both loops from the same start state (group_best_h is updated in place).
     group_best_h = args[3]
     t0 = time.perf_counter()

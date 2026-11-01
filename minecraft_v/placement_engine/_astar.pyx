@@ -14,6 +14,7 @@ from libcpp.vector cimport vector
 from cython.operator cimport dereference
 from cpython.set cimport PySet_Contains
 import time
+from minecraft_v.progress import pulse
 
 cdef extern from *:
     """
@@ -960,9 +961,10 @@ cdef inline bint dominated(FlatMap[NodeInfo]* nodes, long long node, double g):
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False,
-           double h_radius_factor=-1):
+           double h_radius_factor=-1, int stagnation=-1):
     """See pathfinding._search_py. With world, cells' static moves are generated here instead of
-    by expand(); verify additionally checks each against expand(). h_radius_factor: the h-radius
+    by expand(); verify additionally checks each against expand(). stagnation: this search's limit
+    (negative: _ROUTE_STAGNATION). h_radius_factor: the h-radius
     cull for this search (0: off; negative: _H_RADIUS_FACTOR)."""
     global STAT_SEARCHES, STAT_POPS, STAT_PUSHES, STAT_CELLS, STAT_LOAD_TIME
     if not _init_done:
@@ -998,6 +1000,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef double deadline = 0
     early_stop_reason = None
     cdef double radius = H_RADIUS_FACTOR if h_radius_factor < 0 else h_radius_factor
+    cdef int stagnation_limit = STAGNATION if stagnation < 0 else stagnation
     py_max_f = max(group_max_f)
     max_f = py_max_f
 
@@ -1032,6 +1035,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if has_deadline and pops & 255 == 0 and time.monotonic() > deadline:
             early_stop_reason = f"timeout ({time_limit}s)"
             break
+        if pops & 16383 == 0:
+            pulse(pops)
         e = heap_pop(heap)
         # f-cap per seed group; stop once past every group's.
         f_wire = e.f - e.g + e.g_wire
@@ -1077,8 +1082,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             break
         # Stagnation: the frontier keeps churning states (snapshots, signal depths, cheaper
         # re-expansions) over cells it has already reached.
-        if n_exp - last_new_pos >= STAGNATION:
-            early_stop_reason = f"stagnated ({STAGNATION} expansions without a new position)"
+        if n_exp - last_new_pos >= stagnation_limit:
+            early_stop_reason = f"stagnated ({stagnation_limit} expansions without a new position)"
             break
         if n_exp >= MAX_EXPANSIONS:
             early_stop_reason = f"expansion cap ({MAX_EXPANSIONS})"

@@ -24,7 +24,7 @@ from scipy.sparse.linalg import cg
 
 from minecraft_v.placement_engine.ir import Component, ComponentType, NetConnection
 from minecraft_v.placement_engine.layout import _BIT_INDEX_RE, _Placed, _assign_io_x_positions, _io_base_name
-from minecraft_v.progress import debug
+from minecraft_v.progress import debug, log, phase, status
 from minecraft_v.placement_engine.template import _mirror_component_x, _rotate_component_180
 
 _WEIGHTS = np.array([1.0, 2.0, 1.0])  # wirelength per block in X, Y, Z: Y needs slopes and towers
@@ -41,6 +41,7 @@ _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
 _REFINE_PASSES = 3
 _REFINE_POPS = 60
+_STATUS_EVERY = 50           # gates between progress line updates
 _IO_COLUMN_CLEAR = 4         # a gate this close in X is in an IO column's way: nearer, a pin lands in the
                              # keepout of the gate's terminal and its wire can't start
 _DENSE_GATES = 700           # at or above: dense spacing (see anneal._AUTO_DENSE), regsbig and video
@@ -350,6 +351,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     pos[:n] = dims / 2 + rng.normal(0.0, 0.01, (n, 3)) * dims
     refresh_io(pos)
     start = origins(pos)
+    status("quadratic start")
     _quadratic_start(netlist, start)
     pos[:n] = np.clip(start[:n] + pad + rng.normal(0.0, 0.01, (n, 3)) * dims, lo, hi)
     pin_fixed(pos)
@@ -368,6 +370,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     max_move = _MAX_STEP_BINS * field.h
     t0 = time.monotonic()
     for it in range(_MAX_ITERS):
+        status(f"global placement, iteration {it + 1}, overflow {overflow:.2f}")
         force, overflow = field.forces(v[free])
         gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
         wire = netlist.wa_gradient(origins(v), gamma)[free]
@@ -400,7 +403,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
             best_overflow, best_at = overflow, it
         if it >= _MIN_ITERS and (overflow < _STOP_OVERFLOW or it - best_at > _STALL_ITERS):
             break
-    print(f"[place] poisson: grid {field.shape}, {it + 1} iterations, overflow {overflow:.2f}, "
+    log(f"[place] poisson: grid {field.shape}, {it + 1} iterations, overflow {overflow:.2f}, "
           f"hpwl {netlist.hpwl(origins(u)):.0f} ({time.monotonic() - t0:.1f}s)")
     return np.maximum(u[:n] - pad, 0.0)
 
@@ -500,6 +503,8 @@ def _legalize(pos: np.ndarray, sizes: np.ndarray, flat: bool) -> np.ndarray:
             continue
         order = np.argsort(centre[:, a], kind="stable")
         for k, i in enumerate(order):
+            if k % _STATUS_EVERY == 0:
+                status(f"legalizing, axis {'xyz'[a]}, {k}/{len(order)}")
             before = order[:k]
             before = before[choice[i, before] == a]
             floor = (out[before, a] + sizes[before, a]).max() if len(before) else 0.0
@@ -513,7 +518,9 @@ def _compact(pos: np.ndarray, sizes: np.ndarray, axis: int) -> None:
     others = [a for a in range(3) if a != axis]
     order = np.argsort(pos[:, axis], kind="stable")
     done: list[int] = []
-    for i in order:
+    for k, i in enumerate(order):
+        if k % _STATUS_EVERY == 0:
+            status(f"compacting, axis {'xyz'[axis]}, {k}/{len(order)}")
         if done:
             d = np.array(done)
             hit = np.ones(len(d), dtype=bool)
@@ -576,11 +583,13 @@ def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: boo
         if i not in pinned:
             occ.add(i, tuple(int(v) for v in pos_all[i]))
     cost = _NetCost(netlist, pos_all)
-    for _ in range(_REFINE_PASSES):
+    for refine_pass in range(_REFINE_PASSES):
         moved = 0
         for i in range(n):
             if time.monotonic() >= deadline:
                 return
+            if i % _STATUS_EVERY == 0:
+                status(f"refining, pass {refine_pass + 1}/{_REFINE_PASSES}, gate {i}/{n}, {moved} moved")
             if i in pinned or (fixed_box is not None and netlist.comps[i].type == ComponentType.CUSTOM):
                 continue
             target = cost.median_target(i)
@@ -608,6 +617,8 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
     cost = _NetCost(netlist, pos_all)
     out = list(gates)
     for i, c in enumerate(gates):
+        if i % _STATUS_EVERY == 0:
+            status(f"mirroring, gate {i}/{len(gates)}")
         w = c.footprint.width
         if w < 2 or c.metadata.get("bank"):
             continue
@@ -711,7 +722,7 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
     dims = np.array([width + channel + east_room, 0.0, depth + 2.0 * channel])
     dims[1] = max(volume / (dims[0] * dims[2]), y + float(sizes[free, 1].max()))
-    print(f"[place] poisson: around banks, domain {tuple(int(v) for v in dims)}")
+    log(f"[place] poisson: around banks, domain {tuple(int(v) for v in dims)}")
     pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, fixed, box))
     occ = _Occupancy(np.vstack([sizes, box[1]]))
     occ.add(len(gates), (0, 0, 0))
@@ -722,6 +733,8 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     started = time.monotonic()
     wide_searches = 0
     for placed, i in enumerate(sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2]))):
+        if placed % _STATUS_EVERY == 0:
+            status(f"around banks, {placed}/{len(free)} placed")
         if placed % _BANK_LOG_EVERY == 0:
             debug(f"[place] around banks: {placed}/{len(free)} placed, {wide_searches} needed a wider search "
                   f"({time.monotonic() - started:.1f}s)")
@@ -927,7 +940,7 @@ def _poisson_placement(
                 _pin_side_pass(netlist, pos, sizes, gates, centre=False)
                 pos = _legalize(pos, sizes, flat)
                 _turn_short_macros(netlist, pos, sizes, gates)
-        print(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
+        log(f"[place] poisson: legal in {tuple(int(v) for v in (pos + sizes).max(axis=0))}, "
               f"density {np.prod(sizes, axis=1).sum() / np.prod((pos + sizes).max(axis=0)):.2f}")
     else:
         pos = np.zeros((0, 3))
@@ -950,7 +963,7 @@ def _poisson_placement(
     if _long_macros(gates_final):  # the north faces have pins too: room for their wires before the output row
         pos_all[[i for i, c in enumerate(netlist.comps) if c.type == ComponentType.OUTPUT_PIN
                  or c.metadata.get("north_face")], 2] -= macro_channel
-    print(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
+    log(f"[place] poisson: final hpwl {netlist.hpwl(pos_all):.0f} ({time.monotonic() - t0:.1f}s)")
 
     # World frame: margin in X, frontmost output at z=1 (as in layout._pack_layout).
     front = [p[2] for c, p in zip(netlist.comps, pos_all) if c.type == ComponentType.OUTPUT_PIN]

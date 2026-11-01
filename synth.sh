@@ -17,6 +17,8 @@ out_litematic_dir=""
 out_litematic="build/result.litematic"
 settle=true
 synth_only=false
+debug_prints=auto
+macros=false
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,6 +40,21 @@ while [[ $# -gt 0 ]]; do
             ;;
         --synth-only)  # stop after writing the netlist
             synth_only=true
+            shift
+            ;;
+        --debug-prints)  # also passed on to minecraft_v
+            debug_prints=true
+            args+=("$1")
+            shift
+            ;;
+        --no-debug-prints)
+            debug_prints=false
+            args+=("$1")
+            shift
+            ;;
+        --macros)  # prints can't tap inside macros: off unless asked for, which minecraft_v refuses
+            macros=true
+            args+=("$1")
             shift
             ;;
         --no-settle)
@@ -85,11 +102,45 @@ if [[ -f "$default_pin_targets_json" && "$has_output_pin_targets_flag" == false 
     set -- "$@" --output-pin-targets-json "$default_pin_targets_json"
 fi
 
-yosys -q -p "
+# Spinner with the current yosys pass, until killed.
+yosys_log="${artifacts_dir}/yosys.log"
+yosys_err="${artifacts_dir}/yosys.err"
+yosys_spinner() {
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) i=0 start=$SECONDS pass
+    while true; do
+        pass="$(grep -E '^[0-9]+\. Executing' "$yosys_log" 2>/dev/null | tail -n 1 | cut -c1-60 || true)"
+        printf '\r%s [yosys] %ds %s\033[K' "${frames[i++ % 10]}" "$((SECONDS - start))" "$pass" >&2
+        sleep 0.1
+    done
+}
+spinner_pid=""
+stop_spinner() {
+    if [[ -n "$spinner_pid" ]]; then
+        kill "$spinner_pid" 2>/dev/null || true
+        wait "$spinner_pid" 2>/dev/null || true
+        spinner_pid=""
+        printf '\r\033[K' >&2
+    fi
+}
+trap stop_spinner EXIT
+: > "$yosys_log"
+if [[ -t 2 ]]; then
+    yosys_spinner &
+    spinner_pid=$!
+fi
+
+# Prints keep whatever logic they read, so builds without them drop that too. Asserts never build.
+strip_debug='delete t:$check'
+if [[ "$debug_prints" == false || ( "$debug_prints" == auto && "$macros" == true ) ]]; then
+    strip_debug='delete t:$print t:$check'
+fi
+yosys_status=0
+yosys -q -l "$yosys_log" -p "
 read_verilog -sv ${dir}/*.v
 hierarchy -check -top main
 flatten -noscopeinfo
 proc
+${strip_debug}
 memory_map
 dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
 techmap -map techmap/dlatch_map.v
@@ -105,7 +156,12 @@ techmap -map techmap/dffe_pn_decompose.v
 opt_clean
 write_json ${artifacts_dir}/netlist.json
 stat
-"
+" > "$yosys_err" 2>&1 || yosys_status=$?
+stop_spinner
+cat "$yosys_err"
+if [[ $yosys_status -ne 0 ]]; then
+    exit "$yosys_status"
+fi
 
 if [[ "$synth_only" == true ]]; then
     exit 0

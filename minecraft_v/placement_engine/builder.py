@@ -13,10 +13,11 @@ from pathlib import Path
 
 from litemapy import BlockState, Region, Schematic
 
+from minecraft_v.placement_engine.probes import probe_components, write_probes
 from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
-from minecraft_v.progress import ProgressBar, debug, log
+from minecraft_v.progress import ProgressBar, debug, log, phase, status
 from minecraft_v.placement_engine.ir import (
     Component,
     ComponentList,
@@ -26,7 +27,7 @@ from minecraft_v.placement_engine.ir import (
 from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
-    _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
+    _ROUTE_STAGNATION_FIRST, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
     _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT, _ROUTE_BATCH_PER_WORKER,
 )
 from .layout import (
@@ -386,7 +387,7 @@ def _route_output_pin_extensions(
     # seed 3: 5 rip rounds, 44s; video: 5 -> 7 failed even ripping just the jobs crossing a
     # failed target's approach column) without routing more pins, so that layer is off here.
     failures = router.run(jobs, "[ext]", rip_blockers=False)
-    print(f"[ext] done ({len(jobs)} extensions, {len(failures)} failed)")
+    log(f"[ext] done ({len(jobs)} extensions, {len(failures)} failed)")
     return failures
 
 
@@ -732,6 +733,8 @@ class _KeptBranches:
     leads: list[Pos]
     sinks: list[Pos]
     next_target: int
+    targets: list[Pos]  # per path: the via, lead or sink it was laid for
+    cells: list[frozenset[Pos]]  # per path: the blocks laying it wrote
 
 
 _LOG_EVERY_SECONDS = 30.0     # routing progress in the log
@@ -751,10 +754,15 @@ class _GreedyRouter:
       sink first.
     - per sink: a sink search that fails is usually walled in by jobs routed earlier. Keep the
       job's branches, rip the jobs around that sink, and search for it again. Once per sink.
+      Searches start on a tight limit (_ROUTE_STAGNATION_FIRST) so that this comes early; a
+      sink past its rip, or with no rip to come, gets the full limit if the tight one fails.
     - per run: if that didn't help, or there was nothing to rip, the whole job goes. Rip the
       jobs around the failed sink, route it again, then re-queue them. Up to _RIP_ROUNDS
       times per job, once per failed sink (a repeat failure at the same sink is final). A job
       out of those gets one wider ring ripped, whatever already happened to those jobs.
+
+    Ripping a job around a failure takes only its branch nearest that failure, and the branches
+    that hang off it (rip_branch). The job is re-queued to search for those sinks alone.
 
     A job that still fails is ripped up so its partial wire / support / repeaters don't
     block later jobs or show up as debris.
@@ -784,20 +792,82 @@ class _GreedyRouter:
         self.kept: dict[str, _KeptBranches] = {}  # jobs to carry on from their failed sink
         self.has_kept_wire: set[str] = set()  # those, and jobs whose kept wire a whole retry has to clear
         self.sinks_cleared: dict[str, set[Pos]] = {}  # job key -> sinks that have had their one per-sink rip
+        self.laid: dict[str, _KeptBranches] = {}  # finished jobs' branches, for rip_branch
+        self.rips_blockers = True  # whether a failed sink can get room by ripping (run's rip_blockers)
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
         return [p for nid, ps in self.paths.values() if nid == net_id for p in ps]
 
     def rip(self, key: str) -> None:
         self.kept.pop(key, None)
+        self.laid.pop(key, None)
         self.has_kept_wire.discard(key)
         rip_up(self.rec, key, self.indexed, self.solid, self.dust_owner)
         self.paths.pop(key, None)
+
+    def rip_branch(self, job: _RouteJob, around: list[Pos]) -> None:
+        """Rip the job's branch nearest any of around, with the branches that hang off it; keep the rest.
+
+        Goes through a whole rip and lays the rest again, as other jobs' supports can be mixed up in the journal.
+        The job carries on from the ripped sinks when it's next routed, which also puts its repeaters back.
+        A job with no record of its branches, or that would lose a via its other branches cross on, goes whole.
+        """
+        laid = self.laid.get(job.key)
+        if laid is None:
+            self.rip(job.key)
+            return
+
+        def distance(i: int) -> int:
+            return min((abs(c[0] - a[0]) + abs(c[1] - a[1]) + abs(c[2] - a[2]) for c in laid.cells[i] for a in around),
+                       default=1 << 30)
+
+        # On a tie the later branch: fewer can hang off it.
+        nearest = min(reversed(range(len(laid.paths))), key=distance, default=None)
+        gone, keep = set(laid.paths[nearest]) if nearest is not None else set(), []
+        kept_cells = {job.src}  # sibling branches start here too
+        for i, path in enumerate(laid.paths):
+            if i == nearest:
+                continue
+            if path[0] in gone and path[0] not in kept_cells:
+                gone.update(path)
+            else:
+                keep.append(i)
+                kept_cells.update(path)
+        ripped_via = any(laid.targets[i] in laid.vias for i in range(len(laid.paths)) if i not in keep)
+        self.rip(job.key)
+        if ripped_via or not keep:
+            return
+        paths, cells = [], []
+        try:
+            with self.rec.recording(job.key):
+                for i in keep:
+                    mark = len(self.rec.journals[job.key])
+                    _lay_redstone_path(self.ws, self.solid, self.dust_owner, laid.paths[i], job.net_id,
+                                       opaque_support_block=job.support_block,
+                                       inverted_cells=self.inverted_cells,
+                                       goal=laid.targets[i],
+                                       terminal_positions=self.terminal_positions)
+                    paths.append(laid.paths[i])
+                    cells.append(self._cells_since(job.key, mark))
+        except ValueError:  # the world moved on around it
+            self.rip(job.key)
+            return
+        targets = [laid.targets[i] for i in keep]
+        sinks = [t for t in targets if t in laid.sinks]
+        self.kept[job.key] = _KeptBranches(paths, laid.vias, laid.vias, laid.leads,
+                                           [*sinks, *(s for s in laid.sinks if s not in sinks)],
+                                           len(laid.vias) + len(sinks), targets, cells)
+        self.has_kept_wire.add(job.key)
+
+    def _cells_since(self, key: str, mark: int) -> frozenset[Pos]:
+        return frozenset(e[2] for e in self.rec.journals[key][mark:] if e[0] == "block")
 
     def route_job(self, job: _RouteJob, job_blocked: frozenset[Pos], first: tuple[Pos, ...] = ()) -> None:
         rec, ws = self.rec, self.ws
         kept = self.kept.pop(job.key, None)
         paths: list[list[Pos]] = kept.paths if kept else []
+        path_targets: list[Pos] = kept.targets if kept else []
+        path_cells: list[frozenset[Pos]] = kept.cells if kept else []
         net_seeds = [pos for pos, owner in self.dust_owner.items()
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
         reached_vias: list[Pos] = kept.reached_vias if kept else []
@@ -810,9 +880,11 @@ class _GreedyRouter:
             sinks = sorted([*job.sinks, *leads],
                            key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
             sinks = [*first, *(p for p in sinks if p not in first)]
-        for dst_index, dst in enumerate([*vias, *sinks]):
+        targets = [*vias, *sinks]
+        for dst_index, dst in enumerate(targets):
             if kept and dst_index < kept.next_target:
                 continue
+            status(f"{job.key} target {dst_index + 1}/{len(targets)}")
             pending = frozenset(job.sinks) & frozenset(sinks[max(0, dst_index - len(vias)):])
             tree_seeds = net_seeds + [pos for path in paths for pos in path]
             start = job.src
@@ -835,7 +907,7 @@ class _GreedyRouter:
                 saved = self.resume.path_for(job.key, dst) if self.resume else None
                 try:
                     try:
-                        def search() -> list[Pos]:
+                        def search(stagnation: int = -1) -> list[Pos]:
                             return _find_wire_path(
                                 ws, self.solid, self.dust_owner,
                                 start, dst, job.net_id,
@@ -848,19 +920,32 @@ class _GreedyRouter:
                                 blocked=frozenset(blocked | trunk),
                                 seed_depths=seed_depths,
                                 pending_sinks=pending,
+                                stagnation=stagnation,
                                 **job.search_kwargs,
                             )
+
+                        def search_tight_first() -> list[Pos]:
+                            # Failing fast is cheaper than searching hard while a rip could still make room.
+                            try:
+                                return search(_ROUTE_STAGNATION_FIRST)
+                            except ValueError:
+                                if dst in leads or (self.rips_blockers and dst in job.sinks
+                                                    and dst not in self.sinks_cleared.get(job.key, ())):
+                                    raise
+                                rollback(rec, job.key, mark)  # a failed search marks its way with lamps
+                                return search()
 
                         path = saved
                         if path is None:
                             try:
-                                path = search()
+                                path = search_tight_first()
                             except ValueError:
                                 if start == job.src:
                                     raise
                                 start, trunk = job.src, frozenset()  # past the via there's no way on: from the whole tree
                                 tree_seeds = net_seeds + [pos for p in paths for pos in p]
-                                path = search()
+                                rollback(rec, job.key, mark)
+                                path = search_tight_first()
                     finally:
                         if time.monotonic() - search_started >= _LOG_SLOW_SEARCH_SECONDS:
                             debug(f"[wire] {job.key}: slow search, {time.monotonic() - search_started:.1f}s, "
@@ -907,7 +992,8 @@ class _GreedyRouter:
                     if dst not in leads:
                         if dst in job.sinks:
                             rollback(rec, job.key, mark)
-                            self.kept[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, dst_index)
+                            self.kept[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, dst_index,
+                                                               path_targets, path_cells)
                             self.has_kept_wire.add(job.key)
                         raise
                     rollback(rec, job.key, mark)
@@ -919,6 +1005,8 @@ class _GreedyRouter:
             if dst in vias:
                 reached_vias.append(dst)
             paths.append(path)
+            path_targets.append(dst)
+            path_cells.append(self._cells_since(job.key, mark))
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
@@ -937,6 +1025,7 @@ class _GreedyRouter:
         if touching:
             raise LayConflict(f"Net '{job.net_id}': wire powers a gate's block at {touching[:4]} (gate contact)", tuple(touching))
         self.paths[job.key] = (job.net_id, paths)
+        self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         self.has_kept_wire.discard(job.key)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
@@ -982,13 +1071,14 @@ class _GreedyRouter:
                 job_blocked |= stretch
             except ValueError:
                 goal = self.failed_goal.get(job.key)
+                already_first = False  # nothing routed before it, so routing it first is the same search again
                 if job.key in self.kept:
                     cleared = self.sinks_cleared.setdefault(job.key, set())
-                    if goal not in cleared:
+                    if self.rips_blockers and goal not in cleared:
                         cleared.add(goal)  # run() rips around it and carries on from this sink
                         raise
-                    del self.kept[job.key]
-                if goal is None or goal not in job.sinks or goal in first or len(first) >= len(job.first) + _SINK_RETRIES:
+                    already_first = not self.kept.pop(job.key).paths
+                if already_first or goal is None or goal not in job.sinks or goal in first or len(first) >= len(job.first) + _SINK_RETRIES:
                     raise
                 self._undo_job(job.key, mark)
                 first = (*first, goal)
@@ -1023,8 +1113,10 @@ class _GreedyRouter:
         rip_blockers: False skips the rip-around-a-failed-sink layer.
         on_done(i, job): called after each job's attempt, i its 1-based position in jobs.
         """
+        self.rips_blockers = rip_blockers
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
+        by_key = {job.key: job for job in jobs}
         queue = deque(enumerate(jobs, 1))
         cleared_for: dict[str, set[Pos]] = {}  # job key -> sinks whose blockers were ripped
         requeued: set[str] = set()
@@ -1065,10 +1157,10 @@ class _GreedyRouter:
                             if rip_blockers else []
                         requeued.add(job.key)
                         if victims:
-                            log(f"{label} {job.key}: {e}; keeping its branches, ripping {', '.join(victims)} "
-                                f"and retrying that sink")
+                            log(f"{label} {job.key}: {e}; keeping its branches, ripping a branch of "
+                                f"{', '.join(victims)} and retrying that sink")
                             for v in victims:
-                                self.rip(v)
+                                self.rip_branch(by_key[v], [goal])
                                 ripped.add(v)
                             queue = deque(entry for entry in queue if entry[1].key not in victims)
                             queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
@@ -1087,9 +1179,9 @@ class _GreedyRouter:
                     if victims and not isinstance(e, LayConflict):
                         cleared_for.setdefault(job.key, set()).add(goal)
                         requeued.add(job.key)
-                        log(f"{label} {job.key}: {e}; ripping {', '.join(victims)} and retrying")
+                        log(f"{label} {job.key}: {e}; ripping a branch of {', '.join(victims)} and retrying")
                         for v in victims:
-                            self.rip(v)
+                            self.rip_branch(by_key[v], [goal, job.src])
                             ripped.add(v)
                         queue.appendleft((i, job))
                         queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
@@ -1100,9 +1192,9 @@ class _GreedyRouter:
                     if wider:
                         escalated.add(job.key)
                         requeued.add(job.key)
-                        log(f"{label} {job.key}: {e}; ripping {len(wider)} nets around {where} and retrying")
+                        log(f"{label} {job.key}: {e}; ripping a branch of {len(wider)} nets around {where} and retrying")
                         for v in wider:
-                            self.rip(v)
+                            self.rip_branch(by_key[v], [where])
                             ripped.add(v)
                         queue = deque(entry for entry in queue if entry[1].key not in wider)
                         queue.appendleft((i, job))
@@ -1230,23 +1322,24 @@ def _route_all_nets(
     walls = [p for p in placed if p.component.type == ComponentType.CUSTOM
              and (p.component.metadata.get("bank")
                   or p.component.footprint.width >= 2 * p.component.footprint.depth)]  # others are easy to go around
-    router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
-                           frozenset(pin_terminal.values()), resume=resume,
-                           gate_cells=frozenset(_component_interior(placed)))
-    jobs = [
-        _RouteJob(
-            key=net.net_id, net_id=net.net_id,
-            src=_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
-            sinks=[_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks],
-            bounds=ws_bounds,
-            protected=keepouts.for_net(net.net_id),
-            terminals=all_terminals.get(net.net_id, set()),
-            support_block=WOOLS[i % len(WOOLS)],
-            via=_wall_vias(net, pin_terminal, walls),
-            lead=_bank_pin_leads(net, pin_terminal, walls, macros),
-        )
-        for i, net in enumerate(sorted_nets, 1)
-    ]
+    with phase("[wire] preparing nets"):
+        router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
+                               frozenset(pin_terminal.values()), resume=resume,
+                               gate_cells=frozenset(_component_interior(placed)))
+        jobs = [
+            _RouteJob(
+                key=net.net_id, net_id=net.net_id,
+                src=_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
+                sinks=[_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks],
+                bounds=ws_bounds,
+                protected=keepouts.for_net(net.net_id),
+                terminals=all_terminals.get(net.net_id, set()),
+                support_block=WOOLS[i % len(WOOLS)],
+                via=_wall_vias(net, pin_terminal, walls),
+                lead=_bank_pin_leads(net, pin_terminal, walls, macros),
+            )
+            for i, net in enumerate(sorted_nets, 1)
+        ]
 
     def snapshot(i: int, job: _RouteJob) -> None:
         if snapshot_dir is not None and i % 10 == 0:
@@ -1254,7 +1347,7 @@ def _route_all_nets(
             save_schematic_artifact(f"net_{i:03d}_{safe_id}.litematic", workspace, snapshot_dir)
 
     failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot)
-    print(f"[wire] done ({len(jobs)} nets, {len(failures)} failed)")
+    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed)")
     if not macros:
         failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
                                         frozenset(_component_interior(placed)), deadline)
@@ -1276,7 +1369,10 @@ def _repair_faulty_nets(
     for _ in range(_REPAIR_ROUNDS):
         spec = {job.key: (job.src, job.sinks) for job in jobs if job.key not in failed}
         faults: dict[str, set[Pos]] = {}
-        for v in verify_signals(router.region, spec, router.dust_owner, component_cells):
+        with ProgressBar("[repair] verify", len(spec)) as bar:
+            violations = verify_signals(router.region, spec, router.dust_owner, component_cells,
+                                        on_net=lambda net_id: bar.update(info=net_id))
+        for v in violations:
             # Of a short's two nets, moving the later one disturbs the least.
             key = max((n for n in v.nets if n in by_key), key=order.__getitem__, default=None)
             if key is not None and v.kind != "unsupported":
@@ -1595,8 +1691,8 @@ def _route_all_nets_negotiated(
                     raise RuntimeError(f"Routing failed for net {net_id}: {e}") from e
                 failures.append((net_id, e))
     for net_id, e in failures:
-        print(f"[error] unrouted net {net_id}: {e}")
-    print(f"[wire] done ({len(order)} nets, {len(failures)} failed)")
+        log(f"[error] unrouted net {net_id}: {e}")
+    log(f"[wire] done ({len(order)} nets, {len(failures)} failed)")
     return failures, inverted_cells
 
 
@@ -1618,9 +1714,9 @@ def _report_signal_violations(
         violations = verify_signals(workspace, spec, dust_owner, component_cells,
                                     on_net=lambda net_id: bar.update(info=net_id))
     for violation in violations:
-        print(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
+        log(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
     if violations:
-        print(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
+        log(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
     return violations
 
 
@@ -1689,8 +1785,8 @@ def _report_flat_violations(
         violations = verify_signals(workspace, spec, owner, frozenset(hidden),
                                     on_net=lambda net_id: bar.update(info=net_id))
     for violation in violations:
-        print(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
-    print(f"[verify] {len(violations)} violation(s) in {len(spec)} flattened nets through {len(stamps)} macros")
+        log(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
+    log(f"[verify] {len(violations)} violation(s) in {len(spec)} flattened nets through {len(stamps)} macros")
     return violations
 
 
@@ -1700,12 +1796,13 @@ def _report_unsupported_blocks(
         component_cells: frozenset[tuple[int, int, int]],
 ) -> None:
     """Print verify_support hits: dust/repeaters/torches with nothing under (or behind) them."""
-    violations = verify_support(workspace, dust_owner, component_cells)
+    with phase("[verify] support"):
+        violations = verify_support(workspace, dust_owner, component_cells)
     for violation in violations:
         block = workspace[violation.pos]
-        print(f"[verify] unsupported {block.id} {sorted(violation.nets)} at {violation.pos}")
+        log(f"[verify] unsupported {block.id} {sorted(violation.nets)} at {violation.pos}")
     if violations:
-        print(f"[verify] {len(violations)} unsupported block(s)")
+        log(f"[verify] {len(violations)} unsupported block(s)")
 
 
 _SEQUENTIAL = frozenset({ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH})
@@ -1756,6 +1853,9 @@ def _net_wire_ticks(
     return ticks
 
 
+_SETUP_TICKS = 1  # data settled at a flip-flop before its clock rises
+
+
 def _gate_delay(c: Component) -> int:
     return SCHEMATIC_MAP[c.type].propagation_delay_ticks if c.type in SCHEMATIC_MAP else 0
 
@@ -1766,6 +1866,7 @@ def _compute_critical_path(
         workspace: Region,
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         macros: dict[str, Macro] | None = None,
+        probed: set[str] = frozenset(),
 ) -> int:
     """Repeaters/torches on each net's deepest branch, topo-sort DP; returns the critical path in ticks."""
     from collections import deque
@@ -1825,7 +1926,7 @@ def _compute_critical_path(
         nid = queue.popleft()
         processed += 1
         if nid.endswith("\x00q"):
-            out_t = 0  # registered Q: always t=0
+            out_t = _gate_delay(comp_by_id[nid[:-2]])  # clock to Q, from the flip-flop's own clock edge
         elif nid in comp_by_id:
             out_t = arrival[nid] + _gate_delay(comp_by_id[nid])
         else:
@@ -1839,7 +1940,7 @@ def _compute_critical_path(
                 queue.append(sink_id)
 
     if processed < len(all_nodes):
-        print("[timing] WARNING: cycle detected in component graph — path may be incomplete")
+        log("[timing] WARNING: cycle detected in component graph — path may be incomplete")
 
     # Critical endpoints: OUTPUT_PINs and DFF/DFFE/DLATCH real nodes (setup-time sinks), and registers in macros.
     # Fall back to all real component nodes if none exist.
@@ -1849,7 +1950,13 @@ def _compute_critical_path(
                    ] or [arrival[c.id] for c in comp.components if c.id not in macro_of]
     for cid, m in macro_of.items():
         endpoints += [arrival[_macro_pin(cid, pin)] + ticks for pin, ticks in m.setup.items()]
-    return max(endpoints)
+    # A print reads these at the clock edge, even if nothing else uses them.
+    endpoints += [arrival[cid] + _gate_delay(comp_by_id[cid]) for cid in probed
+                  if comp_by_id[cid].type not in _SEQUENTIAL and comp_by_id[cid].type != ComponentType.INPUT_PIN]
+    # Launch and capture clocks differ by at most the clock wire: the slowest branch against none.
+    skew = max((net_ticks[n.net_id] for n in comp.nets
+                if any(s.pin_name == "C" and comp_by_id[s.component_id].type in _SEQUENTIAL for s in n.sinks)), default=0)
+    return max(endpoints) + skew + _SETUP_TICKS
 
 
 def _construct_clock_region(
@@ -1857,7 +1964,7 @@ def _construct_clock_region(
         critical_path_ticks: int,
         arm_wire_length: int = 4
 ) -> Region:
-    num_repeaters = ceil(critical_path_ticks // _REPEATER_MAX_DELAY / 2) * 2
+    num_repeaters = ceil(critical_path_ticks / _REPEATER_MAX_DELAY / 2) * 2  # period = 4 ticks per repeater
     region_depth = num_repeaters + arm_wire_length + 2  # repeaters split across sides, 2 blocks for each repeater for connecting
     region_width = 4
     region_height = 2
@@ -1925,6 +2032,7 @@ def build_litematic_from_component_list(
         macro_headroom: int = 32,
         io_lane_pins: bool = True,
         resume: ResumeStore | None = None,
+        probes: list[dict] | None = None,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""
     if macros:  # an array is a wall across the layout: wires get past it overhead
@@ -1949,15 +2057,16 @@ def build_litematic_from_component_list(
         )
     elif resume is not None and resume.load_placed(place_seed) is not None:
         placed = resume.load_placed(place_seed)
-        print(f"[resume] placement from {resume.dir}")
+        log(f"[resume] placement from {resume.dir}")
     elif placer == "poisson":
-        placed = _poisson_placement(
-            comp.components, comp.nets,
-            base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
-            routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
-            seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
-            macro_channel=macro_channel, macro_east_room=macro_east_room, io_lane_pins=io_lane_pins,
-        )
+        with phase("[place]"):
+            placed = _poisson_placement(
+                comp.components, comp.nets,
+                base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
+                routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
+                seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
+                macro_channel=macro_channel, macro_east_room=macro_east_room, io_lane_pins=io_lane_pins,
+            )
     else:
         placed = _optimize_placement(
             comp.components, comp.nets, y_level,
@@ -1992,7 +2101,7 @@ def build_litematic_from_component_list(
                               if p.component.metadata.get("bank"))])
     else:
         width, height, depth = workspace_size
-    print(f"[layout] workspace {width}x{height}x{depth}")
+    log(f"[layout] workspace {width}x{height}x{depth}")
 
     output_layer_z = 0
     workspace_depth = depth
@@ -2007,26 +2116,27 @@ def build_litematic_from_component_list(
     io_bounds = ws_bounds
     ext_bounds = (0, 0, 0, width - 1, height - 1, workspace_depth - 1)
 
-    ref_mc_version, ref_lm_version, ref_lm_sub = _place_gate_templates(
-        workspace, placed, solid, schematics_dir, dust_owner, macros,
-    )
-    const_positions = _place_const_sources(workspace, placed, solid)
-    max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
-    pin_world_map, pin_terminal, terminal_approach = _compute_pin_maps(placed)
-    io_repeater_cells, output_repeater_lookup, io_signs, io_fixtures = _place_io_repeaters(
-        workspace, placed, solid, pin_world_map, io_bounds, clock_pin)
-    output_component_ids = {c.id for c in comp.components if c.type == ComponentType.OUTPUT_PIN}
-    net_id_by_output_endpoint: dict[tuple[str, str], str] = {
-        (sink.component_id, sink.pin_name): net.net_id
-        for net in work_nets
-        for sink in net.sinks
-        if sink.component_id in output_component_ids
-    }
-    footprint_blocked = _build_footprint_blocked(
-        placed, pin_terminal, io_repeater_cells, const_positions, io_fixtures, block_output_lamps=not output_pin_targets,
-        envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
-    )
-    all_terminals = _build_terminal_map(work_nets, pin_terminal)
+    with phase("[layout] stamping gates"):
+        ref_mc_version, ref_lm_version, ref_lm_sub = _place_gate_templates(
+            workspace, placed, solid, schematics_dir, dust_owner, macros,
+        )
+        const_positions = _place_const_sources(workspace, placed, solid)
+        max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
+        pin_world_map, pin_terminal, terminal_approach = _compute_pin_maps(placed)
+        io_repeater_cells, output_repeater_lookup, io_signs, io_fixtures = _place_io_repeaters(
+            workspace, placed, solid, pin_world_map, io_bounds, clock_pin)
+        output_component_ids = {c.id for c in comp.components if c.type == ComponentType.OUTPUT_PIN}
+        net_id_by_output_endpoint: dict[tuple[str, str], str] = {
+            (sink.component_id, sink.pin_name): net.net_id
+            for net in work_nets
+            for sink in net.sinks
+            if sink.component_id in output_component_ids
+        }
+        footprint_blocked = _build_footprint_blocked(
+            placed, pin_terminal, io_repeater_cells, const_positions, io_fixtures, block_output_lamps=not output_pin_targets,
+            envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
+        )
+        all_terminals = _build_terminal_map(work_nets, pin_terminal)
 
     save_artifact("component_layout.json", [
         {
@@ -2052,11 +2162,12 @@ def build_litematic_from_component_list(
         for f in DEFAULT_SNAPSHOT_DIR.iterdir():
             f.unlink()
     snapshot_dir = DEFAULT_SNAPSHOT_DIR if snapshots else None
-    sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
+    with phase("[wire] ordering nets"):
+        sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     if route_passes <= 1:
         if route_workers > 1:
-            print("[wire] --route-workers ignored: needs --route-passes > 1")
+            log("[wire] --route-workers ignored: needs --route-passes > 1")
         routing_failures, inverted_cells, net_paths = _route_all_nets(
             workspace, rec, solid, dust_owner,
             sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
@@ -2106,7 +2217,7 @@ def build_litematic_from_component_list(
     if routing_failures:
         failed = ", ".join(nid for nid, _ in routing_failures)
         if allow_routing_failures:
-            print(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
+            log(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
     if signal_violations and not macros and not allow_routing_failures:
@@ -2135,7 +2246,7 @@ def build_litematic_from_component_list(
         if ext_failures:
             msg = "; ".join(f"{key}: {e}" for key, e in ext_failures)
             if allow_routing_failures:
-                print(f"IGNORING - Pin target routing failed: {msg}")
+                log(f"IGNORING - Pin target routing failed: {msg}")
             else:
                 raise RuntimeError(f"Pin target routing failed: {msg}")
         elif snapshot_dir is not None:
@@ -2156,13 +2267,16 @@ def build_litematic_from_component_list(
         )
         return out_path
 
-    critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros)
-    print(f"[timing] critical path {critical_path_ticks} ticks")
+    with phase("[timing] critical path"):
+        critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
+                                                     probe_components(probes) if probes else frozenset())
+    log(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
-    apply_dust_shapes(workspace)
-    place_io_signs(workspace, io_signs)
-    place_io_fixtures(workspace, io_fixtures)
+    with phase("[finish] dust shapes and signs"):
+        apply_dust_shapes(workspace)
+        place_io_signs(workspace, io_signs)
+        place_io_fixtures(workspace, io_fixtures)
 
     regions = {'main': workspace}
 
@@ -2179,6 +2293,17 @@ def build_litematic_from_component_list(
                         workspace[wx, wy, target[2]] = clock_region[x, y, 0]
             break
 
+    if probes:
+        probe_path = out_path.with_suffix(".probes.json")
+        positions = dict(pin_world_map)
+        positions.update({(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,
+                                                                        p.component.footprint,
+                                                                        _default_io_side(p.component, pin), bounds=io_bounds)
+                          for p in placed if p.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+                          for pin in p.component.pins})
+        tapped = write_probes(probe_path, probes, positions, workspace, list(regions.values()))
+        log(f"[probes] {len(probes)} prints, {tapped} blocks tapped: {probe_path}")
+
     schematic = Schematic(
         name=schematic_name,
         author="MineRTL",
@@ -2192,7 +2317,8 @@ def build_litematic_from_component_list(
     schematic.lm_version = ref_lm_version
     schematic.lm_subversion = ref_lm_sub
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    schematic.save(str(out_path))
+    with phase("[write] saving litematic"):
+        schematic.save(str(out_path))
     return out_path
 
 
@@ -2200,7 +2326,7 @@ def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int
                 cache_dir: Path | None = None, route_deadline: float | None = None, **build_kwargs) -> Macro:
     """Place and route one instance into a Macro, trying placement seeds until it verifies clean."""
     if cache_dir is not None and (cached := load_macro(name, cache_dir)) is not None:
-        print(f"[macro] {name}: cached, footprint {cached.footprint.width}x{cached.footprint.height}x{cached.footprint.depth}")
+        log(f"[macro] {name}: cached, footprint {cached.footprint.width}x{cached.footprint.height}x{cached.footprint.depth}")
         return cached
     n_pins = len(ports)
     gutter, routing_gutter = 6, 6
@@ -2218,10 +2344,10 @@ def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int
                 raise ValueError(f"{len(capture['violations'])} violations, first {capture['violations'][0]}")
             macro = macro_from_capture(name, sub, capture, ports, cells, _gate_delay, _SEQUENTIAL)
         except (RuntimeError, ValueError) as e:
-            print(f"[macro] {name} seed {seed} failed: {e}")
+            log(f"[macro] {name} seed {seed} failed: {e}")
             continue
         fp = macro.footprint
-        print(f"[macro] {name}: {cells} cells, {n_pins} pins, footprint {fp.width}x{fp.height}x{fp.depth} "
+        log(f"[macro] {name}: {cells} cells, {n_pins} pins, footprint {fp.width}x{fp.height}x{fp.depth} "
               f"(seed {seed}, {time.monotonic() - t0:.1f}s)")
         if cache_dir is not None:
             save_macro(macro, cache_dir)

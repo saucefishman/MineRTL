@@ -12,8 +12,9 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
+from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.resume import ResumeStore
-from minecraft_v.progress import set_debug
+from minecraft_v.progress import log, phase, set_debug
 from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION,
     Component,
@@ -81,6 +82,8 @@ def module_to_component_list(module: Module) -> ComponentList:
         components.append(Component(id=port_name, type=comp_type, pins=pins))
 
     for cell_name, cell in module.cells.items():
+        if cell.type in DEBUG_CELLS:
+            continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))
             raise ValueError(
@@ -207,6 +210,9 @@ def main():
     parser.add_argument("--debug", type=_true_or_false, nargs="?", const=True, default=False,
                         help="Log progress and slow searches, save litematic snapshots during routing to "
                              "<artifacts>/snapshots (slow), print A* counters")
+    parser.add_argument("--debug-prints", action=argparse.BooleanOptionalAction, default=None,
+                        help="Keep $write/$display: mark the blocks they read and write <out>.probes.json for MCHPRS "
+                             "/watch and mchprs_headless --probes (default: on, off with --macros)")
     parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=False,
                         help="Route repeated subcircuits once and stamp them; the rest routes around them (default: off; "
                              "needs --placer poisson, ignored with --flat)")
@@ -232,8 +238,10 @@ def main():
     if out_litematic.is_dir():
         raise SystemExit(f"--out-litematic path is a directory: '{args.out_litematic}'")
     out_litematic.parent.mkdir(parents=True, exist_ok=True)
+    # MCHPRS loads a sibling sidecar: one from an older build would read wrong blocks
+    out_litematic.with_suffix(".probes.json").unlink(missing_ok=True)
 
-    with open(args.netlist) as f:
+    with phase("[load] reading netlist"), open(args.netlist) as f:
         netlist = Netlist.model_validate_json(f.read())
 
     schematic_name = args.schematic_name or args.module
@@ -243,6 +251,10 @@ def main():
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
+    debug_prints = not args.macros if args.debug_prints is None else args.debug_prints
+    probes = extract_probes(module) if debug_prints else None
+    if probes and args.macros:
+        raise SystemExit("--debug-prints can't tap inside macros: leave out --macros")
 
     save_build_artifacts(component_list)
 
@@ -269,7 +281,7 @@ def main():
                                io_lane_pins=_MACRO_ROW_TILES != 1)
 
         def report(cls, macro):
-            print(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")
+            log(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")
 
         component_list, macros, instances = extract_macros(component_list, build, _MACRO_FANOUT, _MACRO_MIN_CELLS,
                                                            _MACRO_ROW_TILES,
@@ -277,7 +289,7 @@ def main():
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
                                                            on_class=report)
-        print(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
+        log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")
         if any(c.metadata.get("bank") for c in component_list.components):
             # Gates around a bank stack: what mem and regsbig route clean with. Without banks, the usual auto spacing.
@@ -305,6 +317,7 @@ def main():
                                         flat=args.flat,
                                         macros=macros,
                                         flat_comp=flat_comp,
+                                        probes=probes,
                                         resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))
                                         if args.resume_dir else None,
                                         macro_channel=_MACRO_CHANNEL,
@@ -317,7 +330,7 @@ def main():
                                             ("additional_component_height_spacing", args.y_spacing),
                                         ) if v is not None})
 
-    print(f"Wrote litematic: {out_litematic.resolve()}")
+    log(f"Wrote litematic: {out_litematic.resolve()}")
 
 
 if __name__ == "__main__":
