@@ -303,7 +303,7 @@ def _lay_redstone_path(
                     (delta in _HORIZ_DIRS and dy in (-1, 0, 1))
                 or (i in tower_top and delta == (0, 0) and dy == 1)
             ):
-                raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]}")
+                raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]} (move {i + 1} of {n - 1})")
 
     for i, cell in enumerate(cells):
         if i > 0:  # before the move handlers: this cell may also start a 2x slope, tower or powered drop

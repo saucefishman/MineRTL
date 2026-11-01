@@ -721,6 +721,10 @@ class _RouteJob:
     first: tuple[Pos, ...] = ()    # sinks verify found a fault at, routed first in re-routes
 
 
+_LOG_EVERY_SECONDS = 30.0     # routing progress in the log
+_LOG_SLOW_SEARCH_SECONDS = 5.0
+
+
 class _GreedyRouter:
     """Greedy, journaled routing of _RouteJobs with the retry layers that make it robust:
 
@@ -791,21 +795,27 @@ class _GreedyRouter:
             attempts = 0
             while True:
                 mark = len(rec.journals[job.key])
+                search_started = time.monotonic()
                 try:
-                    path = _find_wire_path(
-                        ws, self.solid, self.dust_owner,
-                        start, dst, job.net_id,
-                        job.bounds, self.max_bridge_y,
-                        tree_seeds=tree_seeds,
-                        protected=job.protected,
-                        footprint_blocked=self.footprint_blocked,
-                        inverted_cells=frozenset(self.inverted_cells),
-                        terminal_positions=self.terminal_positions,
-                        blocked=frozenset(blocked),
-                        seed_depths=seed_depths,
-                        pending_sinks=pending,
-                        **job.search_kwargs,
-                    )
+                    try:
+                        path = _find_wire_path(
+                            ws, self.solid, self.dust_owner,
+                            start, dst, job.net_id,
+                            job.bounds, self.max_bridge_y,
+                            tree_seeds=tree_seeds,
+                            protected=job.protected,
+                            footprint_blocked=self.footprint_blocked,
+                            inverted_cells=frozenset(self.inverted_cells),
+                            terminal_positions=self.terminal_positions,
+                            blocked=frozenset(blocked),
+                            seed_depths=seed_depths,
+                            pending_sinks=pending,
+                            **job.search_kwargs,
+                        )
+                    finally:
+                        if time.monotonic() - search_started >= _LOG_SLOW_SEARCH_SECONDS:
+                            log(f"[wire] {job.key}: slow search, {time.monotonic() - search_started:.1f}s, "
+                                f"target {dst_index + 1}/{len(vias) + len(sinks)}")
                     if start != job.src and path[0] != start:
                         # A search may begin beside its start. Past a via, the repeater walk needs
                         # the link back to it, or it counts signal from nothing.
@@ -935,8 +945,16 @@ class _GreedyRouter:
         requeued: set[str] = set()
         ripped: set[str] = set()
         escalated: set[str] = set()
+        started = last_log = time.monotonic()
+        attempts = 0
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
+                now = time.monotonic()
+                if now - last_log >= _LOG_EVERY_SECONDS:
+                    last_log = now
+                    log(f"{label} {bar.n}/{len(jobs)} started, {attempts} attempts, {len(ripped)} ripped, "
+                        f"{len(failures)} failed, {len(queue)} queued ({now - started:.0f}s)")
+                attempts += 1
                 i, job = queue.popleft()
                 bar.update(n=0 if job.key in ripped or job.key in requeued else 1, info=job.key)
                 if deadline is not None and time.monotonic() > deadline:
