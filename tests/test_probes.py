@@ -1,5 +1,6 @@
 """$write/$display through yosys and a full build: format parsing, stripping, the sidecar and its marker blocks."""
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -33,12 +34,12 @@ def test_parse_format():
         parse_format("{0:> t}")
 
 
-def build(tmp_path, *flags, design=DESIGN):
+def build(tmp_path, *flags, design=DESIGN, env=None):
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src/main.v").write_text(design)
     out = tmp_path / "out.litematic"
     subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--artifacts-dir", tmp_path / "art", "--no-settle",
-                    "--out-litematic", out, *flags], cwd=ROOT, check=True)
+                    "--out-litematic", out, "--no-server-clock", *flags], cwd=ROOT, check=True, env=env)
     return out
 
 
@@ -86,3 +87,39 @@ def test_server_clock_lever(tmp_path):
     assert "clock" not in schematic.regions
     lever = schematic.regions["main"][tuple(sidecar["clock"]["pos"])]
     assert lever.id == "minecraft:lever" and lever["powered"] == "false"
+
+
+def synth_auto(tmp_path, headless, design=QUIET):
+    """synth.sh with no clock flag, seeing `headless` as MCHPRS's binary."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src/main.v").write_text(design)
+    out = tmp_path / "out.litematic"
+    subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--artifacts-dir", tmp_path / "art", "--no-settle",
+                    "--out-litematic", out], cwd=ROOT, check=True, env={**os.environ, "MCHPRS_HEADLESS": str(headless)})
+    return out
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_server_clock_automatic_with_mchprs(tmp_path):
+    headless = tmp_path / "headless"
+    headless.write_text("#!/bin/sh\n")
+    headless.chmod(0o755)
+    out = synth_auto(tmp_path, headless)
+    assert json.loads(out.with_suffix(".server.json").read_text())["clock"]["half_period_ticks"] > 0
+    assert "clock" not in Schematic.load(str(out)).regions
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_generated_clock_without_mchprs(tmp_path):
+    out = synth_auto(tmp_path, tmp_path / "missing")
+    assert not out.with_suffix(".server.json").exists()
+    assert "clock" in Schematic.load(str(out)).regions
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_server_clock_without_clock_pin(tmp_path):
+    headless = tmp_path / "headless"
+    headless.write_text("#!/bin/sh\n")
+    headless.chmod(0o755)
+    out = synth_auto(tmp_path, headless, design="module main(input a, output o);\n    assign o = ~a;\nendmodule\n")
+    assert out.exists() and not out.with_suffix(".server.json").exists()

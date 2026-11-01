@@ -173,7 +173,10 @@ def main():
                         help="Input pin to drive with a generated clock; auto: _clk or clk if present; none: no clock")
     parser.add_argument("--server-clock", type=int, nargs="?", const=0, default=None, metavar="HALF_PERIOD",
                         help="Save the space of the generated clock: give the clock pin a lever, and MCHPRS toggles "
-                             "it every HALF_PERIOD redstone ticks (default: the generated clock's period)")
+                             "it every HALF_PERIOD redstone ticks (default: from the critical path, the generated "
+                             "clock's period). synth.sh turns this on when it finds mchprs_headless")
+    parser.add_argument("--no-server-clock", dest="server_clock", action="store_const", const=None,
+                        help="Generate the clock even if synth.sh finds mchprs_headless")
     parser.add_argument("--route-passes", type=int, default=None,
                         help="Routing passes incl. final hard pass; 1 = single greedy pass (default: _ROUTE_MAX_PASSES)")
     parser.add_argument("--wire-timeout", type=float, default=None,
@@ -277,8 +280,8 @@ def main():
         raise SystemExit(f"Input pin '{generate_clock_pin}' for clock generation does not exist. Available pins: "
                          f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")
 
-    if args.server_clock is not None and generate_clock_pin is None:
-        raise SystemExit("--server-clock needs a clock pin: name it with --generate-clock")
+    if args.server_clock is not None and args.generate_clock == "none":
+        raise SystemExit("--server-clock needs a clock pin, but --generate-clock is none")
     if args.server_clock is not None and args.server_clock < 0:
         raise SystemExit("--server-clock half period can't be negative")
 

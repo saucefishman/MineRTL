@@ -102,6 +102,21 @@ if [[ -f "$default_pin_targets_json" && "$has_output_pin_targets_flag" == false 
     set -- "$@" --output-pin-targets-json "$default_pin_targets_json"
 fi
 
+# With MCHPRS around it can drive the clock, which saves the generated clock's space. An explicit clock flag wins.
+headless="${MCHPRS_HEADLESS:-${MCHPRS_DIR:-$HOME/Projects/MCHPRS}/target/release/mchprs_headless}"
+has_clock_flag=false
+for arg in "$@"; do
+    case "$arg" in
+        --server-clock|--server-clock=*|--no-server-clock|--generate-clock|--generate-clock=*)
+            has_clock_flag=true
+            break
+            ;;
+    esac
+done
+if [[ -x "$headless" && "$has_clock_flag" == false ]]; then
+    set -- "$@" --server-clock
+fi
+
 # Spinner with the current yosys pass, until killed.
 yosys_log="${artifacts_dir}/yosys.log"
 yosys_err="${artifacts_dir}/yosys.err"
@@ -172,7 +187,6 @@ uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
 # Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it).
 # Optional: needs MCHPRS's mchprs_headless.
 if [[ "$settle" == true ]]; then
-    headless="${MCHPRS_HEADLESS:-${MCHPRS_DIR:-$HOME/Projects/MCHPRS}/target/release/mchprs_headless}"
     if [[ -x "$headless" ]]; then
         MCHPRS_HEADLESS="$headless" uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic"
     else
