@@ -47,8 +47,12 @@ def parse_format(fmt: str) -> list[dict]:
                 tokens.append({"text": text})
                 text = ""
             justify, pad, min_width, radix, sign = field.groups()
-            tokens.append({"bits": list(range(next_bit, next_bit + int(width))), "radix": "x" if radix == "h" else radix, "signed": sign == "s",
-                           "width": int(min_width or 0), "pad": pad, "justify": justify})
+            bits = list(range(next_bit, next_bit + int(width)))
+            if radix == "c" and len(bits) > 8:  # %s: one field per byte, first character in the top byte
+                tokens += [{"bits": bits[low:low + 8], "radix": "c"} for low in reversed(range(0, len(bits), 8))]
+            else:
+                tokens.append({"bits": bits, "radix": "x" if radix == "h" else radix, "signed": sign == "s",
+                               "width": int(min_width or 0), "pad": pad, "justify": justify})
             next_bit += int(width)
             i = end + 1
     if text:

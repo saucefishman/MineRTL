@@ -27,6 +27,7 @@ def test_parse_format():
     tokens = parse_format("r{4:=0d-u}{{}}{8:>02h-s}\n")
     assert [t.get("text") for t in tokens] == ["r", None, "{}", None, "\n"]
     assert tokens[3]["bits"] == list(range(4, 12)) and tokens[3]["width"] == 2 and tokens[3]["signed"]
+    assert [t["bits"] for t in parse_format("{16:> c}")] == [list(range(8, 16)), list(range(8))]
     with pytest.raises(ValueError):
         parse_format("{0:> t}")
 
