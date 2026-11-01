@@ -13,6 +13,7 @@ from minecraft_v.placement_engine import build_litematic_from_component_list, pa
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
+from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX
 from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.progress import log, phase, set_debug
 from minecraft_v.placement_engine.ir import (
@@ -170,6 +171,12 @@ def main():
     parser.add_argument("--output-pin-targets-json", type=str, default=None)
     parser.add_argument("--generate-clock", type=str, default="auto",
                         help="Input pin to drive with a generated clock; auto: _clk or clk if present; none: no clock")
+    parser.add_argument("--server-clock", type=int, nargs="?", const=0, default=None, metavar="HALF_PERIOD",
+                        help="Save the space of the generated clock: give the clock pin a lever, and MCHPRS toggles "
+                             "it every HALF_PERIOD redstone ticks (default: from the critical path, the generated "
+                             "clock's period). synth.sh turns this on when its mchprs_headless has --run-clock")
+    parser.add_argument("--no-server-clock", dest="server_clock", action="store_const", const=None,
+                        help="Generate the clock even if synth.sh finds mchprs_headless")
     parser.add_argument("--route-passes", type=int, default=None,
                         help="Routing passes incl. final hard pass; 1 = single greedy pass (default: _ROUTE_MAX_PASSES)")
     parser.add_argument("--wire-timeout", type=float, default=None,
@@ -211,7 +218,7 @@ def main():
                         help="Log progress and slow searches, save litematic snapshots during routing to "
                              "<artifacts>/snapshots (slow), print A* counters")
     parser.add_argument("--debug-prints", action=argparse.BooleanOptionalAction, default=None,
-                        help="Keep $write/$display: mark the blocks they read and write <out>.probes.json for MCHPRS "
+                        help="Keep $write/$display: mark the blocks they read and write <out>.server.json for MCHPRS "
                              "/watch and mchprs_headless --probes (default: on, off with --macros)")
     parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=False,
                         help="Route repeated subcircuits once and stamp them; the rest routes around them (default: off; "
@@ -239,7 +246,8 @@ def main():
         raise SystemExit(f"--out-litematic path is a directory: '{args.out_litematic}'")
     out_litematic.parent.mkdir(parents=True, exist_ok=True)
     # MCHPRS loads a sibling sidecar: one from an older build would read wrong blocks
-    out_litematic.with_suffix(".probes.json").unlink(missing_ok=True)
+    out_litematic.with_suffix(SERVER_FILE_SUFFIX).unlink(missing_ok=True)
+    out_litematic.with_suffix(".probes.json").unlink(missing_ok=True)  # the old name
 
     with phase("[load] reading netlist"), open(args.netlist) as f:
         netlist = Netlist.model_validate_json(f.read())
@@ -271,6 +279,11 @@ def main():
     if generate_clock_pin is not None and generate_clock_pin not in (c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN):
         raise SystemExit(f"Input pin '{generate_clock_pin}' for clock generation does not exist. Available pins: "
                          f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")
+
+    if args.server_clock is not None and args.generate_clock == "none":
+        raise SystemExit("--server-clock needs a clock pin, but --generate-clock is none")
+    if args.server_clock is not None and args.server_clock < 0:
+        raise SystemExit("--server-clock half period can't be negative")
 
     macros = None
     flat_comp = component_list
@@ -318,6 +331,7 @@ def main():
                                         macros=macros,
                                         flat_comp=flat_comp,
                                         probes=probes,
+                                        server_clock=args.server_clock,
                                         resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))
                                         if args.resume_dir else None,
                                         macro_channel=_MACRO_CHANNEL,

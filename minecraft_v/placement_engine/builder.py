@@ -13,7 +13,8 @@ from pathlib import Path
 
 from litemapy import BlockState, Region, Schematic
 
-from minecraft_v.placement_engine.probes import probe_components, write_probes
+from minecraft_v.placement_engine.probes import probe_components, resolve_probes
+from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX, schematic_bounds, write_server_file
 from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
@@ -219,12 +220,14 @@ def _place_io_repeaters(
         pin_world_map: dict[tuple[str, str], tuple[int, int, int]],
         ws_bounds: tuple[int, int, int, int, int, int],
         clock_pin: str | None = None,
+        clock_lever: bool = False,
 ) -> tuple[set[tuple[int, int, int]], dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]],
            list[tuple[tuple[int, int, int], tuple[int, int], str]],
            list[tuple[tuple[int, int, int], tuple[int, int], bool]]]:
     """Place I/O repeaters and return (all repeater cells, output target lookup, sign specs, fixture specs).
 
     The clock input (`clock_pin`, or a pin named `clk`) gets no lever: it is driven by a clock.
+    With `clock_lever` it does, for the server to toggle.
     """
     io_repeater_cells: set[tuple[int, int, int]] = set()
     io_signs: list[tuple[tuple[int, int, int], tuple[int, int], str]] = []
@@ -249,7 +252,7 @@ def _place_io_repeaters(
             nx, _, nz = _SIDE_NORMAL[side.value]
             io_signs.append((cell, (nx, nz), pin.name))
             is_input = c.type == ComponentType.INPUT_PIN
-            if not (is_input and c.id in (clock_pin, 'clk')):
+            if not (is_input and c.id in (clock_pin, 'clk')) or (clock_lever and c.id == clock_pin):
                 io_fixtures.append((cell, (nx, nz), is_input))
             if c.type == ComponentType.OUTPUT_PIN:
                 side_name = side.value
@@ -2035,8 +2038,13 @@ def build_litematic_from_component_list(
         io_lane_pins: bool = True,
         resume: ResumeStore | None = None,
         probes: list[dict] | None = None,
+        server_clock: int | None = None,
 ) -> Path:
-    """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""
+    """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro).
+
+    server_clock: instead of generating `clock_pin`'s clock, give it a lever for MCHPRS to toggle every this many
+    ticks (0: the generated clock's period for this critical path).
+    """
     if macros:  # an array is a wall across the layout: wires get past it overhead
         routing_headroom = max(routing_headroom, macro_headroom)
         bridge_height = max(bridge_height, macro_headroom - 4)
@@ -2126,7 +2134,7 @@ def build_litematic_from_component_list(
         max_bridge_y = _compute_max_bridge_y(placed, base_y, bridge_height)
         pin_world_map, pin_terminal, terminal_approach = _compute_pin_maps(placed)
         io_repeater_cells, output_repeater_lookup, io_signs, io_fixtures = _place_io_repeaters(
-            workspace, placed, solid, pin_world_map, io_bounds, clock_pin)
+            workspace, placed, solid, pin_world_map, io_bounds, clock_pin, clock_lever=server_clock is not None)
         output_component_ids = {c.id for c in comp.components if c.type == ComponentType.OUTPUT_PIN}
         net_id_by_output_endpoint: dict[tuple[str, str], str] = {
             (sink.component_id, sink.pin_name): net.net_id
@@ -2284,7 +2292,7 @@ def build_litematic_from_component_list(
     regions = {'main': workspace}
 
     for p in placed:
-        if p.component.id == clock_pin:
+        if p.component.id == clock_pin and server_clock is None:
             target = (p.origin[0], p.origin[1], p.origin[2] + 2)
             clock_region = _construct_clock_region(target, critical_path_ticks)
             regions['clock'] = clock_region
@@ -2296,16 +2304,35 @@ def build_litematic_from_component_list(
                         workspace[wx, wy, target[2]] = clock_region[x, y, 0]
             break
 
+    low, size = schematic_bounds(list(regions.values()))
+    clock_entry = None
+    if server_clock is not None and clock_pin is not None:
+        p = next(p for p in placed if p.component.id == clock_pin)
+        pin = p.component.pins[0]
+        cell = _io_repeater_cell(pin_world_map[(clock_pin, pin.name)], p.origin, p.component.footprint,
+                                 _default_io_side(p.component, pin), bounds=io_bounds)
+        nx, _, nz = _SIDE_NORMAL[_default_io_side(p.component, pin).value]
+        lever = (cell[0] + nx, cell[1] + 1, cell[2] + nz)
+        if workspace[lever].id != "minecraft:lever":
+            raise RuntimeError(f"no room for the server clock lever of '{clock_pin}' at {lever}")
+        half_period = server_clock or max(1, _REPEATER_MAX_DELAY * ceil(critical_path_ticks / _REPEATER_MAX_DELAY / 2))
+        clock_entry = {"pin": clock_pin, "pos": [c - lo for c, lo in zip(lever, low)], "half_period_ticks": half_period}
+        log(f"[clock] server clock on '{clock_pin}': toggles every {half_period} ticks")
+
+    resolved_probes: list[dict] = []
     if probes:
-        probe_path = out_path.with_suffix(".probes.json")
         positions = dict(pin_world_map)
         positions.update({(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,
                                                                         p.component.footprint,
                                                                         _default_io_side(p.component, pin), bounds=io_bounds)
                           for p in placed if p.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
                           for pin in p.component.pins})
-        tapped = write_probes(probe_path, probes, positions, workspace, list(regions.values()))
-        log(f"[probes] {len(probes)} prints, {tapped} blocks tapped: {probe_path}")
+        resolved_probes, tapped = resolve_probes(probes, positions, workspace, low)
+        log(f"[probes] {len(probes)} prints, {tapped} blocks tapped")
+    if resolved_probes or clock_entry:
+        server_path = out_path.with_suffix(SERVER_FILE_SUFFIX)
+        write_server_file(server_path, size, resolved_probes, clock_entry)
+        log(f"[server] {server_path}")
 
     schematic = Schematic(
         name=schematic_name,
