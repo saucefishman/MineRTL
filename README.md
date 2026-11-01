@@ -42,9 +42,10 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
    - `--schematics-dir <dir>`: Sets the directory containing our `.litematic` cell library objects (Default: `schematics`).
    - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).
    - `--allow-routing-failures True`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
-   - `--no-debug-prints`: Removes `$write`/`$display`. By default they stay when they're in a clocked block: blocks they read stand on or hang from lime concrete, and `<out>.probes.json` is written next to the litematic for MCHPRS `/watch` and `mchprs_headless test --probes`. Off with `--macros`. Non-constant `$sformatf` isn't supported by Yosys: use `$display` directly.
+   - `--no-debug-prints`: Removes `$write`/`$display`. By default they stay when they're in a clocked block: blocks they read stand on or hang from lime concrete, and `<out>.server.json` is written next to the litematic for MCHPRS `/watch` and `mchprs_headless test --probes`. Off with `--macros`. Non-constant `$sformatf` isn't supported by Yosys: use `$display` directly.
    - `--output-pin-targets-json <file.json>`: Path to a JSON file explicitly dictating output coordinates. Note: `synth.sh` will _automatically_ use `pin_targets.json` if it finds it in your specific project directory.
    - `--generate-clock`: Select the pin to be the clock pin and automatically generate a redstone clock for it. (Default: `clk`)
+   - `--server-clock [half period]`: No generated clock, which gets long on large circuits: the clock pin gets a lever, and MCHPRS toggles it every that many redstone ticks, read from `<out>.server.json`. (Default half period: the generated clock's period for the critical path.)
 
    Example usage:
 

@@ -44,17 +44,17 @@ def build(tmp_path, *flags, design=DESIGN):
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_prints_stripped_when_off(tmp_path):
-    (tmp_path / "out.probes.json").write_text("{}")
+    (tmp_path / "out.server.json").write_text("{}")
     out = build(tmp_path, "--no-debug-prints")
-    assert out.exists() and not out.with_suffix(".probes.json").exists()
+    assert out.exists() and not out.with_suffix(".server.json").exists()
     assert "$print" not in (tmp_path / "art/netlist.json").read_text()
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_probes_tap_marked_blocks(tmp_path):
     out = build(tmp_path)
-    sidecar = json.loads(out.with_suffix(".probes.json").read_text())
-    assert sidecar["version"] == 1
+    sidecar = json.loads(out.with_suffix(".server.json").read_text())
+    assert sidecar["version"] == 2
     write, display = sidecar["probes"]
     assert write["format"][0]["radix"] == "c" and "pos" in write["enable"]
     assert [t["text"] for t in display["format"] if "text" in t][0] == "a="
@@ -72,6 +72,17 @@ def test_probes_tap_marked_blocks(tmp_path):
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_no_prints_no_sidecar(tmp_path):
-    (tmp_path / "out.probes.json").write_text("{}")
+    (tmp_path / "out.server.json").write_text("{}")
     out = build(tmp_path, design=QUIET)
-    assert out.exists() and not out.with_suffix(".probes.json").exists()
+    assert out.exists() and not out.with_suffix(".server.json").exists()
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_server_clock_lever(tmp_path):
+    out = build(tmp_path, "--server-clock", "50", design=QUIET)
+    sidecar = json.loads(out.with_suffix(".server.json").read_text())
+    assert sidecar["probes"] == [] and sidecar["clock"]["pin"] == "clk" and sidecar["clock"]["half_period_ticks"] == 50
+    schematic = Schematic.load(str(out))
+    assert "clock" not in schematic.regions
+    lever = schematic.regions["main"][tuple(sidecar["clock"]["pos"])]
+    assert lever.id == "minecraft:lever" and lever["powered"] == "false"
