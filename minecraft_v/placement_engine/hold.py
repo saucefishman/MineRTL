@@ -24,6 +24,7 @@ Pos = tuple[int, int, int]
 _SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
 _MAX_DELAY = 4          # a repeater's longest setting
 _HOLD_MARGIN = 6        # ticks data must arrive after the clock pin: a flip-flop locks its master a few ticks after C
+_FASTEST_GATE = 1       # ticks through any cell's fastest path; the library's delay is its slowest, too late for hold
 _ROUNDS = 40            # passes over the failing pins; each one pads every failing path
 _UNREACHED = 1 << 30
 
@@ -89,7 +90,7 @@ class _HoldTiming:
             self.cache[net_id] = wire_arrivals(self.world, src, self.all_terminals - sinks - {src})
         return self.cache[net_id]
 
-    def propagate(self, starts: dict[str, int]) -> tuple[dict, dict]:
+    def propagate(self, starts: dict[str, int], gate: Callable[[str], int]) -> tuple[dict, dict]:
         """Earliest time at each flip-flop pin, and (net, driver) of each flip-flop pin or gate on the way there."""
         into: dict[tuple[str, str], int] = {}
         via: dict = {}
@@ -114,7 +115,7 @@ class _HoldTiming:
                             into[key] = at
                             via[key] = (n.net_id, cid, pos)
                     elif kind != ComponentType.OUTPUT_PIN:
-                        out = at + self.gate(s.component_id)
+                        out = at + gate(s.component_id)
                         if out < best.get(s.component_id, _UNREACHED):
                             best[s.component_id] = out
                             via[s.component_id] = (n.net_id, cid, pos)
@@ -122,12 +123,44 @@ class _HoldTiming:
         return into, via
 
     def margins(self) -> tuple[dict[str, int], dict[tuple[str, str], int], dict]:
-        pins, _ = self.propagate({cid: 1 for cid in self.roots})
+        pins, _ = self.propagate({cid: 1 for cid in self.roots}, self.gate)
         clock = {cid: t for (cid, pin), t in pins.items() if pin == "C"}
-        launches = {cid: t + self.gate(cid) for cid, t in clock.items()}
-        data, via = self.propagate(launches)
+        launches = {cid: t + _FASTEST_GATE for cid, t in clock.items()}
+        data, via = self.propagate(launches, lambda _: _FASTEST_GATE)
         margins = {(c, p): t - clock[c] for (c, p), t in data.items() if c in clock and p != "C"}
         return clock, margins, via
+
+    def min_period(self, clock: dict[str, int]) -> int:
+        """Longest flip-flop to flip-flop time, with each one's own clock arrival: the slowest safe clock period."""
+        inputs: dict[str, list] = defaultdict(list)
+        for n in self.nets.values():
+            for s in n.sinks:
+                inputs[s.component_id].append((n, s))
+
+        def wire(n, s) -> int | None:
+            return self.net_search(n.net_id)[0].get(self.terminals[s.component_id, s.pin_name])
+
+        memo: dict[str, int] = {}
+
+        def out_time(cid: str) -> int:
+            """Latest a cell's output changes after the clock edge reaches the first flip-flop. -1: not from a flip-flop."""
+            if cid in clock:
+                return clock[cid] + self.gate(cid)
+            if cid in memo:
+                return memo[cid]
+            memo[cid] = -1  # stands for no path, should combinational logic ever loop
+            late = max((t + d for n, s in inputs[cid]
+                        for t, d in [(out_time(n.source.component_id), wire(n, s))] if t >= 0 and d is not None), default=-1)
+            memo[cid] = late + self.gate(cid) if late >= 0 else -1
+            return memo[cid]
+
+        worst = 0
+        for cid, capture in clock.items():
+            for n, s in inputs[cid]:
+                t, d = out_time(n.source.component_id), wire(n, s)
+                if s.pin_name != "C" and t >= 0 and d is not None:
+                    worst = max(worst, t + d - capture)
+        return worst
 
     def path_nets(self, pin: tuple[str, str], via: dict) -> list[tuple[str, Pos]]:
         """The earliest data path into a pin, as (net, sink cell), from the pin back to the launching flip-flop."""
@@ -211,17 +244,18 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
     return added
 
 
-def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str]) -> None:
-    """Pad every data path that beats its flip-flop's clock. comp is the flat netlist, terminals its gate pins' cells."""
+def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str]) -> int:
+    """Pad every data path that beats its flip-flop's clock; returns the slowest safe clock period. comp is the flat
+    netlist, terminals its gate pins' cells."""
     if not any(c.type in _SEQUENTIAL for c in comp.components):
-        return
+        return 0
     world = _World(workspace, frozenset(), frozenset(terminals.values()))
     timing = _HoldTiming(world, comp, terminals, failed)
     protected = frozenset(terminals.values())
     counts = {"raised": 0, "new": 0}
     clock, margins, via = timing.margins()
     if not clock:
-        return
+        return 0
     first_bad = sum(m < _HOLD_MARGIN for m in margins.values())
     first_worst = min(margins.values(), default=0)
     total = 0
@@ -251,6 +285,9 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
           f"({counts['raised']} repeaters slowed, {counts['new']} new); {len(left)} left")
     for pin, m in sorted(left.items(), key=lambda kv: kv[1])[:10]:
         print(f"[hold] still short: {pin} margin {m}")
+    period = timing.min_period(clock)
+    print(f"[hold] slowest flip-flop to flip-flop path {period} ticks")
+    return period
 
 
 def flat_terminals(comp: ComponentList, top_terminal: Callable[[str, str], Pos],

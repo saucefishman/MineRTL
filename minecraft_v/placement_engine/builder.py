@@ -1867,6 +1867,7 @@ def _compute_critical_path(
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         macros: dict[str, Macro] | None = None,
         probed: set[str] = frozenset(),
+        flat_period: int = 0,
 ) -> int:
     """Repeaters/torches on each net's deepest branch, topo-sort DP; returns the critical path in ticks."""
     from collections import deque
@@ -1956,7 +1957,8 @@ def _compute_critical_path(
     # Launch and capture clocks differ by at most the clock wire: the slowest branch against none.
     skew = max((net_ticks[n.net_id] for n in comp.nets
                 if any(s.pin_name == "C" and comp_by_id[s.component_id].type in _SEQUENTIAL for s in n.sinks)), default=0)
-    return max(endpoints) + skew + _SETUP_TICKS
+    # Measured flat too: the top level can't see macros' flip-flops, their clocks, or padding inside them.
+    return max(max(endpoints) + skew, flat_period) + _SETUP_TICKS
 
 
 def _construct_clock_region(
@@ -2195,6 +2197,7 @@ def build_litematic_from_component_list(
         )
 
     failed_nets = {nid for nid, _ in routing_failures}
+    flat_period = 0
     if capture is None:
         flat = flat_comp or comp
         inner = {(cell, pin): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
@@ -2205,7 +2208,7 @@ def build_litematic_from_component_list(
         # Macro flip-flops aren't in the layout, and settling has to cut their clocks too.
         save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
         # Placement splits multi-bit IO into one component per bit, named after the bit.
-        fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
+        flat_period = fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
                                                  inner), failed_nets)
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
@@ -2269,7 +2272,7 @@ def build_litematic_from_component_list(
 
     with phase("[timing] critical path"):
         critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
-                                                     probe_components(probes) if probes else frozenset())
+                                                     probe_components(probes) if probes else frozenset(), flat_period)
     log(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
