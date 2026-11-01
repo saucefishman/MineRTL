@@ -261,6 +261,7 @@ def main():
                          f"{list(c.id for c in component_list.components if c.type == ComponentType.INPUT_PIN)}")
 
     macros = None
+    flat_comp = component_list
     if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
@@ -303,6 +304,7 @@ def main():
                                         place_workers=args.place_workers,
                                         flat=args.flat,
                                         macros=macros,
+                                        flat_comp=flat_comp,
                                         resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))
                                         if args.resume_dir else None,
                                         macro_channel=_MACRO_CHANNEL,

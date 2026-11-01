@@ -43,9 +43,10 @@ from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
+from .hold import fix_hold, flat_terminals, repeater_delay
 from .macro import Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -763,8 +764,10 @@ class _GreedyRouter:
                  inverted_cells: JournaledSet, footprint_blocked: frozenset[Pos], max_bridge_y: int,
                  terminal_positions: frozenset[Pos],
                  paths: dict[str, tuple[str, list[list[Pos]]]] | None = None,
-                 resume: ResumeStore | None = None):
+                 resume: ResumeStore | None = None,
+                 gate_cells: frozenset[Pos] = frozenset()):
         self.resume = resume
+        self.gate_cells = gate_cells
         self.region = region
         self.rec = rec
         self.solid = solid
@@ -930,6 +933,9 @@ class _GreedyRouter:
                                           self.footprint_blocked, self.terminal_positions | own_cells)
         if inverted:
             raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
+        touching = find_gate_contacts(self.region, own_cells, self.gate_cells)
+        if touching:
+            raise LayConflict(f"Net '{job.net_id}': wire powers a gate's block at {touching[:4]} (gate contact)", tuple(touching))
         self.paths[job.key] = (job.net_id, paths)
         self.has_kept_wire.discard(job.key)
 
@@ -1225,7 +1231,8 @@ def _route_all_nets(
              and (p.component.metadata.get("bank")
                   or p.component.footprint.width >= 2 * p.component.footprint.depth)]  # others are easy to go around
     router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
-                           frozenset(pin_terminal.values()), resume=resume)
+                           frozenset(pin_terminal.values()), resume=resume,
+                           gate_cells=frozenset(_component_interior(placed)))
     jobs = [
         _RouteJob(
             key=net.net_id, net_id=net.net_id,
@@ -1720,7 +1727,7 @@ def _net_wire_ticks(
     for pos, nid in dust_owner.items():
         if nid in cells:
             blk = workspace[pos[0], pos[1], pos[2]]
-            cells[nid][pos] = 1 if _is_repeater(blk) or _is_torch(blk) else 0
+            cells[nid][pos] = repeater_delay(blk) if _is_repeater(blk) else 1 if _is_torch(blk) else 0
     ticks: dict[str, int] = {}
     for n in comp.nets:
         net = cells[n.net_id]
@@ -1910,6 +1917,7 @@ def build_litematic_from_component_list(
         place_workers: int = 1,
         flat: bool = False,
         macros: dict[str, Macro] | None = None,
+        flat_comp: ComponentList | None = None,
         capture: dict | None = None,
         io_columns: int | None = None,
         macro_channel: int = 16,
@@ -2076,6 +2084,18 @@ def build_litematic_from_component_list(
         )
 
     failed_nets = {nid for nid, _ in routing_failures}
+    if capture is None:
+        flat = flat_comp or comp
+        inner = {(cell, pin): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
+                                          bool(p.component.metadata.get("rotate_180")))
+                 for p in placed if p.component.type == ComponentType.CUSTOM
+                 for macro in [macros[p.component.metadata["macro"]]]
+                 for cell, pin, rel in ((*key.rsplit(":", 1), rel) for key, rel in macro.terminals.items())}
+        # Macro flip-flops aren't in the layout, and settling has to cut their clocks too.
+        save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
+        # Placement splits multi-bit IO into one component per bit, named after the bit.
+        fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
+                                                 inner), failed_nets)
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)

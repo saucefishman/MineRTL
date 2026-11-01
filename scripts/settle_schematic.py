@@ -47,6 +47,17 @@ def component_blocks(comp: dict) -> tuple[tuple[int, int, int], callable]:
     return world(pins["C"][0] if not mirrored else width - 1 - pins["C"][0], depth - 1 - pins["C"][2]), world
 
 
+def macro_clock_cell(region, terminal: tuple[int, int, int]) -> tuple[int, int, int]:
+    """A macro flip-flop's clock input: the repeater beside its pin's wire end that takes signal from there."""
+    x, y, z = terminal
+    for dx, facing in ((-1, "east"), (1, "west")):  # a repeater's facing points at its input
+        cell = (x + dx, y, z)
+        block = region[cell]
+        if block.id == "minecraft:repeater" and block["facing"] == facing:
+            return cell
+    raise ValueError(f"no clock repeater beside {terminal}")
+
+
 def settle(in_path: str, layout_path: str, out_path: str) -> None:
     schematic = Schematic.load(in_path)
     region = schematic.regions["main"]
@@ -59,6 +70,10 @@ def settle(in_path: str, layout_path: str, out_path: str) -> None:
         if comp["type"] == "DFF":
             for (x, z), props in DFF_CLOCK_LOW.items():
                 region[world(x, z)] = region[world(x, z)].with_properties(**props)
+    macro_clocks = Path(layout_path).with_name("macro_clocks.json")
+    if macro_clocks.exists():
+        for terminal in json.load(open(macro_clocks)):
+            cuts.append(macro_clock_cell(region, tuple(terminal)))
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         # Without any generated clock region: it would never settle, and the clock counts as low.

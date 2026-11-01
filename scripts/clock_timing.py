@@ -6,39 +6,22 @@ own clock arrival. Below about 1 tick, new data can get in on the same edge.
 
 Usage: clock_timing.py <minecraft_v args...>
 """
-import heapq
 import sys
 from collections import Counter
 
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from minecraft_v.main import main
 from minecraft_v.placement_engine import builder
+from minecraft_v.placement_engine.hold import wire_arrivals
 from minecraft_v.placement_engine.ir import ComponentType
-from minecraft_v.placement_engine.verify import _REPEATER, _World
+from minecraft_v.placement_engine.verify import _World
 
 SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
 CLOCK_NAMES = ("clk", "_clk")
 
 
 def sink_delays(world, source, stop):
-    """Least ticks from source to each cell its signal reaches."""
-    start = (source, "S" if world.kind(source) == 5 else "")
-    best = {start: 0}
-    heap = [(0, start)]
-    arrival = {}
-    while heap:
-        t, node = heapq.heappop(heap)
-        if t > best[node]:
-            continue
-        arrival.setdefault(node[0], t)
-        if node[0] in stop and node[0] != source:
-            continue
-        for nxt in world.successors(node):
-            step = 1 if world.kind(nxt[0]) == _REPEATER or world.is_torch(nxt[0]) else 0
-            if t + step < best.get(nxt, 1 << 30):
-                best[nxt] = t + step
-                heapq.heappush(heap, (t + step, nxt))
-    return arrival
+    return wire_arrivals(world, source, stop)[0]
 
 
 def report(comp, workspace, pin_terminal):
