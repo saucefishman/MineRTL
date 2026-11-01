@@ -731,6 +731,8 @@ class _KeptBranches:
     leads: list[Pos]
     sinks: list[Pos]
     next_target: int
+    targets: list[Pos]  # per path: the via, lead or sink it was laid for
+    cells: list[frozenset[Pos]]  # per path: the blocks laying it wrote
 
 
 _LOG_EVERY_SECONDS = 30.0     # routing progress in the log
@@ -754,6 +756,9 @@ class _GreedyRouter:
       jobs around the failed sink, route it again, then re-queue them. Up to _RIP_ROUNDS
       times per job, once per failed sink (a repeat failure at the same sink is final). A job
       out of those gets one wider ring ripped, whatever already happened to those jobs.
+
+    Ripping a job around a failure takes only its branch nearest that failure, and the branches
+    that hang off it (rip_branch). The job is re-queued to search for those sinks alone.
 
     A job that still fails is ripped up so its partial wire / support / repeaters don't
     block later jobs or show up as debris.
@@ -781,20 +786,81 @@ class _GreedyRouter:
         self.kept: dict[str, _KeptBranches] = {}  # jobs to carry on from their failed sink
         self.has_kept_wire: set[str] = set()  # those, and jobs whose kept wire a whole retry has to clear
         self.sinks_cleared: dict[str, set[Pos]] = {}  # job key -> sinks that have had their one per-sink rip
+        self.laid: dict[str, _KeptBranches] = {}  # finished jobs' branches, for rip_branch
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
         return [p for nid, ps in self.paths.values() if nid == net_id for p in ps]
 
     def rip(self, key: str) -> None:
         self.kept.pop(key, None)
+        self.laid.pop(key, None)
         self.has_kept_wire.discard(key)
         rip_up(self.rec, key, self.indexed, self.solid, self.dust_owner)
         self.paths.pop(key, None)
+
+    def rip_branch(self, job: _RouteJob, around: list[Pos]) -> None:
+        """Rip the job's branch nearest any of around, with the branches that hang off it; keep the rest.
+
+        Goes through a whole rip and lays the rest again, as other jobs' supports can be mixed up in the journal.
+        The job carries on from the ripped sinks when it's next routed, which also puts its repeaters back.
+        A job with no record of its branches, or that would lose a via its other branches cross on, goes whole.
+        """
+        laid = self.laid.get(job.key)
+        if laid is None:
+            self.rip(job.key)
+            return
+
+        def distance(i: int) -> int:
+            return min((abs(c[0] - a[0]) + abs(c[1] - a[1]) + abs(c[2] - a[2]) for c in laid.cells[i] for a in around),
+                       default=1 << 30)
+
+        # On a tie the later branch: fewer can hang off it.
+        nearest = min(reversed(range(len(laid.paths))), key=distance, default=None)
+        gone, keep = set(laid.paths[nearest]) if nearest is not None else set(), []
+        kept_cells = {job.src}  # sibling branches start here too
+        for i, path in enumerate(laid.paths):
+            if i == nearest:
+                continue
+            if path[0] in gone and path[0] not in kept_cells:
+                gone.update(path)
+            else:
+                keep.append(i)
+                kept_cells.update(path)
+        ripped_via = any(laid.targets[i] in laid.vias for i in range(len(laid.paths)) if i not in keep)
+        self.rip(job.key)
+        if ripped_via or not keep:
+            return
+        paths, cells = [], []
+        try:
+            with self.rec.recording(job.key):
+                for i in keep:
+                    mark = len(self.rec.journals[job.key])
+                    _lay_redstone_path(self.ws, self.solid, self.dust_owner, laid.paths[i], job.net_id,
+                                       opaque_support_block=job.support_block,
+                                       inverted_cells=self.inverted_cells,
+                                       goal=laid.targets[i],
+                                       terminal_positions=self.terminal_positions)
+                    paths.append(laid.paths[i])
+                    cells.append(self._cells_since(job.key, mark))
+        except ValueError:  # the world moved on around it
+            self.rip(job.key)
+            return
+        targets = [laid.targets[i] for i in keep]
+        sinks = [t for t in targets if t in laid.sinks]
+        self.kept[job.key] = _KeptBranches(paths, laid.vias, laid.vias, laid.leads,
+                                           [*sinks, *(s for s in laid.sinks if s not in sinks)],
+                                           len(laid.vias) + len(sinks), targets, cells)
+        self.has_kept_wire.add(job.key)
+
+    def _cells_since(self, key: str, mark: int) -> frozenset[Pos]:
+        return frozenset(e[2] for e in self.rec.journals[key][mark:] if e[0] == "block")
 
     def route_job(self, job: _RouteJob, job_blocked: frozenset[Pos], first: tuple[Pos, ...] = ()) -> None:
         rec, ws = self.rec, self.ws
         kept = self.kept.pop(job.key, None)
         paths: list[list[Pos]] = kept.paths if kept else []
+        path_targets: list[Pos] = kept.targets if kept else []
+        path_cells: list[frozenset[Pos]] = kept.cells if kept else []
         net_seeds = [pos for pos, owner in self.dust_owner.items()
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
         reached_vias: list[Pos] = kept.reached_vias if kept else []
@@ -906,7 +972,8 @@ class _GreedyRouter:
                     if dst not in leads:
                         if dst in job.sinks:
                             rollback(rec, job.key, mark)
-                            self.kept[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, dst_index)
+                            self.kept[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, dst_index,
+                                                               path_targets, path_cells)
                             self.has_kept_wire.add(job.key)
                         raise
                     rollback(rec, job.key, mark)
@@ -918,6 +985,8 @@ class _GreedyRouter:
             if dst in vias:
                 reached_vias.append(dst)
             paths.append(path)
+            path_targets.append(dst)
+            path_cells.append(self._cells_since(job.key, mark))
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
@@ -933,6 +1002,7 @@ class _GreedyRouter:
         if inverted:
             raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
         self.paths[job.key] = (job.net_id, paths)
+        self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         self.has_kept_wire.discard(job.key)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
@@ -1018,6 +1088,7 @@ class _GreedyRouter:
         """
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
+        by_key = {job.key: job for job in jobs}
         queue = deque(enumerate(jobs, 1))
         cleared_for: dict[str, set[Pos]] = {}  # job key -> sinks whose blockers were ripped
         requeued: set[str] = set()
@@ -1058,10 +1129,10 @@ class _GreedyRouter:
                             if rip_blockers else []
                         requeued.add(job.key)
                         if victims:
-                            log(f"{label} {job.key}: {e}; keeping its branches, ripping {', '.join(victims)} "
-                                f"and retrying that sink")
+                            log(f"{label} {job.key}: {e}; keeping its branches, ripping a branch of "
+                                f"{', '.join(victims)} and retrying that sink")
                             for v in victims:
-                                self.rip(v)
+                                self.rip_branch(by_key[v], [goal])
                                 ripped.add(v)
                             queue = deque(entry for entry in queue if entry[1].key not in victims)
                             queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
@@ -1080,9 +1151,9 @@ class _GreedyRouter:
                     if victims and not isinstance(e, LayConflict):
                         cleared_for.setdefault(job.key, set()).add(goal)
                         requeued.add(job.key)
-                        log(f"{label} {job.key}: {e}; ripping {', '.join(victims)} and retrying")
+                        log(f"{label} {job.key}: {e}; ripping a branch of {', '.join(victims)} and retrying")
                         for v in victims:
-                            self.rip(v)
+                            self.rip_branch(by_key[v], [goal, job.src])
                             ripped.add(v)
                         queue.appendleft((i, job))
                         queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
@@ -1093,9 +1164,9 @@ class _GreedyRouter:
                     if wider:
                         escalated.add(job.key)
                         requeued.add(job.key)
-                        log(f"{label} {job.key}: {e}; ripping {len(wider)} nets around {where} and retrying")
+                        log(f"{label} {job.key}: {e}; ripping a branch of {len(wider)} nets around {where} and retrying")
                         for v in wider:
-                            self.rip(v)
+                            self.rip_branch(by_key[v], [where])
                             ripped.add(v)
                         queue = deque(entry for entry in queue if entry[1].key not in wider)
                         queue.appendleft((i, job))
