@@ -168,5 +168,4 @@ def test_synth_works_without_mchprs_headless(tmp_path: Path):
          "--out-litematic", str(out)],
         env={**os.environ, "MCHPRS_HEADLESS": str(tmp_path / "missing")}, capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
-    assert "[settle] skipped" in run.stderr
     assert out.exists()

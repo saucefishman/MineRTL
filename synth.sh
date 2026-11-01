@@ -16,6 +16,7 @@ args=()
 out_litematic_dir=""
 out_litematic="build/result.litematic"
 settle=true
+settle_args=()
 synth_only=false
 debug_prints=true
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-settle)
             settle=false
+            shift
+            ;;
+        --simulate-settle)  # settle in MCHPRS's redstone code instead of propagating, needs mchprs_headless
+            settle_args+=(--simulate)
             shift
             ;;
         --out-litematic)
@@ -180,11 +185,6 @@ fi
 uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
 
 # Paste already settled, so pulses while blocks settle can't clock flip-flops (--no-settle skips it).
-# Optional: needs MCHPRS's mchprs_headless.
 if [[ "$settle" == true ]]; then
-    if [[ -x "$headless" ]]; then
-        MCHPRS_HEADLESS="$headless" uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic"
-    else
-        echo "[settle] skipped: no mchprs_headless at $headless. The build works, but flip-flops can lose their values at power-up." >&2
-    fi
+    MCHPRS_HEADLESS="$headless" uv run python scripts/settle_schematic.py "$out_litematic" "${artifacts_dir}/component_layout.json" "$out_litematic" ${settle_args[@]+"${settle_args[@]}"}
 fi
