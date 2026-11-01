@@ -1,13 +1,11 @@
 """$write/$display as probes: read driver blocks at run time, no wire added.
 
 Yosys keeps each call as a $print cell. Its arguments stay in the design and the cell itself is dropped;
-<out>.probes.json says which blocks to sample and how to print them, for `mchprs_headless --probes`.
+the "probes" of <out>.server.json say which blocks to sample and how to print them, for `mchprs_headless --probes`.
 """
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
 
 from litemapy import BlockState, Region
 
@@ -16,7 +14,6 @@ from minecraft_v.models import Module
 from minecraft_v.placement_engine.ir import Direction
 from minecraft_v.progress import log
 
-PROBES_VERSION = 1
 DEBUG_CELLS = ("$print", "$check")
 # Solid and a full cube in MCHPRS as in vanilla, and not used by wire (wool) or gates (stone, quartz).
 PROBE_MARKER = BlockState("minecraft:lime_concrete")
@@ -134,18 +131,10 @@ def _mark(workspace: Region, pos: tuple[int, int, int]) -> None:
     workspace[support] = PROBE_MARKER
 
 
-def write_probes(path: Path, probes: list[dict], positions: dict[tuple[str, str], tuple[int, int, int]],
-                 workspace: Region, regions: list[Region]) -> int:
-    """Resolve drivers to blocks, mark them and write the sidecar. Returns the number of blocks tapped.
-
-    Positions are relative to the schematic's minimum corner, across all its regions.
-    """
+def resolve_probes(probes: list[dict], positions: dict[tuple[str, str], tuple[int, int, int]],
+                   workspace: Region, low: list[int]) -> tuple[list[dict], int]:
+    """Resolve drivers to blocks relative to `low` and mark them. Returns the probes and the number of blocks tapped."""
     tapped: set[tuple[int, int, int]] = set()
-    low = [min(r.x + min(r.range_x()) for r in regions), min(r.y + min(r.range_y()) for r in regions),
-           min(r.z + min(r.range_z()) for r in regions)]
-    high = [max(r.x + max(r.range_x()) for r in regions), max(r.y + max(r.range_y()) for r in regions),
-            max(r.z + max(r.range_z()) for r in regions)]
-    size = [hi - lo + 1 for lo, hi in zip(low, high)]
 
     def resolve(entry: dict) -> dict:
         if "const" in entry:
@@ -163,5 +152,4 @@ def write_probes(path: Path, probes: list[dict], positions: dict[tuple[str, str]
         del p["edge"]
     for pos in sorted(tapped):
         _mark(workspace, pos)
-    path.write_text(json.dumps({"version": PROBES_VERSION, "schematic_size": size, "probes": out}, indent=1) + "\n")
-    return len(tapped)
+    return out, len(tapped)
