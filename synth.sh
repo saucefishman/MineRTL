@@ -17,8 +17,7 @@ out_litematic_dir=""
 out_litematic="build/result.litematic"
 settle=true
 synth_only=false
-debug_prints=auto
-macros=auto
+debug_prints=true
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -47,18 +46,8 @@ while [[ $# -gt 0 ]]; do
             args+=("$1")
             shift
             ;;
-        --no-debug-prints)
+        --no-debug-prints)  # also passed on to minecraft_v
             debug_prints=false
-            args+=("$1")
-            shift
-            ;;
-        --macros)  # on by default; prints can't tap inside macros, so they're off unless asked for
-            macros=true
-            args+=("$1")
-            shift
-            ;;
-        --no-macros)
-            macros=false
             args+=("$1")
             shift
             ;;
@@ -152,7 +141,7 @@ fi
 
 # Prints keep whatever logic they read, so builds without them drop that too. Asserts never build.
 strip_debug='delete t:$check'
-if [[ "$debug_prints" == false || ( "$debug_prints" == auto && "$macros" != false ) ]]; then
+if [[ "$debug_prints" == false ]]; then
     strip_debug='delete t:$print t:$check'
 fi
 yosys_status=0

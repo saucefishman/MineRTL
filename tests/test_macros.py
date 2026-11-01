@@ -13,7 +13,7 @@ from litemapy import Region
 from minecraft_v.placement_engine.builder import _GreedyRouter, _wall_vias
 from minecraft_v.placement_engine.ir import Component, ComponentType, Footprint, NetConnection, NetEndpoint
 from minecraft_v.placement_engine.layout import _Placed
-from minecraft_v.placement_engine.macro import _lane_plane, _row_gap, _row_shift
+from minecraft_v.placement_engine.macro import Macro, _lane_plane, _row_gap, _row_shift, load_macro, save_macro
 
 ROOT = Path(__file__).resolve().parent.parent
 MEMORY = """module main(input clk,
@@ -153,6 +153,17 @@ def test_waypoint_stays_out_of_other_nets_keepouts():
     router._via_open = lambda via, job: _GreedyRouter._via_open(router, via, job)
     job = SimpleNamespace(net_id="n", protected={(20, 20, 20)})
     assert _GreedyRouter._open_via(router, (20, 20, 20), job) not in (None, (20, 20, 20))
+
+
+def test_cached_macro_keeps_print_drivers_and_old_caches_rebuild(tmp_path):
+    macro = Macro(name="m", footprint=Footprint(width=2, height=1, depth=2), pins=[], blocks=[], arcs={}, q_out={}, setup={},
+                  drivers={"g:Y": (1, 0, 1)})
+    save_macro(macro, tmp_path)
+    assert load_macro("m", tmp_path).drivers == macro.drivers
+    meta = json.loads((tmp_path / "m.json").read_text())
+    del meta["drivers"]
+    (tmp_path / "m.json").write_text(json.dumps(meta))
+    assert load_macro("m", tmp_path) is None
 
 
 def test_macros_are_on_by_default(tmp_path):

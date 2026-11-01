@@ -1954,9 +1954,9 @@ def _compute_critical_path(
                    ] or [arrival[c.id] for c in comp.components if c.id not in macro_of]
     for cid, m in macro_of.items():
         endpoints += [arrival[_macro_pin(cid, pin)] + ticks for pin, ticks in m.setup.items()]
-    # A print reads these at the clock edge, even if nothing else uses them.
-    endpoints += [arrival[cid] + _gate_delay(comp_by_id[cid]) for cid in probed
-                  if comp_by_id[cid].type not in _SEQUENTIAL and comp_by_id[cid].type != ComponentType.INPUT_PIN]
+    # A print reads these at the clock edge, even if nothing else uses them. Those inside macros count in flat_period.
+    endpoints += [arrival[cid] + _gate_delay(comp_by_id[cid]) for cid in probed if cid in comp_by_id
+                  and comp_by_id[cid].type not in _SEQUENTIAL and comp_by_id[cid].type != ComponentType.INPUT_PIN]
     # Launch and capture clocks differ by at most the clock wire: the slowest branch against none.
     skew = max((net_ticks[n.net_id] for n in comp.nets
                 if any(s.pin_name == "C" and comp_by_id[s.component_id].type in _SEQUENTIAL for s in n.sinks)), default=0)
@@ -2217,7 +2217,7 @@ def build_litematic_from_component_list(
         save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
         # Placement splits multi-bit IO into one component per bit, named after the bit.
         flat_period = fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
-                                                 inner), failed_nets)
+                                                 inner), failed_nets, probe_components(probes) if probes else frozenset())
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)
@@ -2268,6 +2268,7 @@ def build_litematic_from_component_list(
     if capture is not None:
         capture.update(
             workspace=workspace, placed=placed, dust_owner=dict(dust_owner), pin_terminal=pin_terminal,
+            pin_world=pin_world_map,
             net_ticks=_net_wire_ticks(comp, dust_owner, workspace, pin_terminal),
             violations=signal_violations + verify_support(workspace, dust_owner, _hidden_cells(placed)),
             io_cells={(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,
@@ -2327,6 +2328,11 @@ def build_litematic_from_component_list(
                                                                         _default_io_side(p.component, pin), bounds=io_bounds)
                           for p in placed if p.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
                           for pin in p.component.pins})
+        positions.update({tuple(key.rsplit(":", 1)): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
+                                                                 bool(p.component.metadata.get("rotate_180")))
+                          for p in placed if p.component.type == ComponentType.CUSTOM
+                          for macro in [macros[p.component.metadata["macro"]]]
+                          for key, rel in macro.drivers.items()})
         resolved_probes, tapped = resolve_probes(probes, positions, workspace, low)
         log(f"[probes] {len(probes)} prints, {tapped} blocks tapped")
     if resolved_probes or clock_entry:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import heapq
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 from litemapy import BlockState, Region
 
@@ -130,8 +130,9 @@ class _HoldTiming:
         margins = {(c, p): t - clock[c] for (c, p), t in data.items() if c in clock and p != "C"}
         return clock, margins, via
 
-    def min_period(self, clock: dict[str, int]) -> int:
-        """Longest flip-flop to flip-flop time, with each one's own clock arrival: the slowest safe clock period."""
+    def min_period(self, clock: dict[str, int], probed: Collection[str] = ()) -> int:
+        """Longest flip-flop to flip-flop time, with each one's own clock arrival: the slowest safe clock period.
+        A print in `probed` reads its cell as the edge enters the clock pin, so that cell has to settle by then."""
         inputs: dict[str, list] = defaultdict(list)
         for n in self.nets.values():
             for s in n.sinks:
@@ -160,7 +161,7 @@ class _HoldTiming:
                 t, d = out_time(n.source.component_id), wire(n, s)
                 if s.pin_name != "C" and t >= 0 and d is not None:
                     worst = max(worst, t + d - capture)
-        return worst
+        return max([worst, *(out_time(cid) for cid in probed)])
 
     def path_nets(self, pin: tuple[str, str], via: dict) -> list[tuple[str, Pos]]:
         """The earliest data path into a pin, as (net, sink cell), from the pin back to the launching flip-flop."""
@@ -244,9 +245,10 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
     return added
 
 
-def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str]) -> int:
+def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str],
+             probed: Collection[str] = ()) -> int:
     """Pad every data path that beats its flip-flop's clock; returns the slowest safe clock period. comp is the flat
-    netlist, terminals its gate pins' cells."""
+    netlist, terminals its gate pins' cells, probed the cells prints read."""
     if not any(c.type in _SEQUENTIAL for c in comp.components):
         return 0
     world = _World(workspace, frozenset(), frozenset(terminals.values()))
@@ -285,8 +287,8 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
           f"({counts['raised']} repeaters slowed, {counts['new']} new); {len(left)} left")
     for pin, m in sorted(left.items(), key=lambda kv: kv[1])[:10]:
         print(f"[hold] still short: {pin} margin {m}")
-    period = timing.min_period(clock)
-    print(f"[hold] slowest flip-flop to flip-flop path {period} ticks")
+    period = timing.min_period(clock, probed)
+    print(f"[hold] slowest flip-flop to flip-flop or print path {period} ticks")
     return period
 
 

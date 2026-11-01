@@ -41,6 +41,7 @@ class Macro:
     q_out: dict[str, int]                            # output pin -> ticks from an inner register
     setup: dict[str, int]                            # input pin -> ticks to an inner register
     terminals: dict[str, Pos] = field(default_factory=dict)  # "cell:pin" -> inner wire end, relative
+    drivers: dict[str, Pos] = field(default_factory=dict)    # "cell:pin" -> gate's output block, for prints to read
     gate_boxes: list[tuple[Pos, Pos]] = field(default_factory=list)  # inner gate footprints (lo, size)
     owner: dict[Pos, str] = field(default_factory=dict)      # inner routed cell -> inner net
     nets: dict[str, tuple[str, list[str]]] = field(default_factory=dict)  # inner net -> source, sinks
@@ -218,6 +219,9 @@ def macro_from_capture(name: str, sub: ComponentList, capture: dict, ports: dict
         blocks=[(rel(p), b) for p, b in blocks],
         arcs=arcs, q_out=q_out, setup=setup,
         terminals={f"{cid}:{pin}": rel(t) for (cid, pin), t in capture["pin_terminal"].items()},
+        drivers={f"{p.component.id}:{pin.name}": rel(capture["pin_world"][(p.component.id, pin.name)])
+                 for p in placed.values() if p.component.type not in _IO_TYPES
+                 for pin in p.component.pins if pin.direction == Direction.OUT},
         gate_boxes=[(rel(p.origin), (p.component.footprint.width, p.component.footprint.height,
                                      p.component.footprint.depth))
                     for p in placed.values() if p.component.type not in _IO_TYPES],
@@ -236,6 +240,7 @@ def save_macro(macro: Macro, directory: Path) -> None:
     (directory / f"{macro.name}.json").write_text(json.dumps({
         "footprint": fp.model_dump(), "pins": [p.model_dump(mode="json") for p in macro.pins],
         "arcs": macro.arcs, "q_out": macro.q_out, "setup": macro.setup, "terminals": macro.terminals,
+        "drivers": macro.drivers,
         "gate_boxes": macro.gate_boxes, "owner": [[list(p), n] for p, n in macro.owner.items()],
         "nets": macro.nets, "port_net": macro.port_net, "cells": macro.cells,
     }))
@@ -246,12 +251,15 @@ def load_macro(name: str, directory: Path) -> Macro | None:
     if not (meta_path.is_file() and schem_path.is_file()):
         return None
     meta = json.loads(meta_path.read_text())
+    if "drivers" not in meta:  # cached before prints could read inside macros
+        return None
     region = next(iter(Schematic.load(str(schem_path)).regions.values()))
     blocks = [(p, region[p]) for p in region.block_positions() if not _is_air(region[p])]
     return Macro(
         name=name, footprint=Footprint(**meta["footprint"]), pins=[PinRef(**p) for p in meta["pins"]],
         blocks=blocks, arcs=meta["arcs"], q_out=meta["q_out"], setup=meta["setup"],
         terminals={k: tuple(v) for k, v in meta["terminals"].items()},
+        drivers={k: tuple(v) for k, v in meta["drivers"].items()},
         gate_boxes=[(tuple(a), tuple(b)) for a, b in meta["gate_boxes"]],
         owner={tuple(p): n for p, n in meta["owner"]},
         nets={k: (s, list(t)) for k, (s, t) in meta["nets"].items()},
@@ -290,6 +298,7 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
     blocks: dict[Pos, BlockState] = {}
     owner: dict[Pos, str] = {}
     terminals: dict[str, Pos] = {}
+    drivers: dict[str, Pos] = {}
     gate_boxes: list[tuple[Pos, Pos]] = []
     nets: dict[str, tuple[str, list[str]]] = {}
     port_net: dict[str, str] = {}
@@ -322,6 +331,9 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
             cell, pin = key.rsplit(":", 1)
             if cell in cls.cells:
                 terminals[f"{mapping[cell]}:{pin}"] = tile_rel(k, rel)
+        for key, rel in tile.drivers.items():
+            cell, pin = key.rsplit(":", 1)
+            drivers[f"{mapping[cell]}:{pin}"] = tile_rel(k, rel)
         for inner, (source, sinks) in tile.nets.items():
             net = mapping[inner]
             mapped = [f"{mapping[s.rsplit(':', 1)[0]]}:{s.rsplit(':', 1)[1]}" for s in sinks
@@ -413,6 +425,7 @@ def build_array(array_name: str, tile: Macro, cls: RepeatedClass, ports: dict[st
         blocks=[((x, y - low, z), b) for (x, y, z), b in blocks.items()],
         arcs=arcs, q_out=q_out, setup=setup,
         terminals={k: (p[0], p[1] - low, p[2]) for k, p in terminals.items()},
+        drivers={k: (p[0], p[1] - low, p[2]) for k, p in drivers.items()},
         gate_boxes=[((p[0], p[1] - low, p[2]), size) for p, size in gate_boxes],
         owner={(p[0], p[1] - low, p[2]): net for p, net in owner.items()},
         nets=nets, port_net=port_net, cells=len(cls.cells) * n,
@@ -474,6 +487,7 @@ def build_bank(bank_name: str, tile: Macro, instances: list[dict[str, str]], cel
     floors: set[Pos] = set()
     owner: dict[Pos, str] = {}
     terminals: dict[str, Pos] = {}
+    drivers: dict[str, Pos] = {}
     gate_boxes: list[tuple[Pos, Pos]] = []
     nets: dict[str, tuple[str, list[str]]] = {}
     port_net: dict[str, str] = {}
@@ -537,6 +551,9 @@ def build_bank(bank_name: str, tile: Macro, instances: list[dict[str, str]], cel
             cell, pin = key.rsplit(":", 1)
             if cell in cells:
                 terminals[f"{mapping[cell]}:{pin}"] = at(k, rel)
+        for key, rel in tile.drivers.items():
+            cell, pin = key.rsplit(":", 1)
+            drivers[f"{mapping[cell]}:{pin}"] = at(k, rel)
         for inner, (source, sinks) in tile.nets.items():
             net = mapping[inner]
             mapped = [f"{mapping[e.rsplit(':', 1)[0]]}:{e.rsplit(':', 1)[1]}" for e in sinks
@@ -636,6 +653,7 @@ def build_bank(bank_name: str, tile: Macro, instances: list[dict[str, str]], cel
         blocks=[((x, y - low, z), b) for (x, y, z), b in blocks.items()],
         arcs=arcs, q_out=q_out, setup=setup,
         terminals={k: (p[0], p[1] - low, p[2]) for k, p in terminals.items()},
+        drivers={k: (p[0], p[1] - low, p[2]) for k, p in drivers.items()},
         gate_boxes=[((p[0], p[1] - low, p[2]), size) for p, size in gate_boxes],
         owner={(p[0], p[1] - low, p[2]): net for p, net in owner.items()},
         nets=nets, port_net=port_net, cells=len(cells) * len(instances),
