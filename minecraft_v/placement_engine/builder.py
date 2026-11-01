@@ -45,9 +45,10 @@ from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
+from .hold import fix_hold, flat_terminals, repeater_delay
 from .macro import Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -774,8 +775,10 @@ class _GreedyRouter:
                  inverted_cells: JournaledSet, footprint_blocked: frozenset[Pos], max_bridge_y: int,
                  terminal_positions: frozenset[Pos],
                  paths: dict[str, tuple[str, list[list[Pos]]]] | None = None,
-                 resume: ResumeStore | None = None):
+                 resume: ResumeStore | None = None,
+                 gate_cells: frozenset[Pos] = frozenset()):
         self.resume = resume
+        self.gate_cells = gate_cells
         self.region = region
         self.rec = rec
         self.solid = solid
@@ -1021,14 +1024,20 @@ class _GreedyRouter:
                                           self.footprint_blocked, self.terminal_positions | own_cells)
         if inverted:
             raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
+        touching = find_gate_contacts(self.region, own_cells, self.gate_cells)
+        if touching:
+            raise LayConflict(f"Net '{job.net_id}': wire powers a gate's block at {touching[:4]} (gate contact)", tuple(touching))
         self.paths[job.key] = (job.net_id, paths)
         self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         self.has_kept_wire.discard(job.key)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
-        """Whether a waypoint is free: air with air around it, so no other net's wire is near."""
+        """Whether a waypoint is free: air with air around it, so no other net's wire is near, and outside other
+        nets' terminal keepouts, which a search can never enter."""
         x, y, z = via
         if not (0 <= x < self.region.width and 0 <= y < self.region.height - 2 and 0 <= z < self.region.length):
+            return False
+        if via in job.protected:
             return False
         cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
         return all(c not in self.footprint_blocked and self.dust_owner.get(c) in (None, job.net_id)
@@ -1318,7 +1327,8 @@ def _route_all_nets(
                   or p.component.footprint.width >= 2 * p.component.footprint.depth)]  # others are easy to go around
     with phase("[wire] preparing nets"):
         router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
-                               frozenset(pin_terminal.values()), resume=resume)
+                               frozenset(pin_terminal.values()), resume=resume,
+                               gate_cells=frozenset(_component_interior(placed)))
         jobs = [
             _RouteJob(
                 key=net.net_id, net_id=net.net_id,
@@ -1817,7 +1827,7 @@ def _net_wire_ticks(
     for pos, nid in dust_owner.items():
         if nid in cells:
             blk = workspace[pos[0], pos[1], pos[2]]
-            cells[nid][pos] = 1 if _is_repeater(blk) or _is_torch(blk) else 0
+            cells[nid][pos] = repeater_delay(blk) if _is_repeater(blk) else 1 if _is_torch(blk) else 0
     ticks: dict[str, int] = {}
     for n in comp.nets:
         net = cells[n.net_id]
@@ -1860,6 +1870,7 @@ def _compute_critical_path(
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         macros: dict[str, Macro] | None = None,
         probed: set[str] = frozenset(),
+        flat_period: int = 0,
 ) -> int:
     """Repeaters/torches on each net's deepest branch, topo-sort DP; returns the critical path in ticks."""
     from collections import deque
@@ -1943,13 +1954,14 @@ def _compute_critical_path(
                    ] or [arrival[c.id] for c in comp.components if c.id not in macro_of]
     for cid, m in macro_of.items():
         endpoints += [arrival[_macro_pin(cid, pin)] + ticks for pin, ticks in m.setup.items()]
-    # A print reads these at the clock edge, even if nothing else uses them.
-    endpoints += [arrival[cid] + _gate_delay(comp_by_id[cid]) for cid in probed
-                  if comp_by_id[cid].type not in _SEQUENTIAL and comp_by_id[cid].type != ComponentType.INPUT_PIN]
+    # A print reads these at the clock edge, even if nothing else uses them. Those inside macros count in flat_period.
+    endpoints += [arrival[cid] + _gate_delay(comp_by_id[cid]) for cid in probed if cid in comp_by_id
+                  and comp_by_id[cid].type not in _SEQUENTIAL and comp_by_id[cid].type != ComponentType.INPUT_PIN]
     # Launch and capture clocks differ by at most the clock wire: the slowest branch against none.
     skew = max((net_ticks[n.net_id] for n in comp.nets
                 if any(s.pin_name == "C" and comp_by_id[s.component_id].type in _SEQUENTIAL for s in n.sinks)), default=0)
-    return max(endpoints) + skew + _SETUP_TICKS
+    # Measured flat too: the top level can't see macros' flip-flops, their clocks, or padding inside them.
+    return max(max(endpoints) + skew, flat_period) + _SETUP_TICKS
 
 
 def _construct_clock_region(
@@ -2017,6 +2029,7 @@ def build_litematic_from_component_list(
         place_workers: int = 1,
         flat: bool = False,
         macros: dict[str, Macro] | None = None,
+        flat_comp: ComponentList | None = None,
         capture: dict | None = None,
         io_columns: int | None = None,
         macro_channel: int = 16,
@@ -2192,6 +2205,19 @@ def build_litematic_from_component_list(
         )
 
     failed_nets = {nid for nid, _ in routing_failures}
+    flat_period = 0
+    if capture is None:
+        flat = flat_comp or comp
+        inner = {(cell, pin): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
+                                          bool(p.component.metadata.get("rotate_180")))
+                 for p in placed if p.component.type == ComponentType.CUSTOM
+                 for macro in [macros[p.component.metadata["macro"]]]
+                 for cell, pin, rel in ((*key.rsplit(":", 1), rel) for key, rel in macro.terminals.items())}
+        # Macro flip-flops aren't in the layout, and settling has to cut their clocks too.
+        save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
+        # Placement splits multi-bit IO into one component per bit, named after the bit.
+        flat_period = fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
+                                                 inner), failed_nets, probe_components(probes) if probes else frozenset())
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)
@@ -2242,6 +2268,7 @@ def build_litematic_from_component_list(
     if capture is not None:
         capture.update(
             workspace=workspace, placed=placed, dust_owner=dict(dust_owner), pin_terminal=pin_terminal,
+            pin_world=pin_world_map,
             net_ticks=_net_wire_ticks(comp, dust_owner, workspace, pin_terminal),
             violations=signal_violations + verify_support(workspace, dust_owner, _hidden_cells(placed)),
             io_cells={(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,
@@ -2254,7 +2281,7 @@ def build_litematic_from_component_list(
 
     with phase("[timing] critical path"):
         critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
-                                                     probe_components(probes) if probes else frozenset())
+                                                     probe_components(probes) if probes else frozenset(), flat_period)
     log(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
@@ -2301,6 +2328,11 @@ def build_litematic_from_component_list(
                                                                         _default_io_side(p.component, pin), bounds=io_bounds)
                           for p in placed if p.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
                           for pin in p.component.pins})
+        positions.update({tuple(key.rsplit(":", 1)): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
+                                                                 bool(p.component.metadata.get("rotate_180")))
+                          for p in placed if p.component.type == ComponentType.CUSTOM
+                          for macro in [macros[p.component.metadata["macro"]]]
+                          for key, rel in macro.drivers.items()})
         resolved_probes, tapped = resolve_probes(probes, positions, workspace, low)
         log(f"[probes] {len(probes)} prints, {tapped} blocks tapped")
     if resolved_probes or clock_entry:

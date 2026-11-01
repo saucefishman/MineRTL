@@ -713,7 +713,8 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     depth = max(gates[i].footprint.depth for i in banks)
     fixed: dict[int, np.ndarray] = {}
     y = 0.0
-    for i in banks:
+    # Widest at the bottom: a wider bank above would overhang the pins on the east end of the one below.
+    for i in sorted(banks, key=lambda i: -gates[i].footprint.width):
         fixed[i] = np.array([0.0, y, float(channel)])
         y += gates[i].footprint.height + _BANK_Y_GAP
     box = (np.zeros(3), np.array([width + channel, y, depth + 2.0 * channel]))

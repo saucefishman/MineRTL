@@ -71,6 +71,63 @@ def test_probes_tap_marked_blocks(tmp_path):
                 assert "repeater" in region[tuple(entry["pos"])].id or "torch" in region[tuple(entry["pos"])].id
 
 
+HEADLESS = Path(os.environ.get("MCHPRS_HEADLESS", Path.home() / "Projects/MCHPRS/target/release/mchprs_headless"))
+# Word 2 is a flip-flop in the macro; `read` comes through the read mux. Neither has a wire to anything but the print.
+IN_MACRO = """module main(input clk, output reg [2:0] a);
+    initial a = 0;
+    reg [{d}:0] n = 16'h1234;
+    reg [{d}:0] data[0:7];
+    wire [{d}:0] read = data[a];
+    always @(posedge clk) begin
+        a <= a + 3'd1;
+        n <= {{n[{d}-1:0], n[{d}] ^ n[3]}};
+        data[a] <= n;
+        $display("%0d %0d %0d", a, data[2], read);
+    end
+endmodule
+"""
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None or not HEADLESS.is_file(), reason="needs yosys and mchprs_headless")
+@pytest.mark.parametrize("bits, macro, flags", [(16, "bank_", ()), (4, "array_", ("--macro-min-instances", "2"))])
+def test_prints_read_inside_macros(tmp_path, bits, macro, flags):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/main.v").write_text(IN_MACRO.format(d=bits - 1))
+    out = tmp_path / "out.litematic"
+    run = subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--artifacts-dir", tmp_path / "art", "--out-litematic", out,
+                          "--server-clock", "--macro-cache", tmp_path / "cache", *flags],
+                         cwd=ROOT, env={**os.environ, "PYTHONHASHSEED": "0", "MCHPRS_HEADLESS": str(HEADLESS)},
+                         capture_output=True, text=True, check=True)
+    assert "[verify] 0 violation(s)" in run.stdout, run.stdout[-2000:]
+
+    sidecar = json.loads(out.with_suffix(".server.json").read_text())
+    layout = json.loads((tmp_path / "art/component_layout.json").read_text())
+    banks = [c for c in layout if c["id"].startswith(macro)]
+    assert banks
+
+    def in_bank(pos):  # the only region starts at the origin, so sidecar positions are world positions
+        return any(all(c["origin"][i] <= pos[i] < c["origin"][i] + c["footprint"][k] for i, k in
+                       enumerate(("width", "height", "depth"))) for c in banks)
+    assert any(in_bank(d["pos"]) for d in sidecar["probes"][0]["data"] if "pos" in d)
+
+    (tmp_path / "pins.txt").write_text("")
+    (tmp_path / "run.txt").write_text(f"settle {sidecar['clock']['half_period_ticks'] * 2 * 20}\n")
+    run = subprocess.run([HEADLESS, "test", out, tmp_path / "pins.txt", tmp_path / "run.txt", "--modes", "redpiler",
+                          "--probes", out.with_suffix(".server.json"), "--run-clock"],
+                         capture_output=True, text=True, check=True)
+    # Each word holds its last write once written; reads and word 2 show the old value on the edge that writes.
+    want = []
+    words = [0] * 8
+    mask = (1 << bits) - 1
+    n = 0x1234 & mask
+    for edge in range(16):
+        a = edge % 8
+        want.append(f"{a} {words[2]} {words[a]}")
+        words[a] = n
+        n = (n << 1) & mask | (n >> (bits - 1) ^ n >> 3) & 1
+    assert [line for line in run.stdout.splitlines() if line[:1].isdigit()][:16] == want
+
+
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_no_prints_no_sidecar(tmp_path):
     (tmp_path / "out.server.json").write_text("{}")

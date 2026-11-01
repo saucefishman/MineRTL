@@ -217,11 +217,11 @@ def main():
     parser.add_argument("--debug", type=_true_or_false, nargs="?", const=True, default=False,
                         help="Log progress and slow searches, save litematic snapshots during routing to "
                              "<artifacts>/snapshots (slow), print A* counters")
-    parser.add_argument("--debug-prints", action=argparse.BooleanOptionalAction, default=None,
+    parser.add_argument("--debug-prints", action=argparse.BooleanOptionalAction, default=True,
                         help="Keep $write/$display: mark the blocks they read and write <out>.server.json for MCHPRS "
-                             "/watch and mchprs_headless --probes (default: on, off with --macros)")
-    parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=False,
-                        help="Route repeated subcircuits once and stamp them; the rest routes around them (default: off; "
+                             "/watch and mchprs_headless --probes (default: on)")
+    parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=True,
+                        help="Route repeated subcircuits once and stamp them; the rest routes around them (default: on; "
                              "needs --placer poisson, ignored with --flat)")
     parser.add_argument("--macro-min-instances", type=int, default=None,
                         help="--macros: use macros only if some pattern repeats this often (default: enough for a "
@@ -259,10 +259,7 @@ def main():
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
-    debug_prints = not args.macros if args.debug_prints is None else args.debug_prints
-    probes = extract_probes(module) if debug_prints else None
-    if probes and args.macros:
-        raise SystemExit("--debug-prints can't tap inside macros: leave out --macros")
+    probes = extract_probes(module) if args.debug_prints else None
 
     save_build_artifacts(component_list)
 
@@ -286,6 +283,7 @@ def main():
         raise SystemExit("--server-clock half period can't be negative")
 
     macros = None
+    flat_comp = component_list
     if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
@@ -328,6 +326,7 @@ def main():
                                         place_workers=args.place_workers,
                                         flat=args.flat,
                                         macros=macros,
+                                        flat_comp=flat_comp,
                                         probes=probes,
                                         server_clock=args.server_clock,
                                         resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))

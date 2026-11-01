@@ -273,6 +273,22 @@ def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
     return []
 
 
+def find_gate_contacts(region: Region, cells: frozenset[Pos], gate_cells: frozenset[Pos]) -> list[Pos]:
+    """Dust among cells that powers a solid block inside a gate. That block can carry the gate's torch, which then
+    switches on this wire. Verify can't see it: gate interiors are hidden from it."""
+    world = _World(region, frozenset(), frozenset())
+    hits = []
+    for p in cells:
+        if world.kind(p) != _DUST:
+            continue
+        x, y, z = p
+        below = (x, y - 1, z)
+        pointed = [(x + dx, y, z + dz) for dx, dz in world.dust_directions(p)]
+        if any(q in gate_cells and world.kind(q) == _OPAQUE for q in (*pointed, below)):
+            hits.append(p)
+    return hits
+
+
 def find_inverted_contacts(region: Region, source: Pos, sinks: Iterable[Pos], stop: frozenset[Pos],
                            blocked: frozenset[Pos] = frozenset(), visible: frozenset[Pos] = frozenset()) -> list[Pos]:
     """_inverted_contacts for a net being routed; `blocked` cells are air unless `visible`."""

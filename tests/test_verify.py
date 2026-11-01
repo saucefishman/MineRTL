@@ -345,3 +345,48 @@ def test_sink_fed_only_through_the_inverted_block_is_flagged():
     sink = _wire(region, owner, "n", [(5, 3, 5)])[0]
     region[5, 4, 5] = GLASS
     assert sink in find_inverted_contacts(region, src, [sink], frozenset())
+
+
+def test_gate_contact_finds_dust_pointing_into_a_gate_block():
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.verify import find_gate_contacts
+
+    region = Region(0, 0, 0, 8, 4, 4)
+    region[3, 1, 1] = BlockState("minecraft:smooth_quartz")
+    for x in (1, 2):  # runs east and ends against the block
+        region[x, 1, 1] = BlockState("minecraft:redstone_wire")
+    region[1, 1, 3] = BlockState("minecraft:redstone_wire")  # far from it
+    assert find_gate_contacts(region, frozenset({(1, 1, 1), (2, 1, 1), (1, 1, 3)}), frozenset({(3, 1, 1)})) == [(2, 1, 1)]
+    assert find_gate_contacts(region, frozenset({(1, 1, 1), (2, 1, 1)}), frozenset()) == []
+
+
+def test_hold_arrival_counts_a_repeaters_delay():
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.hold import wire_arrivals
+    from minecraft_v.placement_engine.verify import _World
+
+    region = Region(0, 0, 0, 8, 4, 4)
+    for x in (1, 3):
+        region[x, 1, 1] = BlockState("minecraft:redstone_wire")
+    region[2, 1, 1] = BlockState("minecraft:repeater", facing="west", delay="3")
+    arrival, _ = wire_arrivals(_World(region, frozenset(), frozenset()), (1, 1, 1), frozenset())
+    assert arrival[(3, 1, 1)] == 3
+
+
+def test_hold_only_converts_dust_on_a_straight_run():
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.hold import _straight_run
+    from minecraft_v.placement_engine.verify import _World
+
+    region = Region(0, 0, 0, 8, 4, 6)
+    for x in (1, 2, 3):
+        region[x, 1, 1] = BlockState("minecraft:redstone_wire")
+    region[2, 1, 2] = BlockState("minecraft:redstone_wire")  # a branch at the middle
+    for x in (1, 2, 3):
+        region[x, 1, 4] = BlockState("minecraft:redstone_wire")
+    world = _World(region, frozenset(), frozenset())
+    assert _straight_run(world, (2, 1, 1)) is None
+    assert set(_straight_run(world, (2, 1, 4))) == {(1, 1, 4), (3, 1, 4)}
