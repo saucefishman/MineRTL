@@ -238,6 +238,8 @@ def main():
     if out_litematic.is_dir():
         raise SystemExit(f"--out-litematic path is a directory: '{args.out_litematic}'")
     out_litematic.parent.mkdir(parents=True, exist_ok=True)
+    if not args.debug_prints:  # MCHPRS loads a sibling sidecar: one from an older build would read wrong blocks
+        out_litematic.with_suffix(".probes.json").unlink(missing_ok=True)
 
     with phase("[load] reading netlist"), open(args.netlist) as f:
         netlist = Netlist.model_validate_json(f.read())

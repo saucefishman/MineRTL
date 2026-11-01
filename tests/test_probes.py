@@ -43,6 +43,7 @@ def build(tmp_path, *flags):
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_prints_stripped_by_default(tmp_path):
+    (tmp_path / "out.probes.json").write_text("{}")
     out = build(tmp_path)
     assert out.exists() and not out.with_suffix(".probes.json").exists()
     assert "$print" not in (tmp_path / "art/netlist.json").read_text()
