@@ -187,6 +187,8 @@ def main():
                              "--route-passes > 1; 1 = sequential")
     parser.add_argument("--route-spec-max-span", type=int, default=200,
                         help="--route-workers: nets with more total distance to their sinks route sequentially")
+    parser.add_argument("--route-sink-workers", type=int, default=1,
+                        help="Processes searching for a long net's next sinks at once; 1 = one at a time")
     parser.add_argument("--route-deadline", type=float, default=None,
                         help="Seconds of routing before giving up on remaining nets (writes a partial result; "
                              "use with --allow-routing-failures True)")
@@ -322,6 +324,7 @@ def main():
                                         **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}),
                                         route_workers=args.route_workers,
                                         route_spec_max_span=args.route_spec_max_span,
+                                        route_sink_workers=args.route_sink_workers,
                                         route_deadline=args.route_deadline,
                                         snapshots=args.debug,
                                         placer=args.placer,

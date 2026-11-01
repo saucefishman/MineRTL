@@ -706,6 +706,7 @@ _ESCALATE_RADIUS = 6  # a job out of retries gets this wider ring ripped, once, 
 _ESCALATE_MAX = 8
 _REPAIR_ROUNDS = 3  # re-routes of nets verify still finds fault with
 _SPEC_CLEARANCE = 2  # speculative jobs clash with blocks this close (per axis): dust through a block to dust
+_SINK_BATCH_MIN = 8  # sinks left in a job for searching them at once to be worth the forks
 _SPEC_MAX_SPAN = 200  # jobs longer than this (_RouteJob.span) aren't worth speculating: a redo costs too much
 
 Pos = tuple[int, int, int]
@@ -823,6 +824,9 @@ class _GreedyRouter:
         self.speculated: dict[str, _Speculated | None] = {}  # this batch's results still to take; None: worker failed
         self.laid_since_fork: set[Pos] = set()
         self.spec_max_span = _SPEC_MAX_SPAN
+        self.sink_workers = 1  # searches at once for a long job's next sinks; 1 is one at a time
+        self.sink_stats = dict.fromkeys(("batches", "searched", "kept", "clashed", "worse", "failed"), 0)
+        self.sink_seconds = 0.0
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
         return [p for nid, ps in self.paths.values() if nid == net_id for p in ps]
@@ -910,6 +914,8 @@ class _GreedyRouter:
                            key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
             sinks = [*first, *(p for p in sinks if p not in first)]
         targets = [*vias, *sinks]
+        forked_paths: dict[Pos, list[Pos] | None] = {}
+        laid_since_fork: set[Pos] = set()
         for dst_index, dst in enumerate(targets):
             if kept and dst_index < kept.next_target:
                 continue
@@ -930,10 +936,18 @@ class _GreedyRouter:
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
             ends = {job.src, dst}
             attempts = 0
+            forked = None
+            if self.sink_workers > 1 and far_via is None and dst_index >= len(vias) and not set(leads) & set(targets[dst_index:]):
+                if dst not in forked_paths and len(targets) - dst_index >= _SINK_BATCH_MIN:
+                    forked_paths = self._search_sinks(job, targets, sinks, dst_index, tree_seeds, seed_depths, job_blocked)
+                    laid_since_fork = set()
+                if dst in forked_paths:
+                    forked = self._usable_sink_path(forked_paths.pop(dst), dst, laid_since_fork)
             while True:
                 mark = len(rec.journals[job.key])
                 search_started = time.monotonic()
-                saved = self.resume.path_for(job.key, dst) if self.resume else None
+                saved = forked or (self.resume.path_for(job.key, dst) if self.resume else None)
+                forked = None  # a path that can't be laid gets a search of its own
                 try:
                     try:
                         def search(stagnation: int = -1) -> list[Pos]:
@@ -1036,6 +1050,8 @@ class _GreedyRouter:
             paths.append(path)
             path_targets.append(dst)
             path_cells.append(self._cells_since(job.key, mark))
+            if forked_paths:
+                laid_since_fork |= path_cells[-1]
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
@@ -1056,6 +1072,55 @@ class _GreedyRouter:
         self.paths[job.key] = (job.net_id, paths)
         self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         self.has_kept_wire.discard(job.key)
+
+    def _search_sinks(self, job: _RouteJob, targets: list[Pos], sinks: list[Pos], first_index: int,
+                      tree_seeds: list[Pos], seed_depths, blocked: frozenset[Pos]) -> dict[Pos, list[Pos] | None]:
+        """Search for the next sinks at once in forked workers, against the wire as it is now."""
+        started = time.monotonic()
+        batch = targets[first_index:first_index + self.sink_workers]
+
+        def search(index: int, dst: Pos) -> list[Pos] | None:
+            try:
+                return _find_wire_path(
+                    self.ws, self.solid, self.dust_owner,
+                    job.src, dst, job.net_id,
+                    job.bounds, self.max_bridge_y,
+                    tree_seeds=tree_seeds,
+                    protected=job.protected,
+                    footprint_blocked=self.footprint_blocked,
+                    inverted_cells=frozenset(self.inverted_cells),
+                    terminal_positions=self.terminal_positions,
+                    blocked=blocked - {job.src, dst},
+                    seed_depths=seed_depths,
+                    pending_sinks=frozenset(job.sinks) & frozenset(targets[index:]),
+                    stagnation=_ROUTE_STAGNATION_FIRST,
+                    **job.search_kwargs,
+                )
+            except ValueError:
+                return None
+
+        results = run_forked([lambda i=first_index + n, dst=dst: search(i, dst) for n, dst in enumerate(batch)])
+        self.sink_stats["batches"] += 1
+        self.sink_stats["searched"] += len(batch)
+        self.sink_seconds += time.monotonic() - started
+        return dict(zip(batch, results))
+
+    def _usable_sink_path(self, path: list[Pos] | None, dst: Pos, laid: set[Pos]) -> list[Pos] | None:
+        """A forked search's path, unless wire laid since the fork is too close or would have made a shorter branch."""
+        if path is None:
+            self.sink_stats["failed"] += 1
+            return None
+        if laid:
+            r = range(-_SPEC_CLEARANCE, _SPEC_CLEARANCE + 1)
+            near = [(dx, dy, dz) for dx in r for dy in r for dz in r]
+            if any((x + dx, y + dy, z + dz) in laid for x, y, z in path for dx, dy, dz in near):
+                self.sink_stats["clashed"] += 1
+                return None
+            if min(abs(c[0] - dst[0]) + abs(c[1] - dst[1]) + abs(c[2] - dst[2]) for c in laid) < len(path):
+                self.sink_stats["worse"] += 1
+                return None
+        self.sink_stats["kept"] += 1
+        return path
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
         """Whether a waypoint is free: air with air around it, so no other net's wire is near, and outside other
@@ -1135,6 +1200,7 @@ class _GreedyRouter:
 
     def _speculate_job(self, job: _RouteJob) -> _Speculated | None:
         """In a forked worker: route the job, and report what that wrote."""
+        self.sink_workers = 1
         mark = len(self.rec.journals[job.key])
         try:
             with self.rec.recording(job.key):
@@ -1205,15 +1271,17 @@ class _GreedyRouter:
 
     def run(self, jobs: list[_RouteJob], label: str, deadline: float | None = None, fail_fast: bool = False,
             on_done: Callable[[int, _RouteJob], None] | None = None,
-            rip_blockers: bool = True, workers: int = 1) -> list[tuple[str, Exception]]:
+            rip_blockers: bool = True, workers: int = 1, sink_workers: int = 1) -> list[tuple[str, Exception]]:
         """Route jobs in order; returns (job key, error) for the ones that failed.
 
         fail_fast: raise on the first job that fails instead of collecting failures.
         rip_blockers: False skips the rip-around-a-failed-sink layer.
         on_done(i, job): called after each job's attempt, i its 1-based position in jobs.
         workers: above 1, route short jobs speculatively in batches of this many.
+        sink_workers: above 1, jobs routed here search for their sinks in batches of this many.
         """
         self.rips_blockers = rip_blockers
+        self.sink_workers = sink_workers
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
         by_key = {job.key: job for job in jobs}
@@ -1337,6 +1405,8 @@ class _GreedyRouter:
             log(f"{label} speculation: {spec_stats}, {spec_seconds:.1f}s in batches, "
                 f"{spec_take_seconds:.1f}s taking, {spec_here_seconds:.1f}s sequential, "
                 f"{time.monotonic() - started:.1f}s in all")
+        if sink_workers > 1:
+            log(f"{label} sink batches: {self.sink_stats}, {self.sink_seconds:.1f}s")
         if self.resume:
             self.resume.save_paths()
             log(f"{label} resume: {self.resume.reused} paths reused, {self.resume.searched} searched "
@@ -1444,6 +1514,7 @@ def _route_all_nets(
         resume: ResumeStore | None = None,
         route_workers: int = 1,
         spec_max_span: int = _SPEC_MAX_SPAN,
+        sink_workers: int = 1,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]], dict[str, tuple[str, list[list[Pos]]]]]:
     """Greedy routing of every net (_GreedyRouter); returns (failures, inverted cells, paths).
 
@@ -1483,8 +1554,9 @@ def _route_all_nets(
 
     started = time.monotonic()
     failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot,
-                          workers=route_workers)
-    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed, {time.monotonic() - started:.1f}s)")
+                          workers=route_workers, sink_workers=sink_workers)
+    wire = sum(len(path) for _, net_paths in router.paths.values() for path in net_paths)
+    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed, {time.monotonic() - started:.1f}s, {wire} path cells)")
     if not macros:
         failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
                                         frozenset(_component_interior(placed)), deadline)
@@ -2153,6 +2225,7 @@ def build_litematic_from_component_list(
         wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
         route_workers: int = 1,
         route_spec_max_span: int = _SPEC_MAX_SPAN,
+        route_sink_workers: int = 1,
         route_deadline: float | None = None,
         snapshots: bool = False,
         placer: str = "poisson",
@@ -2324,6 +2397,7 @@ def build_litematic_from_component_list(
             resume=resume,
             route_workers=route_workers,
             spec_max_span=route_spec_max_span,
+            sink_workers=route_sink_workers,
         )
     else:
         net_paths = {}  # negotiated mode keeps no ordered paths
