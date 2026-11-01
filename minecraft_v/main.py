@@ -12,6 +12,7 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
+from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.progress import log, phase, set_debug
 from minecraft_v.placement_engine.ir import (
@@ -81,6 +82,8 @@ def module_to_component_list(module: Module) -> ComponentList:
         components.append(Component(id=port_name, type=comp_type, pins=pins))
 
     for cell_name, cell in module.cells.items():
+        if cell.type in DEBUG_CELLS:
+            continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))
             raise ValueError(
@@ -207,6 +210,9 @@ def main():
     parser.add_argument("--debug", type=_true_or_false, nargs="?", const=True, default=False,
                         help="Log progress and slow searches, save litematic snapshots during routing to "
                              "<artifacts>/snapshots (slow), print A* counters")
+    parser.add_argument("--debug-prints", action="store_true",
+                        help="Keep $write/$display: mark the blocks they read and write <out>.probes.json for "
+                             "mchprs_headless --probes (default: synth.sh removes them; no --macros)")
     parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=False,
                         help="Route repeated subcircuits once and stamp them; the rest routes around them (default: off; "
                              "needs --placer poisson, ignored with --flat)")
@@ -243,6 +249,9 @@ def main():
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     component_list = module_to_component_list(module)
+    probes = extract_probes(module) if args.debug_prints else None
+    if probes and args.macros:
+        raise SystemExit("--debug-prints can't tap inside macros: leave out --macros")
 
     save_build_artifacts(component_list)
 
@@ -303,6 +312,7 @@ def main():
                                         place_workers=args.place_workers,
                                         flat=args.flat,
                                         macros=macros,
+                                        probes=probes,
                                         resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))
                                         if args.resume_dir else None,
                                         macro_channel=_MACRO_CHANNEL,

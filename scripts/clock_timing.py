@@ -109,8 +109,8 @@ def report(comp, workspace, pin_terminal):
 original = builder._compute_critical_path
 
 
-def capture(comp, dust_owner, workspace, pin_terminal, macros=None):
-    result = original(comp, dust_owner, workspace, pin_terminal, macros)
+def capture(comp, dust_owner, workspace, pin_terminal, macros=None, *rest):
+    result = original(comp, dust_owner, workspace, pin_terminal, macros, *rest)
     print(f"[skew] critical path {result} ticks")
     report(comp, workspace, pin_terminal)
     return result

@@ -17,6 +17,7 @@ out_litematic_dir=""
 out_litematic="build/result.litematic"
 settle=true
 synth_only=false
+debug_prints=false
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,6 +39,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --synth-only)  # stop after writing the netlist
             synth_only=true
+            shift
+            ;;
+        --debug-prints)  # keep $write/$display, also passed on to minecraft_v
+            debug_prints=true
+            args+=("$1")
             shift
             ;;
         --no-settle)
@@ -112,12 +118,18 @@ if [[ -t 2 ]]; then
     spinner_pid=$!
 fi
 
+# Prints keep whatever logic they read, so normal builds drop them. Asserts never build.
+strip_debug='delete t:$check'
+if [[ "$debug_prints" != true ]]; then
+    strip_debug='delete t:$print t:$check'
+fi
 yosys_status=0
 yosys -q -l "$yosys_log" -p "
 read_verilog -sv ${dir}/*.v
 hierarchy -check -top main
 flatten -noscopeinfo
 proc
+${strip_debug}
 memory_map
 dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
 techmap -map techmap/dlatch_map.v

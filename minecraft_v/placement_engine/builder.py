@@ -13,6 +13,7 @@ from pathlib import Path
 
 from litemapy import BlockState, Region, Schematic
 
+from minecraft_v.placement_engine.probes import probe_components, write_probes
 from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
@@ -1763,6 +1764,7 @@ def _compute_critical_path(
         workspace: Region,
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         macros: dict[str, Macro] | None = None,
+        probed: set[str] = frozenset(),
 ) -> int:
     """Repeaters/torches on each net's deepest branch, topo-sort DP; returns the critical path in ticks."""
     from collections import deque
@@ -1846,6 +1848,9 @@ def _compute_critical_path(
                    ] or [arrival[c.id] for c in comp.components if c.id not in macro_of]
     for cid, m in macro_of.items():
         endpoints += [arrival[_macro_pin(cid, pin)] + ticks for pin, ticks in m.setup.items()]
+    # A print reads these at the clock edge, even if nothing else uses them.
+    endpoints += [arrival[cid] + _gate_delay(comp_by_id[cid]) for cid in probed
+                  if comp_by_id[cid].type not in _SEQUENTIAL and comp_by_id[cid].type != ComponentType.INPUT_PIN]
     return max(endpoints)
 
 
@@ -1921,6 +1926,7 @@ def build_litematic_from_component_list(
         macro_headroom: int = 32,
         io_lane_pins: bool = True,
         resume: ResumeStore | None = None,
+        probes: list[dict] | None = None,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro)."""
     if macros:  # an array is a wall across the layout: wires get past it overhead
@@ -2144,7 +2150,8 @@ def build_litematic_from_component_list(
         return out_path
 
     with phase("[timing] critical path"):
-        critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros)
+        critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
+                                                     probe_components(probes) if probes else frozenset())
     log(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
@@ -2167,6 +2174,17 @@ def build_litematic_from_component_list(
                     if wx < width and target[2] < depth and clock_region[x, y, 0].id != "minecraft:air":
                         workspace[wx, wy, target[2]] = clock_region[x, y, 0]
             break
+
+    if probes is not None:
+        probe_path = out_path.with_suffix(".probes.json")
+        positions = dict(pin_world_map)
+        positions.update({(p.component.id, pin.name): _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin,
+                                                                        p.component.footprint,
+                                                                        _default_io_side(p.component, pin), bounds=io_bounds)
+                          for p in placed if p.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+                          for pin in p.component.pins})
+        tapped = write_probes(probe_path, probes, positions, workspace, (width, height, workspace_depth))
+        log(f"[probes] {len(probes)} prints, {tapped} blocks tapped: {probe_path}")
 
     schematic = Schematic(
         name=schematic_name,
