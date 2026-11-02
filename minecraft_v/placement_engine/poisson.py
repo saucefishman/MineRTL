@@ -705,9 +705,9 @@ _BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
 _BANK_STACK_HEIGHT = 190  # worlds aren't tall enough for one stack of a big memory
 _BANK_COLUMN_GAP = 4
 _SOUTH_PINS_CLEAR = 24  # Z past a south_pins block's face, for the output row and wire to its pins
-_SOUTH_PINS_DENSITY = float(os.environ.get("RAM_GATE_DENSITY", 0.3))
+_SOUTH_PINS_DENSITY = float(os.environ.get("RAM_GATE_DENSITY", 0.15))
 _SOUTH_PINS_OUTPUT_PITCH = 4
-_SOUTH_PINS_WIDTH = float(os.environ.get("RAM_GATE_WIDTH", 1.0))  # share of the block's width
+_SOUTH_PINS_WIDTH = float(os.environ.get("RAM_GATE_WIDTH", 0.35))  # share of the block's width
 _SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
                             # spill onto later gates' targets and each search walks through all that's piled there

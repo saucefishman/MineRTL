@@ -1221,7 +1221,7 @@ class _GreedyRouter:
         if self.resume:
             jobs = self.resume.in_saved_order(jobs)
         failures: list[tuple[str, Exception]] = []
-        keep_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 0))
+        keep_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 64))
         # Blockers to rip: not nets routed first for being huge. Redoing one costs more than the sink it would free.
         keys = {job.key for job in jobs if not keep_fanout or len(job.sinks) < keep_fanout}
         by_key = {job.key: job for job in jobs}
@@ -2299,7 +2299,7 @@ def build_litematic_from_component_list(
             f.unlink()
     snapshot_dir = DEFAULT_SNAPSHOT_DIR if snapshots else None
     with phase("[wire] ordering nets"):
-        first_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 0))  # clock and big selects first, while there's room
+        first_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 64))  # clock and big selects first, while there's room
         sorted_nets = sorted(work_nets, key=lambda net: (
             (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout else (1, _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline

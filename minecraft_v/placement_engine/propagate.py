@@ -32,6 +32,7 @@ _FACING: dict[str, Pos] = {"north": (0, 0, -1), "south": (0, 0, 1), "west": (-1,
 _SIDE_PROPERTY = {(0, 0, -1): "north", (0, 0, 1): "south", (-1, 0, 0): "west", (1, 0, 0): "east"}
 
 _MAX_STEPS_PER_ITEM = 1000
+_MAX_STEPS_PER_CELL = 30  # an oscillator otherwise looks like a hang on a big build
 # Who can read a block: through a solid block next to both, so at most two steps away.
 _REACH_TWO: tuple[Pos, ...] = tuple((x, y, z) for x in range(-2, 3) for y in range(-2, 3) for z in range(-2, 3)
                                     if abs(x) + abs(y) + abs(z) <= 2)
@@ -451,7 +452,7 @@ class _Propagation:
         while queue or in_box or waiting:
             steps += 1
             if steps > limit:
-                limit = _MAX_STEPS_PER_ITEM * max(len(self.cells), 1)  # more may have come in since
+                limit = _MAX_STEPS_PER_CELL * max(len(self.cells), 1)  # more may have come in since
                 if steps > limit:
                     log("[settle] signal never went still, is there an oscillator? Saving the states as they are.")
                     return
