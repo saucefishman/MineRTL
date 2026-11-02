@@ -1,6 +1,9 @@
 """Run a built examples/floweypu_hi in mchprs_headless: it must print 1, 2, 3, then h and i on one clock.
 
-Usage: check_floweypu.py <litematic> <pins> <half_period> [modes]
+Usage: check_floweypu.py <litematic> <pins> <half_period> [modes] [clocks]
+
+Modes run one after another (each headless world is about 2 GB resident). `clocks` defaults to 10: the
+characters come on clocks 5 to 8 after reset, so 10 still shows any extra output on the two after.
 """
 import re
 import subprocess
@@ -9,13 +12,13 @@ from pathlib import Path
 
 from settle_schematic import headless_binary
 
-CLOCKS = 20
+CLOCKS = 10
 EXPECTED = [("1", ""), ("2", ""), ("3", ""), ("h", "i")]
 
 
-def script(half: int) -> str:
+def script(half: int, clocks: int = CLOCKS) -> str:
     lines = ["set rst 1", f"settle {half}", f"pulse clk {half}", f"settle {half}", "set rst 0", f"settle {half}"]
-    for _ in range(CLOCKS):
+    for _ in range(clocks):
         lines += [f"pulse clk {half}", f"settle {half}", "print e0"]
     return "\n".join(lines) + "\n"
 
@@ -40,15 +43,16 @@ def characters(output: str) -> list[tuple[str, str]]:
 
 def main() -> int:
     litematic, pins, half, *rest = sys.argv[1:]
-    modes = rest[0] if rest else "redstone,redpiler"
+    modes = rest[0].split(",") if rest else ["redstone", "redpiler"]
+    clocks = int(rest[1]) if len(rest) > 1 else CLOCKS
     script_path = Path(litematic).with_suffix(".hi.script")
-    script_path.write_text(script(int(half)))
+    script_path.write_text(script(int(half), clocks))
     probes = [name for name in (line.split()[0] for line in open(pins)) if re.fullmatch(r"(e[01]|d[01]\[\d\]|halt)", name)]
     if "e1" not in probes:
         print("missing character pins", probes)
         return 2
     failed = 0
-    for mode in modes.split(","):
+    for mode in modes:
         out = subprocess.run([headless_binary(), "test", litematic, pins, script_path, "--modes", mode, "--add-lever", "clk",
                               "--add-lever", "rst"], capture_output=True, text=True).stdout
         got = characters(out)
