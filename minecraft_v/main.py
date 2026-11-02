@@ -12,7 +12,7 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
-from minecraft_v.placement_engine.ram import BLOCK_CELLS, GROUP_CELL, RAM4_CELL, block_for_cell, built_block
+from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block, group_block, stack_spec
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX
 from minecraft_v.placement_engine.resume import ResumeStore
@@ -66,6 +66,39 @@ def _init_high_bits(module: Module) -> set[int]:
     return high
 
 
+def _add_ram_group(stacks, components: list[Component], bit_endpoints) -> None:
+    """All of a design's RAM stacks as one block, whose lanes carry the nets they share."""
+    specs = []
+    outputs: dict[tuple[int, str], int] = {}
+    for k, (cell_name, cell) in enumerate(stacks):
+        nets: dict[str, int] = {}
+        for port, bits in cell.connections.items():
+            for i, bit in enumerate(bits):
+                pin = f"{port}[{i}]" if len(bits) > 1 or port != "we" else port
+                if port in ("ra", "rb", "rc", "rd"):
+                    if isinstance(bit, int):
+                        outputs[(k, pin)] = bit
+                elif isinstance(bit, int):
+                    nets[pin] = bit
+                else:
+                    raise ValueError(f"{cell_name}: {pin} is tied to {bit}")
+        specs.append(stack_spec(cell.parameters, nets))
+    block, own_pins, lane_pins = group_block(specs)
+    pins = []
+    by_name = {p.name: p for p in block.pins}
+    for bit, name in lane_pins.items():
+        pins.append(by_name[name])
+        bit_endpoints[bit].append(("ram_group", name, Direction.IN))
+    for name, (k, stack_pin) in own_pins.items():
+        pin = by_name[name]
+        bit = outputs.get((k, stack_pin)) if pin.direction == Direction.OUT else specs[k].nets[stack_pin]
+        if bit is not None:
+            pins.append(pin)
+            bit_endpoints[bit].append(("ram_group", name, pin.direction))
+    components.append(Component(id="ram_group", type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
+                                metadata={"macro": block.name, "bank": True}))
+
+
 def module_to_component_list(module: Module) -> ComponentList:
     components: list[Component] = []
     init_high = _init_high_bits(module)
@@ -83,8 +116,13 @@ def module_to_component_list(module: Module) -> ComponentList:
                 bit_endpoints[bit].append((port_name, pin_name, pin_dir))
         components.append(Component(id=port_name, type=comp_type, pins=pins))
 
+    stacks = [(name, cell) for name, cell in module.cells.items() if cell.type == RAM4_CELL]
+    grouped = {name for name, _ in stacks} if len(stacks) > 1 else set()
+    if grouped:
+        _add_ram_group(stacks, components, bit_endpoints)
+
     for cell_name, cell in module.cells.items():
-        if cell.type in DEBUG_CELLS:
+        if cell.type in DEBUG_CELLS or cell_name in grouped:
             continue
         if cell.type in BLOCK_CELLS:
             block = block_for_cell(cell.type, cell.parameters)
@@ -99,7 +137,7 @@ def module_to_component_list(module: Module) -> ComponentList:
                     pins.append(pin)
                     bit_endpoints[bit].append((cell_name, pin.name, pin.direction))
             components.append(Component(id=cell_name, type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
-                                        metadata={"macro": block.name, **({"bank": True} if cell.type in (RAM4_CELL, GROUP_CELL) else {})}))
+                                        metadata={"macro": block.name, **({"bank": True} if cell.type == RAM4_CELL else {})}))
             continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))
