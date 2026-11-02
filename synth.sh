@@ -17,6 +17,7 @@ out_litematic_dir=""
 out_litematic="build/result.litematic"
 synth_only=false
 debug_prints=true
+tiled_ram=false
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --out-litematic-dir=*)
             out_litematic_dir="${1#*=}"
+            shift
+            ;;
+        --tiled-ram)  # memories with a supported port layout become tiled arrays
+            tiled_ram=true
             shift
             ;;
         --synth-only)  # stop after writing the netlist
@@ -139,13 +144,21 @@ strip_debug='delete t:$check'
 if [[ "$debug_prints" == false ]]; then
     strip_debug='delete t:$print t:$check'
 fi
+map_tiled_ram=""
+if [[ "$tiled_ram" == true ]]; then
+    map_tiled_ram="opt
+memory_collect
+techmap -map techmap/ram_2r1w.v t:\$mem_v2"
+fi
 yosys_status=0
 yosys -q -l "$yosys_log" -p "
 read_verilog -sv ${dir}/*.v
+read_verilog -lib techmap/ram_cells.v
 hierarchy -check -top main
 flatten -noscopeinfo
 proc
 ${strip_debug}
+${map_tiled_ram}
 memory_map
 dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
 techmap -map techmap/dlatch_map.v

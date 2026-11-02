@@ -12,6 +12,7 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
+from minecraft_v.placement_engine.ram import RAM_CELL, WINDOW_CELL, WINDOW_MACRO, build_ram, build_window
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX
 from minecraft_v.placement_engine.resume import ResumeStore
@@ -84,6 +85,23 @@ def module_to_component_list(module: Module) -> ComponentList:
 
     for cell_name, cell in module.cells.items():
         if cell.type in DEBUG_CELLS:
+            continue
+        if cell.type in (RAM_CELL, WINDOW_CELL):
+            params = {k: int(v, 2) for k, v in cell.parameters.items()}
+            block = build_ram(f"ram_{params['DEPTH']}x{params['WIDTH']}", params["DEPTH"], params["WIDTH"]) \
+                if cell.type == RAM_CELL else build_window()
+            pins = []
+            for pin in block.pins:
+                port, _, index = pin.name.rstrip("]").partition("[")
+                bit = cell.connections[port][int(index or 0)]
+                # TODO: tie off constant pins, so memories with a fixed write word or an unused address bit can map.
+                if not isinstance(bit, int) and pin.direction == Direction.IN:
+                    raise ValueError(f"{cell_name}: {pin.name} is tied to {bit}")
+                if isinstance(bit, int):
+                    pins.append(pin)
+                    bit_endpoints[bit].append((cell_name, pin.name, pin.direction))
+            components.append(Component(id=cell_name, type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
+                                        metadata={"macro": block.name, **params}))
             continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))
@@ -287,6 +305,11 @@ def main():
 
     macros = None
     flat_comp = component_list
+    rams = {c.metadata["macro"]: build_window() if c.metadata["macro"] == WINDOW_MACRO
+            else build_ram(c.metadata["macro"], c.metadata["DEPTH"], c.metadata["WIDTH"])
+            for c in component_list.components if c.type == ComponentType.CUSTOM}
+    if rams:
+        macros = rams
     if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
@@ -302,6 +325,7 @@ def main():
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
                                                            on_class=report)
+        macros = {**macros, **rams}
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")
         if any(c.metadata.get("bank") for c in component_list.components):
