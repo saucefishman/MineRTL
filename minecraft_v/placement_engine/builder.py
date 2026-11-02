@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import bisect
 import time
 import zlib
@@ -1260,8 +1261,9 @@ class _GreedyRouter:
                     where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
                     wider = [] if where is None or job.key in escalated or not rip_blockers else \
                         self.blockers(where, job.key, keys, _ESCALATE_RADIUS)[:_ESCALATE_MAX]
+                    # A search that ran out of f-cap saw everything under it: more expansions can't change that.
                     if wider or (where is not None and job.key not in escalated and rip_blockers
-                                 and not isinstance(e, LayConflict)):
+                                 and not isinstance(e, LayConflict) and "f-cap" not in str(e)):
                         escalated.add(job.key)
                         requeued.add(job.key)
                         self.wide_budget.add(job.key)
@@ -2251,7 +2253,9 @@ def build_litematic_from_component_list(
             f.unlink()
     snapshot_dir = DEFAULT_SNAPSHOT_DIR if snapshots else None
     with phase("[wire] ordering nets"):
-        sorted_nets = sorted(work_nets, key=lambda net: _net_sort_key(net, pin_terminal))
+        first_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 0))  # clock and big selects first, while there's room
+        sorted_nets = sorted(work_nets, key=lambda net: (
+            (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout else (1, _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     if route_passes <= 1:
         if route_workers > 1:
