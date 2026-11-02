@@ -317,13 +317,13 @@ def _strengths(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
 
 
 def find_latch(region: Region, source: Pos, stop: frozenset[Pos], world: _World | None = None) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any. world: one to reuse, with nothing hidden."""
+    """The cells of a signal cycle from source through a repeater or torch, if any. world: one to reuse, with nothing hidden."""
     return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop)
 
 
-def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos], torches: bool = False) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any: it holds itself on. torches: through a torch
-    too, as when a drop's two torches feed back into the wire that drives them."""
+def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
+    """The cells of a signal cycle from source through a repeater or torch, if any: it holds itself on, as when a
+    drop's two torches feed back into the wire that drives them."""
     start: tuple[Pos, str] = (source, _STRONG if world.kind(source) == _OPAQUE else "")
     ids = {start: 0}
     nodes = [start]
@@ -343,14 +343,13 @@ def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos], torches: bool
                 queue.append(nxt)
             tails.append(tail)
             heads.append(head)
-    kinds = (_REPEATER, _TORCH, _WALL_TORCH) if torches else (_REPEATER,)
-    repeaters = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) in kinds]
-    if not repeaters:
+    drivers = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) in (_REPEATER, _TORCH, _WALL_TORCH)]
+    if not drivers:
         return []
     graph = csr_matrix((np.ones(len(tails), dtype=np.int8), (tails, heads)), shape=(len(nodes), len(nodes)))
     _, labels = connected_components(graph, directed=True, connection="strong")
     sizes = np.bincount(labels)
-    for label in sorted({labels[i] for i in repeaters if sizes[labels[i]] > 1}):
+    for label in sorted({labels[i] for i in drivers if sizes[labels[i]] > 1}):
         return sorted({nodes[i][0] for i in np.flatnonzero(labels == label).tolist()})
     return []
 
@@ -445,7 +444,7 @@ def verify_signals(
         for sink in sinks:
             if sink in reached and sink not in strong_enough:
                 violations.append(Violation("weak", frozenset({net_id}), sink))
-        latch = _latch_cycle(world, source, stop, torches=True)
+        latch = _latch_cycle(world, source, stop)
         if latch:
             violations.append(Violation("latch", frozenset({net_id}), latch[0]))
         for pos in _inverted_contacts(world, source, frozenset(sinks), stop)[:1]:
