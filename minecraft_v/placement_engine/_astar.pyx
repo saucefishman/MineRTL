@@ -14,6 +14,8 @@ from libc.stdlib cimport calloc, free
 from libcpp.vector cimport vector
 from cython.operator cimport dereference
 from cpython.set cimport PySet_Contains
+from posix.time cimport clock_gettime, timespec, CLOCK_MONOTONIC
+cimport cython
 import time
 import numpy as np
 from minecraft_v.progress import pulse
@@ -26,25 +28,69 @@ cdef extern from *:
         double f; long long neg_h; double g; long long counter;
         double g_wire; long long node; long long parent; int group;
     };
-    // heapq is a min-heap on the tuple (f, -h, g, counter, ...); counter is unique.
-    struct HeapAfter {
-        bool operator()(const HeapEntry& a, const HeapEntry& b) const {
-            if (a.f != b.f) return a.f > b.f;
-            if (a.neg_h != b.neg_h) return a.neg_h > b.neg_h;
-            if (a.g != b.g) return a.g > b.g;
-            return a.counter > b.counter;
+    // heapq's order on the tuple (f, -h, g, counter, ...). counter is unique, so the order is total and
+    // the pops don't depend on how the heap is laid out: 4-ary over 16 byte keys, with the rest of an
+    // entry in an array by counter. Sifting is most of a big search's cache misses.
+    struct HeapKey { double f; int neg_h; unsigned int counter; };
+    struct HeapData { double g; double g_wire; long long node; long long parent; int group; };
+    struct Heap {
+        std::vector<HeapKey> keys;
+        std::vector<HeapData> data;
+        // With g and weight * h whole quarters, f and h fix g exactly, so it needs no looking at.
+        bool g_can_differ = true;
+        inline bool before(const HeapKey& a, const HeapKey& b) const {
+            if (a.f != b.f) return a.f < b.f;
+            if (a.neg_h != b.neg_h) return a.neg_h < b.neg_h;
+            if (g_can_differ) {
+                double ga = data[a.counter].g, gb = data[b.counter].g;
+                if (ga != gb) return ga < gb;
+            }
+            return a.counter < b.counter;
+        }
+        bool empty() const { return keys.empty(); }
+        void clear() {
+            keys.clear();
+            data.clear();
+            if (data.capacity() > (1u << 22)) { std::vector<HeapData>().swap(data); std::vector<HeapKey>().swap(keys); }
+        }
+        // e.counter is its place in data: the number of pushes so far.
+        inline void push(const HeapEntry& e) {
+            data.push_back(HeapData{e.g, e.g_wire, e.node, e.parent, e.group});
+            HeapKey k{e.f, (int)e.neg_h, (unsigned int)e.counter};
+            size_t i = keys.size();
+            keys.push_back(k);
+            HeapKey* h = keys.data();
+            while (i) {
+                size_t up = (i - 1) >> 2;
+                if (!before(k, h[up])) break;
+                h[i] = h[up];
+                i = up;
+            }
+            h[i] = k;
+        }
+        inline HeapEntry pop() {
+            HeapKey* h = keys.data();
+            HeapKey top = h[0];
+            size_t n = keys.size() - 1;
+            HeapKey k = h[n];
+            keys.pop_back();
+            if (n) {
+                size_t i = 0;
+                for (;;) {
+                    size_t c = (i << 2) + 1;
+                    if (c >= n) break;
+                    size_t end = c + 4 < n ? c + 4 : n, best = c;
+                    for (size_t j = c + 1; j < end; j++) if (before(h[j], h[best])) best = j;
+                    if (!before(h[best], k)) break;
+                    h[i] = h[best];
+                    i = best;
+                }
+                h[i] = k;
+            }
+            const HeapData& d = data[top.counter];
+            return HeapEntry{top.f, top.neg_h, d.g, top.counter, d.g_wire, d.node, d.parent, d.group};
         }
     };
-    static inline void heap_push(std::vector<HeapEntry>& h, const HeapEntry& e) {
-        h.push_back(e);
-        std::push_heap(h.begin(), h.end(), HeapAfter());
-    }
-    static inline HeapEntry heap_pop(std::vector<HeapEntry>& h) {
-        std::pop_heap(h.begin(), h.end(), HeapAfter());
-        HeapEntry e = h.back();
-        h.pop_back();
-        return e;
-    }
     // Open-addressing (linear probing) hash map from 64-bit keys; values value-initialised.
     // Key and value share a slot (one cache line per probe); ~0 marks an empty slot, which no
     // node or cell key uses. Pointers it returns are invalidated by the next get() that inserts.
@@ -53,16 +99,31 @@ cdef extern from *:
         static constexpr unsigned long long EMPTY = ~0ULL;
         std::vector<Slot> slots;
         size_t mask = 0, count = 0;
-        FlatMap() { reset(1 << 12); }
+        // A search makes several of these: storage goes round a pool rather than through malloc, which
+        // hands big blocks back to the system. Single-threaded, like the rest of this module.
+        static std::vector<std::vector<Slot>>& pool() {
+            static std::vector<std::vector<Slot>> p;
+            return p;
+        }
+        FlatMap() {
+            std::vector<std::vector<Slot>>& p = pool();
+            if (!p.empty()) { slots.swap(p.back()); p.pop_back(); }
+            reset(1 << 12);
+        }
+        ~FlatMap() {
+            std::vector<std::vector<Slot>>& p = pool();
+            if (p.size() < 32 && slots.capacity() <= (1u << 20)) p.emplace_back(std::move(slots));
+        }
         void reset(size_t cap) {
             slots.assign(cap, Slot{EMPTY, V()});
             mask = cap - 1; count = 0;
         }
         static inline size_t mix(unsigned long long k) {
-            k ^= k >> 33; k *= 0xff51afd7ed558ccdULL; k ^= k >> 33;
-            k *= 0xc4ceb9fe1a85ec53ULL; k ^= k >> 33;
-            return (size_t)k;
+            k ^= k >> 29;  // the high bits (a node's cell) have to reach the low bits of the product's top half
+            k *= 0x9e3779b97f4a7c15ULL;
+            return (size_t)(k >> 32);
         }
+        inline void prefetch(unsigned long long k) const { __builtin_prefetch(&slots[mix(k) & mask]); }
         V* find(unsigned long long k) {
             size_t i = mix(k) & mask;
             while (slots[i].key != EMPTY) {
@@ -85,9 +146,12 @@ cdef extern from *:
         void grow() {
             std::vector<Slot> old;
             old.swap(slots);
+            std::vector<std::vector<Slot>>& p = pool();
+            if (!p.empty()) { slots.swap(p.back()); p.pop_back(); }
             reset(old.size() * 2);
             int ins;
             for (const Slot& s : old) if (s.key != EMPTY) *get(s.key, &ins) = s.val;
+            if (p.size() < 32 && old.capacity() <= (1u << 20)) p.emplace_back(std::move(old));
         }
     };
     """
@@ -100,9 +164,14 @@ cdef extern from *:
         long long node
         long long parent
         int group
-    void heap_push(vector[HeapEntry]& h, const HeapEntry& e)
-    HeapEntry heap_pop(vector[HeapEntry]& h)
+    cdef cppclass Heap:
+        bint g_can_differ
+        void clear()
+        void push(const HeapEntry& e)
+        HeapEntry pop()
+        bint empty()
     cdef cppclass FlatMap[V]:
+        void prefetch(unsigned long long k)
         V* find(unsigned long long k)
         V* get(unsigned long long k, int* inserted)
         void reset(size_t cap)
@@ -110,24 +179,27 @@ cdef extern from *:
 
 cdef struct NodeInfo:
     double g          # g_score
-    long long parent  # came_from (valid once expanded)
-    bint expanded     # in came_from / explored
+    long long parent  # came_from; NOT_EXPANDED until then
 
 
+cdef enum:
+    MAX_CELL_MOVES = 64  # more than _static_moves' (flat, slopes, 2x slopes, +1, towers, -4)
+    NOT_EXPANDED = -2   # NodeInfo.parent; -1 is a seed's
+    UNREACHED = -3      # a slot get() made for a cost past the limit
+
+
+# A search reads a cell's moves some thirty times over: small, so that's few cache lines.
 cdef struct Move:
-    int dest
-    int cost
     uint32_t forbid
-    int gate          # 0 always, 1 not right after a tower move, 2 only right after one
-    bint has_extra
-    int ex, ey, ez    # 2x-slope intermediate, relative to the expanded cell
-    int dx, dy, dz
-    int shift         # snapshot shift table index for (dx, dy, dz)
-    bint has_flat
-    int fdx, fdz
-    long long h
-    bint near
-    long long arrive
+    int dest
+    int h
+    short shift       # snapshot shift table index for (dx, dy, dz)
+    signed char cost
+    signed char gate  # 0 always, 1 not right after a tower move, 2 only right after one
+    signed char dx, dy, dz
+    signed char fdx, fdz
+    signed char ex, ey, ez  # 2x-slope intermediate, relative to the expanded cell
+    char has_extra, has_flat, near, arrive  # arrive: by a tower move
     double cong       # congestion cost of dest (0 without congestion)
 
 
@@ -140,6 +212,14 @@ cdef struct CellMoves:
     int start, count  # into moves
     int m4_move       # index into moves, or -1
     int m4_start, m4_count  # into m4_sides
+
+
+cdef CellMoves _NO_MOVES                # a cell whose moves aren't worked out yet
+_NO_MOVES.start = -1
+_NO_MOVES.count = 0
+_NO_MOVES.m4_move = -1
+_NO_MOVES.m4_start = 0
+_NO_MOVES.m4_count = 0
 
 
 # Set by init() from pathfinding (single source of truth for the encoding).
@@ -162,6 +242,12 @@ cdef object _init_done = False
 # Totals across searches in this process (see stats()).
 cdef long long STAT_SEARCHES = 0, STAT_POPS = 0, STAT_PUSHES = 0, STAT_CELLS = 0
 cdef double STAT_LOAD_TIME = 0
+
+
+cdef inline double now_seconds() noexcept nogil:
+    cdef timespec t
+    clock_gettime(CLOCK_MONOTONIC, &t)
+    return t.tv_sec + 1e-9 * t.tv_nsec
 
 
 LAST = {}  # counters of the most recent search (debugging / tuning)
@@ -246,25 +332,26 @@ cdef int shift_index(int dx, int dy, int dz) except -1:
     return idx
 
 
+@cython.final
 cdef class CameFrom:
     """came_from as a read-only mapping (node -> parent node), like the Python loop's dict."""
     cdef FlatMap[NodeInfo] nodes
 
     def get(self, long long node, default=None):
         cdef NodeInfo* ni = self.nodes.find(node)
-        if ni == NULL or not ni.expanded:
+        if ni == NULL or ni.parent < -1:
             return default
         return ni.parent
 
     def __getitem__(self, long long node):
         cdef NodeInfo* ni = self.nodes.find(node)
-        if ni == NULL or not ni.expanded:
+        if ni == NULL or ni.parent < -1:
             raise KeyError(node)
         return ni.parent
 
     def __contains__(self, long long node):
         cdef NodeInfo* ni = self.nodes.find(node)
-        return ni != NULL and ni.expanded
+        return ni != NULL and ni.parent >= -1
 
 
 # ---------------------------------------------------------------------------------------------
@@ -326,6 +413,7 @@ cdef enum:
     S_PENDING = 1 << 5
 
 
+@cython.final
 cdef class CellGrid:
     """One word per cell of what the searches read, mirrored from the router's containers.
 
@@ -380,6 +468,12 @@ cdef class CellGrid:
 
     def __dealloc__(self):
         free(self.g)
+
+    def fp_set(self):
+        return self.fp
+
+    def terminal_set(self):
+        return self.terminal
 
     cdef int read_fp(self, uint16_t* w, int x, int y, int z) except -1:
         w[0] |= G_FP_READ | (F_FP if PySet_Contains(self.fp, (x, y, z)) else 0)
@@ -457,11 +551,20 @@ cdef inline void set3(int* c, int x, int y, int z) noexcept nogil:
     c[2] = z
 
 
+cdef struct _CellVectors:
+    vector[int]* x
+    vector[int]* y
+    vector[int]* z
+    vector[long long]* h
+    vector[CellMoves]* cm
+
+
 cdef inline int exempt_code(int ox, int oy, int oz) noexcept nogil:
     """Single exempt cell as an offset from the queried cell (0 = no exempt)."""
     return 1 + (ox + 2) * 25 + (oy + 2) * 5 + (oz + 2)
 
 
+@cython.final
 cdef class World:
     cdef object non_air, wire, torch, repeater, solid, inverted, terminal, fp_relief, fp, pending
     cdef dict dust_owner
@@ -485,7 +588,14 @@ cdef class World:
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint grid_check
-    cdef vector[Move]* out           # set: entry() appends Moves here instead of returning tuples
+    # Set while _Cells.load runs: moves, -4 sides and new cells go straight into its vectors.
+    cdef vector[Move]* out
+    cdef vector[M4Side]* out_sides
+    cdef vector[int]* out_m4_cells
+    cdef _CellVectors* out_cells
+    cdef bint have_extra             # a keepout has extra cells, so a keepout-free cell still needs small
+    cdef int small_lo[3]             # bounding box of small's cells
+    cdef int small_hi[3]
 
     def __init__(self, non_air, wire, torch, repeater, solid, dust_owner, net_id, bounds,
                  int max_bridge_y, goal, int x_h_factor, eprot, prot, fp_relief, fp, inverted, terminal,
@@ -510,6 +620,8 @@ cdef class World:
         self.pos_ids, self.pos_list, self.h_list, self.move_cache = pos_ids, pos_list, h_list, move_cache
         self.owner_ids = {}
         self.gp = NULL
+        self.small_lo = [1 << 30, 1 << 30, 1 << 30]
+        self.small_hi = [-(1 << 30), -(1 << 30), -(1 << 30)]
         if grid is not None and (grid.non_air is non_air and grid.wire is wire and grid.torch is torch
                                  and grid.repeater is repeater and grid.solid is solid
                                  and grid.dust_owner is dust_owner and grid.inverted is inverted
@@ -536,6 +648,8 @@ cdef class World:
             grid.load_own(self.eprot[2])
             for spec, shift in ((self.eprot, 0), (self.prot, 1)):
                 self.add_small(spec[4], S_EXTRA << shift)
+                if spec[4]:
+                    self.have_extra = True
                 self.add_small(spec[3], S_EXCL << shift)
         self.add_small(self.fp_relief, S_RELIEF)
         self.add_small(self.pending, S_PENDING)
@@ -544,10 +658,18 @@ cdef class World:
     cdef int add_small(self, cells, int bit) except -1:
         cdef int ins
         cdef char* b
+        cdef int x, y, z
         for pos in cells:
-            b = self.small.get(cell_key(pos[0], pos[1], pos[2]), &ins)
+            x, y, z = pos
+            b = self.small.get(cell_key(x, y, z), &ins)
             b[0] |= bit
             self.have_small = True
+            if x < self.small_lo[0]: self.small_lo[0] = x
+            if y < self.small_lo[1]: self.small_lo[1] = y
+            if z < self.small_lo[2]: self.small_lo[2] = z
+            if x > self.small_hi[0]: self.small_hi[0] = x
+            if y > self.small_hi[1]: self.small_hi[1] = y
+            if z > self.small_hi[2]: self.small_hi[2] = z
         return 0
 
     # Reads. With a grid, a cell inside it needs no Python; everything else takes cell()'s path.
@@ -570,7 +692,8 @@ cdef class World:
         return self.cell(x, y, z).val
 
     cdef inline int small_at(self, int x, int y, int z) noexcept:
-        if not self.have_small:
+        if (not self.have_small or x < self.small_lo[0] or x > self.small_hi[0] or y < self.small_lo[1]
+                or y > self.small_hi[1] or z < self.small_lo[2] or z > self.small_hi[2]):
             return 0
         cdef char* b = self.small.find(cell_key(x, y, z))
         return 0 if b == NULL else b[0]
@@ -590,6 +713,8 @@ cdef class World:
 
     cdef inline bint keep_at(self, uint16_t g, int x, int y, int z, int shift) except -1:
         """_ForeignKeepout.__contains__, for a cell in the grid."""
+        if not self.have_extra and not g & G_KEEP1:
+            return False
         cdef int s = self.small_at(x, y, z)
         if s & (S_EXTRA << shift):
             return True
@@ -813,7 +938,10 @@ cdef class World:
                 return False
         return True
 
-    cdef bint walkable(self, int x, int y, int z, int ex=0, int ey=0, int ez=0, bint has_exempt=False) except -1:
+    cdef inline bint walkable(self, int x, int y, int z) except -1:
+        return self.walkable_ex(x, y, z, 0, 0, 0, False)
+
+    cdef bint walkable_ex(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt) except -1:
         if self.eprot_at(x, y, z) or self.efp(x, y, z):
             return False
         cdef unsigned long long key = cell_key(x, y, z) << 7
@@ -855,42 +983,49 @@ cdef class World:
             self.pos_list.append(key)
             self.h_list.append(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
             self.move_cache.append(None)
+            if self.out_cells != NULL:
+                self.out_cells.x.push_back(x)
+                self.out_cells.y.push_back(y)
+                self.out_cells.z.push_back(z)
+                self.out_cells.h.push_back(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
+                self.out_cells.cm.push_back(_NO_MOVES)
         return i
 
-    cdef object entry(self, int x, int y, int z, int tx, int ty, int tz, int cost, unsigned int forbid,
-                      int gate=0, object extra=None):
-        """_find_wire_path's _entry, with the snapshot tables slot left None."""
+    cdef int emit(self, list moves, int x, int y, int z, int tx, int ty, int tz, int cost, unsigned int forbid,
+                  int gate, bint has_extra, int ex, int ey, int ez) except -1:
+        """_find_wire_path's _entry. Into the vector being filled, or moves as a tuple with its snapshot tables slot None."""
         cdef int dx = tx - x, dy = ty - y, dz = tz - z
         cdef Move m
-        if self.out != NULL:
-            m.dest = self.pid(tx, ty, tz)
-            m.cost = cost
-            m.forbid = forbid
-            m.gate = gate
-            m.has_extra = extra is not None
-            if m.has_extra:
-                m.ex, m.ey, m.ez = extra[0] - x, extra[1] - y, extra[2] - z
-            else:
-                m.ex = m.ey = m.ez = 0
-            m.dx, m.dy, m.dz = dx, dy, dz
-            m.shift = shift_index(dx, dy, dz)
-            m.has_flat = dy == 0 and abs(dx) <= 1 and abs(dz) <= 1
-            m.fdx = dx if m.has_flat else 0
-            m.fdz = dz if m.has_flat else 0
-            m.h = abs(tx - self.gx) * self.x_h_factor + abs(ty - self.gy) * 4 + abs(tz - self.gz)
-            m.near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
-                      and abs(self.gy - ty) < Y_RADIUS_MIN)
-            m.arrive = TOWER_FLAG if dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2)) else 0
-            m.cong = 0.0
-            self.out.push_back(m)
-            return None
-        flat_dir = (dx, dz) if dy == 0 and abs(dx) <= 1 and abs(dz) <= 1 else None
-        dest = self.pid(tx, ty, tz)
-        h = self.h_list[dest]
-        near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
-                and abs(self.gy - ty) < Y_RADIUS_MIN)
-        arrive = TOWER_FLAG if dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2)) else 0
-        return dest, cost, forbid, gate, extra, None, flat_dir, h, near, arrive
+        if self.out == NULL:
+            flat_dir = (dx, dz) if dy == 0 and abs(dx) <= 1 and abs(dz) <= 1 else None
+            dest = self.pid(tx, ty, tz)
+            near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
+                    and abs(self.gy - ty) < Y_RADIUS_MIN)
+            arrive = TOWER_FLAG if dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2)) else 0
+            moves.append((dest, cost, forbid, gate, (ex, ey, ez) if has_extra else None, None, flat_dir, self.h_list[dest],
+                          near, arrive))
+            return 0
+        m.dest = self.pid(tx, ty, tz)
+        m.cost = cost
+        m.forbid = forbid
+        m.gate = gate
+        m.has_extra = has_extra
+        if has_extra:
+            m.ex, m.ey, m.ez = ex - x, ey - y, ez - z
+        else:
+            m.ex = m.ey = m.ez = 0
+        m.dx, m.dy, m.dz = dx, dy, dz
+        m.shift = shift_index(dx, dy, dz)
+        m.has_flat = dy == 0 and abs(dx) <= 1 and abs(dz) <= 1
+        m.fdx = dx if m.has_flat else 0
+        m.fdz = dz if m.has_flat else 0
+        m.h = abs(tx - self.gx) * self.x_h_factor + abs(ty - self.gy) * 4 + abs(tz - self.gz)
+        m.near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
+                  and abs(self.gy - ty) < Y_RADIUS_MIN)
+        m.arrive = dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2))
+        m.cong = 0.0
+        self.out.push_back(m)
+        return 0
 
     cpdef tuple static_moves(self, int cid):
         x, y, z = self.pos_list[cid]
@@ -915,11 +1050,16 @@ cdef class World:
 
     cdef tuple _static_moves(self, int x, int y, int z):
         cdef list moves = []
+        if self.base(x, y, z) & F_INV:
+            return [], None
+        self.plain_moves(x, y, z, moves)
+        return moves, self.powered_minus4(x, y, z)
+
+    cdef int plain_moves(self, int x, int y, int z, list moves) except -1:
+        """Every move but powered -4, in moves or the vector being filled. The cell isn't inverted."""
         cdef int d, dx, dz, nx, nz, nx2, nz2, mx, my, mz, k, below_owner
         cdef unsigned int b_lo, b_mid, b_hi
         cdef bint has_ex, above_clear, breaks_slope, mid_ok, mid_dn_ok
-        if (self.base(x, y, z) & F_INV):
-            return [], None
         cdef int min_y = self.min_y, mby = self.max_bridge_y
 
         for d in range(4):
@@ -930,9 +1070,9 @@ cdef class World:
             # Flat move
             if self.walkable(nx, y, nz) and not self.flag(nx, y + 1, nz, F_POWERED):
                 if y <= min_y:
-                    moves.append(self.entry(x, y, z, nx, y, nz, 1, b_hi | b_mid))
+                    self.emit(moves, x, y, z, nx, y, nz, 1, b_hi | b_mid, 0, False, 0, 0, 0)
                 elif self.can_support(nx, y - 1, nz) and not self.torch_below(nx, y - 1, nz):
-                    moves.append(self.entry(x, y, z, nx, y, nz, 1, b_hi | b_mid | b_lo))
+                    self.emit(moves, x, y, z, nx, y, nz, 1, b_hi | b_mid | b_lo, 0, False, 0, 0, 0)
 
             # Slope-up
             if y < mby:
@@ -940,7 +1080,7 @@ cdef class World:
                         and not self.flag(nx, y + 2, nz, F_POWERED)):
                     if (((self.base(nx, y, nz) & F_SOLID) or (self.inb(nx, y, nz) and not (self.base(nx, y, nz) & F_NONAIR)))
                             and not self.torch_below(nx, y, nz)):
-                        moves.append(self.entry(x, y, z, nx, y + 1, nz, 3, b_hi | b_mid, 1))
+                        self.emit(moves, x, y, z, nx, y + 1, nz, 3, b_hi | b_mid, 1, False, 0, 0, 0)
 
             # Slope-down
             if y > min_y:
@@ -951,7 +1091,7 @@ cdef class World:
                     and not self.flag(nx, y, nz, F_POWERED)
                 )
                 has_ex = self.can_support(x, y - 1, z)
-                if above_clear and self.walkable(nx, y - 1, nz, x, y - 2, z, has_ex):
+                if above_clear and self.walkable_ex(nx, y - 1, nz, x, y - 2, z, has_ex):
                     if y - 1 <= min_y or (self.can_support(nx, y - 2, nz) and not self.torch_below(nx, y - 2, nz)):
                         below_owner = self.owner(nx, y - 3, nz)
                         breaks_slope = False
@@ -961,7 +1101,7 @@ cdef class World:
                                     breaks_slope = True
                                     break
                         if not breaks_slope:
-                            moves.append(self.entry(x, y, z, nx, y - 1, nz, 2, b_lo | b_mid | b_hi))
+                            self.emit(moves, x, y, z, nx, y - 1, nz, 2, b_lo | b_mid | b_hi, 0, False, 0, 0, 0)
 
         for d in range(4):
             dx, dz = HORIZ[d][0], HORIZ[d][1]
@@ -983,8 +1123,7 @@ cdef class World:
                 )
                 if mid_ok and self.walkable(nx2, y + 2, nz2):
                     if self.can_support(mx, y, mz) and not self.torch_below(mx, y, mz):
-                        moves.append(self.entry(x, y, z, nx2, y + 2, nz2, 7, b_hi | b_mid, 1,
-                                                (mx, my, mz)))
+                        self.emit(moves, x, y, z, nx2, y + 2, nz2, 7, b_hi | b_mid, 1, True, mx, my, mz)
 
             # 2x slope-down
             if y - 2 >= min_y:
@@ -1008,17 +1147,15 @@ cdef class World:
                 )
                 if mid_dn_ok and self.walkable(nx2, y - 2, nz2):
                     if y - 2 <= min_y or (self.can_support(nx2, y - 3, nz2) and not self.torch_below(nx2, y - 3, nz2)):
-                        moves.append(self.entry(x, y, z, nx2, y - 2, nz2, 7, b_lo | b_mid | b_hi, 0,
-                                                (mx, my, mz)))
+                        self.emit(moves, x, y, z, nx2, y - 2, nz2, 7, b_lo | b_mid | b_hi, 0, True, mx, my, mz)
 
         # +1Y from tower top (only right after a tower move)
         if y + 1 <= mby and self.walkable(x, y + 1, z):
-            moves.append(self.entry(x, y, z, x, y + 1, z, 1, 0, 2))
+            self.emit(moves, x, y, z, x, y + 1, z, 1, 0, 2, False, 0, 0, 0)
 
         # Tower-up
         self.tower_moves(x, y, z, moves)
-
-        return moves, self.powered_minus4(x, y, z)
+        return 0
 
     cdef int tower_moves(self, int x, int y, int z, list moves) except -1:
         """_tower_candidates, appending entries."""
@@ -1072,8 +1209,8 @@ cdef class World:
                     continue
                 if (self.base(cx, y - 1, cz) & F_WIRE):
                     continue
-            moves.append(self.entry(x, y, z, cx, y + 4, cz, 8,
-                                    snap_bit(tdx, 0, tdz) | snap_bit(tdx, -1, tdz) | snap_bit(tdx, 1, tdz)))
+            self.emit(moves, x, y, z, cx, y + 4, cz, 8, snap_bit(tdx, 0, tdz) | snap_bit(tdx, -1, tdz) | snap_bit(tdx, 1, tdz),
+                      0, False, 0, 0, 0)
         return 0
 
     cdef bint next_to_terminal(self, int x, int y, int z) except -1:
@@ -1118,11 +1255,14 @@ cdef class World:
         return self.owner(x, y, z) < 2
 
     cdef object powered_minus4(self, int x, int y, int z):
-        """_powered_minus4_move."""
+        """_powered_minus4_move: its entry and sides. Filling vectors: the sides, then the entry, returning None."""
         cdef int d, dx, dz, nx, nz, k, ddy, i, bx, by, bz, cx, cy, cz
         cdef int cells[6][3]
         cdef unsigned int b_lo, b_mid, b_hi
         cdef bint ok
+        cdef int n_sides = 0
+        cdef M4Side m4
+        cdef list moves = None
         if y - 4 < self.min_y:
             return None
         if not self.walkable(x, y - 4, z):
@@ -1138,7 +1278,7 @@ cdef class World:
                 return None
         elif not (self.inb(bx, by, bz) and not (self.base(bx, by, bz) & F_NONAIR)):
             return None
-        sides = []
+        sides = [] if self.out == NULL else None
         for d in range(4):
             dx, dz = HORIZ[d][0], HORIZ[d][1]
             nx, nz = x + dx, z + dz
@@ -1175,10 +1315,30 @@ cdef class World:
                         break
                 if not ok:
                     break
-            if ok:
+            if not ok:
+                continue
+            n_sides += 1
+            if self.out != NULL:
+                m4.forbid = b_lo | b_mid | b_hi
+                m4.start = self.out_m4_cells.size()
+                m4.count = 7
+                self.out_sides.push_back(m4)
+                self.out_m4_cells.push_back(bx - x)
+                self.out_m4_cells.push_back(by - y)
+                self.out_m4_cells.push_back(bz - z)
+                for i in range(6):
+                    self.out_m4_cells.push_back(cells[i][0] - x)
+                    self.out_m4_cells.push_back(cells[i][1] - y)
+                    self.out_m4_cells.push_back(cells[i][2] - z)
+            else:
                 sides.append((b_lo | b_mid | b_hi, ((bx, by, bz),) + tuple(
-                    (cells[i][0], cells[i][1], cells[i][2]) for i in range(6))))
-        return (self.entry(x, y, z, x, y - 4, z, 8, 0), sides) if sides else None
+                    [(cells[i][0], cells[i][1], cells[i][2]) for i in range(6)])))
+        if not n_sides:
+            return None
+        if self.out == NULL:
+            moves = []
+        self.emit(moves, x, y, z, x, y - 4, z, 8, 0, 0, False, 0, 0, 0)
+        return (moves[0], sides) if self.out == NULL else None
 
 
 def _strip_tables(static):
@@ -1188,6 +1348,7 @@ def _strip_tables(static):
     return [strip(e) for e in moves], (None if m4 is None else (strip(m4[0]), m4[1]))
 
 
+@cython.final
 cdef class _Cells:
     """Coordinates, heuristic and converted static moves per cell id, mirrored from Python."""
     cdef vector[int] x, y, z
@@ -1197,21 +1358,27 @@ cdef class _Cells:
     cdef vector[M4Side] m4_sides
     cdef vector[int] m4_cells  # flattened (ox, oy, oz) triples
 
+    cdef void clear(self):
+        self.x.clear()
+        self.y.clear()
+        self.z.clear()
+        self.h.clear()
+        self.cm.clear()
+        self.moves.clear()
+        self.m4_sides.clear()
+        self.m4_cells.clear()
+        if self.moves.capacity() > (1u << 22):  # a huge search: not kept for the next ones
+            vector[Move]().swap(self.moves)
+
     cdef void sync(self, list pos_list, list h_list):
         cdef Py_ssize_t i, n = len(pos_list)
-        cdef CellMoves empty
-        empty.start = -1
-        empty.count = 0
-        empty.m4_move = -1
-        empty.m4_start = 0
-        empty.m4_count = 0
         for i in range(<Py_ssize_t>self.x.size(), n):
             p = pos_list[i]
             self.x.push_back(p[0])
             self.y.push_back(p[1])
             self.z.push_back(p[2])
             self.h.push_back(h_list[i])
-            self.cm.push_back(empty)
+            self.cm.push_back(_NO_MOVES)
 
     cdef int convert(self, int cid, object entry, list pos_list, list h_list, object congestion_cost) except -1:
         """Append one Python move entry (see _find_wire_path) as a Move."""
@@ -1243,7 +1410,7 @@ cdef class _Cells:
             m.fdx = m.fdz = 0
         m.h = entry[7]
         m.near = entry[8]
-        m.arrive = entry[9]
+        m.arrive = entry[9] != 0
         m.cong = 0.0
         if congestion_cost is not None:
             m.cong = congestion_cost(pos_list[m.dest])
@@ -1266,25 +1433,35 @@ cdef class _Cells:
     cdef int load(self, int cid, object expand, World world, bint verify, list pos_list, list h_list,
                   object congestion_cost) except -1:
         cdef CellMoves c
-        cdef M4Side side
+        cdef _CellVectors vectors
+        cdef int cx, cy, cz
         if world is not None and not verify and not world.grid_check and congestion_cost is None:
             # The kernel's move generation without going through Python tuples.
             c.start = self.moves.size()
+            c.m4_start = self.m4_sides.size()
+            c.m4_move = -1
+            c.m4_count = 0
+            cx, cy, cz = self.x[cid], self.y[cid], self.z[cid]
             world.out = &self.moves
+            world.out_sides = &self.m4_sides
+            world.out_m4_cells = &self.m4_cells
+            vectors.x, vectors.y, vectors.z, vectors.h, vectors.cm = &self.x, &self.y, &self.z, &self.h, &self.cm
+            world.out_cells = &vectors
             try:
-                m4_sides = world._static_moves(self.x[cid], self.y[cid], self.z[cid])[1]
+                if not world.base(cx, cy, cz) & F_INV:
+                    world.plain_moves(cx, cy, cz, None)
+                    c.count = <int>self.moves.size() - c.start
+                    world.powered_minus4(cx, cy, cz)
+                    c.m4_count = <int>self.m4_sides.size() - c.m4_start
+                    if c.m4_count:
+                        c.m4_move = <int>self.moves.size() - 1
+                else:
+                    c.count = 0
             finally:
                 world.out = NULL
-            self.sync(pos_list, h_list)
-            c.count = <int>self.moves.size() - c.start
-            c.m4_move = -1
-            c.m4_start = self.m4_sides.size()
-            c.m4_count = 0
-            if m4_sides is not None:
-                c.count -= 1
-                c.m4_move = <int>self.moves.size() - 1
-                self.add_m4_sides(cid, m4_sides[1])
-                c.m4_count = <int>self.m4_sides.size() - c.m4_start
+                world.out_sides = NULL
+                world.out_m4_cells = NULL
+                world.out_cells = NULL
             self.cm[cid] = c
             return 0
         if world is None:
@@ -1312,6 +1489,10 @@ cdef class _Cells:
             c.m4_count = <int>self.m4_sides.size() - c.m4_start
         self.cm[cid] = c
         return 0
+
+
+cdef _Cells SEARCH_CELLS = _Cells()  # a search's storage, kept for the next one
+cdef Heap SEARCH_HEAP
 
 
 cdef extern from *:
@@ -1354,12 +1535,17 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     global STAT_SEARCHES, STAT_POPS, STAT_PUSHES, STAT_CELLS, STAT_LOAD_TIME
     if not _init_done:
         raise RuntimeError("_astar.init() was not called")
-    cdef _Cells cells = _Cells()
+    cdef _Cells cells = SEARCH_CELLS
+    cells.clear()
+    cdef Heap* heap = &SEARCH_HEAP
+    heap.clear()
+    heap.g_can_differ = congestion_cost is not None or (weight * 4) % 1 != 0
     cdef CameFrom came_from = CameFrom()
     cdef FlatMap[NodeInfo]* nodes = &came_from.nodes
     cdef FlatMap[unsigned int] depths_store
     cdef FlatMap[unsigned int]* depths = &depths_store
-    cdef vector[HeapEntry] heap
+    nodes.reset(1 << 14)  # most searches outgrow the default, and growing rehashes
+    depths.reset(1 << 13)
     cdef vector[long long] gbest = group_best_h
     cdef vector[double] gmax = group_max_f
     cdef vector[char] explored_xyz
@@ -1381,7 +1567,12 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef int cur_depth, cur_cand, ndepth, ncand, step
     cdef bint has_in_dir, came_from_tower, has_reached = False
     cdef long long reached = 0
-    cdef double max_f, f_wire, h_limit, new_g, new_g_wire, cost
+    cdef double max_f, f_wire, h_limit, new_g, new_g_wire, cost, t_load
+    cdef int next_move[MAX_CELL_MOVES]
+    cdef long long next_key[MAX_CELL_MOVES]
+    cdef double next_g[MAX_CELL_MOVES]
+    cdef double next_g_wire[MAX_CELL_MOVES]
+    cdef int n_next
     cdef uint32_t snap, cb0, cb1, cb2
     cdef bint has_deadline = time_limit is not None
     cdef double deadline = 0
@@ -1402,8 +1593,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         node = seed_nodes[i]
         np = nodes.get(node, &ins)
         np.g = 0
-        np.parent = -1
-        np.expanded = False
+        np.parent = NOT_EXPANDED
         note_depth(depths, node)
         h = cells.h[node >> NODE_SHIFT]
         e.f = weight * h
@@ -1414,19 +1604,19 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         e.node = node
         e.parent = -1
         e.group = seed_groups[i]
-        heap_push(heap, e)
+        heap.push(e)
         counter += 1
 
     if has_deadline:
         deadline = time.monotonic() + time_limit
-    while heap.size():
+    while not heap.empty():
         pops += 1
         if has_deadline and pops & 255 == 0 and time.monotonic() > deadline:
             early_stop_reason = f"timeout ({time_limit}s)"
             break
         if pops & 16383 == 0:
             pulse(pops)
-        e = heap_pop(heap)
+        e = heap.pop()
         # f-cap per seed group; stop once past every group's.
         f_wire = e.f - e.g + e.g_wire
         if f_wire > gmax[e.group]:
@@ -1439,7 +1629,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             continue
         # Dominance: the same state with less signal depth at no more cost reaches everything
         # this one can (it is expanded first, or was dominated in turn).
-        if not ni.expanded and dominated(nodes, depths, e.node, e.g):
+        if ni.parent == NOT_EXPANDED and dominated(nodes, depths, e.node, e.g):
             continue
         cid = <int>(e.node >> NODE_SHIFT)
         h = cells.h[cid]
@@ -1449,10 +1639,9 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if h < gbest[e.group]:
             gbest[e.group] = h
         n_exp += 1
-        if ni.expanded:
+        if ni.parent != NOT_EXPANDED:
             n_reexp += 1
         else:
-            ni.expanded = True
             ni.parent = e.parent
             if <Py_ssize_t>explored_xyz.size() <= cid:
                 explored_xyz.resize(cid + 1, 0)
@@ -1483,9 +1672,9 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         cur_depth = (e.node >> SIG_SHIFT) & 15
         cur_cand = (e.node >> (SIG_SHIFT + 4)) & 7
         if cells.cm[cid].start < 0:
-            t_load = time.perf_counter()
+            t_load = now_seconds()
             cells.load(cid, expand, world, verify, pos_list, h_list, congestion_cost)
-            STAT_LOAD_TIME += time.perf_counter() - t_load
+            STAT_LOAD_TIME += now_seconds() - t_load
             STAT_CELLS += 1
         cmv = &cells.cm[cid]
         taken.clear()
@@ -1520,6 +1709,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if m4_side >= 0:
             taken.push_back(cmv.m4_move)
         last = <int>taken.size() - 1
+        n_next = 0
         for k in range(<int>taken.size()):
             m = &cells.moves[taken[k]]
             # Signal state (pathfinding._signal_step): prune moves that would leave a stretch
@@ -1558,23 +1748,39 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 for i in range(side.start, side.start + 3 * side.count, 3):
                     snap |= snap_bit(cells.m4_cells[i] - m.dx, cells.m4_cells[i + 1] - m.dy,
                                      cells.m4_cells[i + 2] - m.dz)
-            nkey = ((<long long>m.dest << NODE_SHIFT) | m.arrive | snap
+            nkey = ((<long long>m.dest << NODE_SHIFT) | (TOWER_FLAG if m.arrive else 0) | snap
                     | (<long long>(ndepth | (ncand << 4)) << SIG_SHIFT))
+            next_move[n_next] = taken[k]
+            next_key[n_next] = nkey
+            next_g[n_next] = new_g
+            next_g_wire[n_next] = new_g_wire
+            n_next += 1
+            nodes.prefetch(nkey)
+            depths.prefetch(nkey & ~(<long long>15 << SIG_SHIFT))
+        # The tables are big and these are scattered: asking for them all first saves waiting for each in turn.
+        for k in range(n_next):
+            m = &cells.moves[next_move[k]]
+            nkey, new_g, new_g_wire = next_key[k], next_g[k], next_g_wire[k]
+            # Most moves lead to a state already known at no more cost. Either test only skips the move, so the
+            # one probe goes first, ahead of dominated's several.
+            np = nodes.find(nkey)
+            if np != NULL and np.parent != UNREACHED and not new_g < np.g:
+                continue
             if dominated(nodes, depths, nkey, new_g):
                 continue
-            np = nodes.find(nkey)
-            if np != NULL:
+            np = nodes.get(nkey, &ins)
+            if ins or np.parent == UNREACHED:
+                if not new_g < 1e9:  # stays looking like nothing was ever here
+                    np.g = 1e300
+                    np.parent = UNREACHED
+                    continue
+                np.g = new_g
+                np.parent = NOT_EXPANDED
+                note_depth(depths, nkey)
+            else:
                 if not new_g < np.g:
                     continue
                 np.g = new_g
-            else:
-                if not new_g < 1e9:
-                    continue
-                np = nodes.get(nkey, &ins)
-                np.g = new_g
-                np.parent = -1
-                np.expanded = False
-                note_depth(depths, nkey)
             if m.h <= h_limit or m.near:
                 ne.f = new_g + weight * m.h
                 ne.neg_h = -m.h
@@ -1584,7 +1790,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 ne.node = nkey
                 ne.parent = e.node
                 ne.group = e.group
-                heap_push(heap, ne)
+                heap.push(ne)
                 counter += 1
                 STAT_PUSHES += 1
             else:
@@ -1597,3 +1803,423 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     for i in range(<int>gbest.size()):
         group_best_h[i] = gbest[i]
     return (reached if has_reached else None), best_node, h_radius_pruned, early_stop_reason, came_from
+
+
+# ---------------------------------------------------------------------------------------------
+# The checks route_job runs on each finished net, compiled: verify._latch_cycle,
+# verify._inverted_contacts and verify.find_gate_contacts over the same powers relation as
+# verify._World, read from the region's array. All they say is whether a check has something to
+# report. Next to no net does, and for those verify works out what, so what they report stays
+# verify's: change the rules there and here together (MINECRAFT_V_NET_CHECKS=check compares them).
+
+cdef enum:  # verify's _AIR, _DUST, ...
+    K_AIR, K_DUST, K_REPEATER, K_TORCH, K_WALL_TORCH, K_OPAQUE, K_OTHER
+
+cdef enum:
+    MODE_PLAIN, MODE_STRONG, MODE_WEAK
+    MAX_SUCCESSORS = 32
+
+FAULT_LATCH, FAULT_INVERTED, FAULT_GATE = 1, 2, 4
+
+
+cdef struct BlockKind:
+    int kind, dx, dz      # dx, dz: _FACING_TO_DELTA of a repeater or wall torch
+    bint redstone_block
+
+
+cdef struct CheckNode:
+    int x, y, z, mode
+
+
+cdef struct TarjanFrame:
+    int node, edge
+
+
+@cython.final
+cdef class NetChecks:
+    cdef CellGrid grid
+    cdef object region, palette, blocks_obj, classify
+    cdef const uint32_t* blocks
+    cdef int nx, ny, nz
+    cdef long long sx, sy
+    cdef vector[BlockKind] kinds
+    cdef BlockKind air
+    cdef bint hiding               # footprint cells read as air, unless terminals or in own
+    cdef FlatMap[char] own         # this net's written cells
+    cdef FlatMap[char] stop_own    # terminals the signal is followed through
+    cdef FlatMap[char] gate
+    cdef bint has_gate
+    cdef FlatMap[int] ids
+    cdef FlatMap[char] seen, polarity
+    cdef vector[CheckNode] nodes, feeds
+    cdef vector[char] flips
+    cdef vector[int] offsets, heads, index, low, scc_stack
+    cdef vector[char] on_stack
+    cdef vector[TarjanFrame] frames
+    cdef vector[int] own_cells
+    cdef CheckNode out[MAX_SUCCESSORS]
+    cdef int n_out
+
+    def __init__(self, region, CellGrid grid, gate_cells, classify):
+        """classify(block): verify's (kind, dx, dz, is redstone block) of a palette entry."""
+        cdef int ins
+        self.region, self.grid, self.classify = region, grid, classify
+        self.palette = region._Region__palette
+        self.air.kind = K_AIR
+        self.air.dx = self.air.dz = 0
+        self.air.redstone_block = False
+        self.has_gate = bool(gate_cells)
+        for pos in gate_cells:
+            self.gate.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
+
+    @staticmethod
+    def usable(region):
+        """Whether the region is the array this reads directly; views aren't."""
+        blocks = getattr(region, "_Region__blocks", None)
+        return blocks is not None and blocks.dtype == np.uint32 and blocks.flags.c_contiguous
+
+    cdef int bind(self) except -1:
+        blocks = self.region._Region__blocks
+        if blocks is not self.blocks_obj:
+            self.blocks_obj = blocks
+            self.nx, self.ny, self.nz = blocks.shape
+            self.sx, self.sy = <long long>self.ny * self.nz, self.nz
+            self.blocks = <const uint32_t*><size_t>blocks.ctypes.data
+        cdef BlockKind k
+        for i in range(<Py_ssize_t>self.kinds.size(), len(self.palette)):
+            k.kind, k.dx, k.dz, k.redstone_block = self.classify(self.palette[i])
+            self.kinds.push_back(k)
+        return 0
+
+    cdef inline const BlockKind* at(self, int x, int y, int z) except NULL:
+        if <unsigned int>x >= <unsigned int>self.nx or <unsigned int>y >= <unsigned int>self.ny or <unsigned int>z >= <unsigned int>self.nz:
+            return &self.air
+        cdef const BlockKind* k = &self.kinds[self.blocks[x * self.sx + y * self.sy + z]]
+        cdef uint16_t* w
+        if self.hiding and k.kind != K_AIR:
+            w = self.grid.word(x, y, z)
+            if not w[0] & G_FP_READ:
+                self.grid.read_fp(w, x, y, z)
+            if w[0] & F_FP and not w[0] & F_TERM and self.own.find(cell_key(x, y, z)) == NULL:
+                return &self.air
+        return k
+
+    cdef inline int kind(self, int x, int y, int z) except -1:
+        return self.at(x, y, z).kind
+
+    cdef inline void add(self, int x, int y, int z, int mode) noexcept:
+        cdef CheckNode* n = &self.out[self.n_out]
+        n.x, n.y, n.z, n.mode = x, y, z, mode
+        self.n_out += 1
+
+    cdef int dust_links(self, int x, int y, int z) except -1:
+        """Adds the dust x, y, z is wired to; the directions they are in, as bits of HORIZ."""
+        cdef int d, sx, sz, side, connected = 0
+        cdef bint above_open = self.kind(x, y + 1, z) != K_OPAQUE
+        for d in range(4):
+            sx, sz = x + HORIZ[d][0], z + HORIZ[d][1]
+            side = self.kind(sx, y, sz)
+            if side == K_DUST:
+                self.add(sx, y, sz, MODE_PLAIN)
+                connected |= 1 << d
+                continue
+            if above_open and self.kind(sx, y + 1, sz) == K_DUST:
+                self.add(sx, y + 1, sz, MODE_PLAIN)
+                connected |= 1 << d
+            if side != K_OPAQUE and self.kind(sx, y - 1, sz) == K_DUST:
+                self.add(sx, y - 1, sz, MODE_PLAIN)
+                connected |= 1 << d
+        return connected
+
+    cdef int dust_directions(self, int x, int y, int z, int connected) except -1:
+        """_World.dust_directions, from dust_links' answer."""
+        cdef int d, e, sx, sz
+        cdef const BlockKind* k
+        for d in range(4):
+            sx, sz = x + HORIZ[d][0], z + HORIZ[d][1]
+            k = self.at(sx, y, sz)
+            if k.kind == K_REPEATER:
+                if (sx + k.dx == x and sz + k.dz == z) or (sx - k.dx == x and sz - k.dz == z):
+                    connected |= 1 << d
+            elif k.kind == K_TORCH or k.kind == K_WALL_TORCH or (k.kind == K_OPAQUE and k.redstone_block):
+                connected |= 1 << d
+        if not connected:
+            return 15
+        if connected & (connected - 1) == 0:
+            d = count_trailing_zeros(connected)
+            for e in range(4):
+                if HORIZ[e][0] == -HORIZ[d][0] and HORIZ[e][1] == -HORIZ[d][1]:
+                    connected |= 1 << e
+        return connected
+
+    cdef int successors(self, int x, int y, int z, int mode) except -1:
+        """_World._find_successors, into out."""
+        self.n_out = 0
+        cdef const BlockKind* here = self.at(x, y, z)
+        cdef const BlockKind* other
+        cdef int k = here.kind, d, qx, qy, qz, kq, ax, ay, az, connected
+        if k == K_DUST:
+            connected = self.dust_links(x, y, z)
+            for d in range(4):
+                qx, qz = x + HORIZ[d][0], z + HORIZ[d][1]
+                other = self.at(qx, y, qz)
+                if other.kind == K_REPEATER and qx + other.dx == x and qz + other.dz == z:
+                    self.add(qx, y, qz, MODE_PLAIN)
+            if self.kind(x, y - 1, z) == K_OPAQUE:
+                self.add(x, y - 1, z, MODE_WEAK)
+            connected = self.dust_directions(x, y, z, connected)
+            for d in range(4):
+                if connected >> d & 1 and self.kind(x + HORIZ[d][0], y, z + HORIZ[d][1]) == K_OPAQUE:
+                    self.add(x + HORIZ[d][0], y, z + HORIZ[d][1], MODE_WEAK)
+        elif k == K_REPEATER:
+            qx, qz = x - here.dx, z - here.dz
+            other = self.at(qx, y, qz)
+            if other.kind == K_DUST:
+                self.add(qx, y, qz, MODE_PLAIN)
+            elif other.kind == K_REPEATER and qx + other.dx == x and qz + other.dz == z:
+                self.add(qx, y, qz, MODE_PLAIN)
+            elif other.kind == K_OPAQUE:
+                self.add(qx, y, qz, MODE_STRONG)
+        elif k == K_TORCH or k == K_WALL_TORCH:
+            if k == K_TORCH:
+                ax, ay, az = x, y - 1, z
+            else:
+                ax, ay, az = x - here.dx, y, z - here.dz
+            if self.kind(x, y + 1, z) == K_OPAQUE:
+                self.add(x, y + 1, z, MODE_STRONG)
+            for d in range(5):
+                if d < 4:
+                    qx, qy, qz = x + HORIZ[d][0], y, z + HORIZ[d][1]
+                else:
+                    qx, qy, qz = x, y - 1, z
+                if qx == ax and qy == ay and qz == az:
+                    continue
+                other = self.at(qx, qy, qz)
+                if other.kind == K_DUST:
+                    self.add(qx, qy, qz, MODE_PLAIN)
+                elif other.kind == K_REPEATER and qx + other.dx == x and qy == y and qz + other.dz == z:
+                    self.add(qx, qy, qz, MODE_PLAIN)
+        elif k == K_OPAQUE:
+            for d in range(6):
+                if d < 4:
+                    qx, qy, qz = x + HORIZ[d][0], y, z + HORIZ[d][1]
+                else:
+                    qx, qy, qz = x, y + (1 if d == 4 else -1), z
+                other = self.at(qx, qy, qz)
+                kq = other.kind
+                if kq == K_TORCH:
+                    if qx == x and qy - 1 == y and qz == z:
+                        self.add(qx, qy, qz, MODE_PLAIN)
+                elif kq == K_WALL_TORCH:
+                    if qx - other.dx == x and qy == y and qz - other.dz == z:
+                        self.add(qx, qy, qz, MODE_PLAIN)
+                elif kq == K_REPEATER:
+                    if qx + other.dx == x and qy == y and qz + other.dz == z:
+                        self.add(qx, qy, qz, MODE_PLAIN)
+                elif kq == K_DUST and mode == MODE_STRONG:
+                    self.add(qx, qy, qz, MODE_PLAIN)
+        return 0
+
+    cdef inline bint stops(self, int x, int y, int z) except -1:
+        """In verify's stop: a terminal the signal isn't followed through."""
+        return (self.grid.word(x, y, z)[0] & F_TERM) != 0 and self.stop_own.find(cell_key(x, y, z)) == NULL
+
+    cdef bint has_latch(self, int sx, int sy, int sz) except -1:
+        """_latch_cycle(...) != []: a repeater or torch on a cycle of more than itself."""
+        self.hiding = False
+        self.nodes.clear()
+        self.offsets.clear()
+        self.heads.clear()
+        self.ids.reset(1 << 10)
+        cdef CheckNode start
+        start.x, start.y, start.z = sx, sy, sz
+        start.mode = MODE_STRONG if self.kind(sx, sy, sz) == K_OPAQUE else MODE_PLAIN
+        self.nodes.push_back(start)
+        cdef int ins, i = 0, j, head
+        cdef int* slot
+        cdef CheckNode node
+        cdef bint repeaters = False
+        self.ids.get(cell_key(sx, sy, sz) << 2 | start.mode, &ins)[0] = 0
+        while i < <int>self.nodes.size():
+            node = self.nodes[i]
+            self.offsets.push_back(self.heads.size())
+            i += 1
+            if self.kind(node.x, node.y, node.z) in (K_REPEATER, K_TORCH, K_WALL_TORCH):
+                repeaters = True
+            if self.stops(node.x, node.y, node.z):
+                continue
+            self.successors(node.x, node.y, node.z, node.mode)
+            for j in range(self.n_out):
+                slot = self.ids.get(cell_key(self.out[j].x, self.out[j].y, self.out[j].z) << 2 | self.out[j].mode, &ins)
+                if ins:
+                    slot[0] = self.nodes.size()
+                    self.nodes.push_back(self.out[j])
+                self.heads.push_back(slot[0])
+        if not repeaters:
+            return False
+        self.offsets.push_back(self.heads.size())
+        return self.repeater_on_cycle()
+
+    cdef bint repeater_on_cycle(self) except -1:
+        """Tarjan over offsets and heads, without recursion: wire runs long."""
+        cdef int n = self.nodes.size(), counter = 1, root, v, w, popped, size
+        cdef bint repeater
+        cdef TarjanFrame* top
+        cdef TarjanFrame frame
+        self.index.assign(n, 0)
+        self.low.assign(n, 0)
+        self.on_stack.assign(n, 0)
+        self.scc_stack.clear()
+        for root in range(n):
+            if self.index[root]:
+                continue
+            self.index[root] = self.low[root] = counter
+            counter += 1
+            self.scc_stack.push_back(root)
+            self.on_stack[root] = 1
+            frame.node, frame.edge = root, self.offsets[root]
+            self.frames.push_back(frame)
+            while self.frames.size():
+                top = &self.frames.back()
+                v = top.node
+                if top.edge < self.offsets[v + 1]:
+                    w = self.heads[top.edge]
+                    top.edge += 1
+                    if not self.index[w]:
+                        self.index[w] = self.low[w] = counter
+                        counter += 1
+                        self.scc_stack.push_back(w)
+                        self.on_stack[w] = 1
+                        frame.node, frame.edge = w, self.offsets[w]
+                        self.frames.push_back(frame)
+                    elif self.on_stack[w] and self.index[w] < self.low[v]:
+                        self.low[v] = self.index[w]
+                    continue
+                self.frames.pop_back()
+                if self.frames.size() and self.low[v] < self.low[self.frames.back().node]:
+                    self.low[self.frames.back().node] = self.low[v]
+                if self.low[v] != self.index[v]:
+                    continue
+                size = 0
+                repeater = False
+                while True:
+                    popped = self.scc_stack.back()
+                    self.scc_stack.pop_back()
+                    self.on_stack[popped] = 0
+                    size += 1
+                    if self.kind(self.nodes[popped].x, self.nodes[popped].y, self.nodes[popped].z) in (K_REPEATER, K_TORCH, K_WALL_TORCH):
+                        repeater = True
+                    if popped == v:
+                        break
+                if size > 1 and repeater:
+                    self.frames.clear()
+                    return True
+        return False
+
+    cdef inline void note_polarity(self, int x, int y, int z, bint flipped) noexcept:
+        cdef int ins
+        self.polarity.get(cell_key(x, y, z), &ins)[0] |= 2 if flipped else 1
+
+    cdef inline int polarity_at(self, int x, int y, int z) noexcept:
+        cdef char* p = self.polarity.find(cell_key(x, y, z))
+        return 0 if p == NULL else p[0]
+
+    cdef bint has_inverted(self, int sx, int sy, int sz, sinks) except -1:
+        """_inverted_contacts(...) != [], over the world find_inverted_contacts makes."""
+        self.hiding = True
+        self.nodes.clear()
+        self.flips.clear()
+        self.feeds.clear()
+        self.seen.reset(1 << 10)
+        self.polarity.reset(1 << 10)
+        cdef CheckNode start, node, q
+        cdef int ins, i = 0, j, kp, kq
+        cdef bint flipped, out
+        start.x, start.y, start.z = sx, sy, sz
+        start.mode = MODE_STRONG if self.kind(sx, sy, sz) == K_OPAQUE else MODE_PLAIN
+        self.nodes.push_back(start)
+        self.flips.push_back(False)
+        self.seen.get(cell_key(sx, sy, sz) << 3 | start.mode << 1, &ins)
+        self.note_polarity(sx, sy, sz, False)
+        while i < <int>self.nodes.size():
+            node = self.nodes[i]
+            flipped = self.flips[i]
+            i += 1
+            if self.stops(node.x, node.y, node.z):
+                continue
+            kp = self.kind(node.x, node.y, node.z)
+            out = flipped != ((kp == K_TORCH or kp == K_WALL_TORCH) and not (node.x == sx and node.y == sy and node.z == sz))
+            self.successors(node.x, node.y, node.z, node.mode)
+            for j in range(self.n_out):
+                q = self.out[j]
+                if out:
+                    self.feeds.push_back(node)
+                    self.feeds.push_back(q)
+                self.note_polarity(q.x, q.y, q.z, out)
+                self.seen.get(cell_key(q.x, q.y, q.z) << 3 | q.mode << 1 | out, &ins)
+                if ins:
+                    self.nodes.push_back(q)
+                    self.flips.push_back(out)
+        for i in range(0, <int>self.feeds.size(), 2):
+            node, q = self.feeds[i], self.feeds[i + 1]
+            if self.polarity_at(q.x, q.y, q.z) != 3:
+                continue
+            kq = self.kind(q.x, q.y, q.z)
+            if kq != K_DUST and kq != K_REPEATER:
+                continue
+            kp = self.kind(node.x, node.y, node.z)
+            if (kp != K_DUST and kp != K_REPEATER) or self.polarity_at(node.x, node.y, node.z) == 2:
+                return True
+        for sink in sinks:
+            if self.polarity_at(sink[0], sink[1], sink[2]) == 2:
+                return True
+        return False
+
+    cdef bint has_gate_contact(self) except -1:
+        """find_gate_contacts(...) != [] for own_cells."""
+        if not self.has_gate:
+            return False
+        self.hiding = False
+        cdef int i, d, x, y, z, qx, qz, connected
+        for i in range(0, <int>self.own_cells.size(), 3):
+            x, y, z = self.own_cells[i], self.own_cells[i + 1], self.own_cells[i + 2]
+            if self.kind(x, y, z) != K_DUST:
+                continue
+            if self.kind(x, y - 1, z) == K_OPAQUE and self.gate.find(cell_key(x, y - 1, z)) != NULL:
+                return True
+            self.n_out = 0
+            connected = self.dust_directions(x, y, z, self.dust_links(x, y, z))
+            for d in range(4):
+                if connected >> d & 1:
+                    qx, qz = x + HORIZ[d][0], z + HORIZ[d][1]
+                    if self.kind(qx, y, qz) == K_OPAQUE and self.gate.find(cell_key(qx, y, qz)) != NULL:
+                        return True
+        return False
+
+    cpdef int faults(self, tuple source, sinks, stop_own, list journal) except -1:
+        """Bits of FAULT_*: those of a finished net's checks with something to report.
+        stop_own: the terminals its signal is followed through. journal: the net's journal."""
+        cdef int ins, result = 0, x, y, z
+        cdef int sx = source[0], sy = source[1], sz = source[2]
+        self.bind()
+        self.stop_own.reset(1 << 10)
+        for pos in stop_own:
+            self.stop_own.get(cell_key(pos[0], pos[1], pos[2]), &ins)
+        self.own.reset(1 << 12)
+        self.own_cells.clear()
+        for entry in journal:
+            if (<tuple>entry)[0] == "block":
+                pos = (<tuple>entry)[2]
+                x, y, z = pos
+                self.own.get(cell_key(x, y, z), &ins)
+                if ins:
+                    self.own_cells.push_back(x)
+                    self.own_cells.push_back(y)
+                    self.own_cells.push_back(z)
+        if self.has_latch(sx, sy, sz):
+            result |= FAULT_LATCH
+        if self.has_inverted(sx, sy, sz, sinks):
+            result |= FAULT_INVERTED
+        if self.has_gate_contact():
+            result |= FAULT_GATE
+        return result
