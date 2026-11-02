@@ -80,7 +80,7 @@ def _add_ram_group(stacks, components: list[Component], bit_endpoints) -> None:
                         outputs[(k, pin)] = bit
                 elif isinstance(bit, int):
                     nets[pin] = bit
-                else:
+                elif bit == "1":  # TODO: drive a pin tied high. Low is what an unconnected pin reads anyway.
                     raise ValueError(f"{cell_name}: {pin} is tied to {bit}")
         specs.append(stack_spec(cell.parameters, nets))
     block, own_pins, lane_pins = group_block(specs)
@@ -91,7 +91,7 @@ def _add_ram_group(stacks, components: list[Component], bit_endpoints) -> None:
         bit_endpoints[bit].append(("ram_group", name, Direction.IN))
     for name, (k, stack_pin) in own_pins.items():
         pin = by_name[name]
-        bit = outputs.get((k, stack_pin)) if pin.direction == Direction.OUT else specs[k].nets[stack_pin]
+        bit = outputs.get((k, stack_pin)) if pin.direction == Direction.OUT else specs[k].nets.get(stack_pin)
         if bit is not None:
             pins.append(pin)
             bit_endpoints[bit].append(("ram_group", name, pin.direction))
@@ -130,8 +130,8 @@ def module_to_component_list(module: Module) -> ComponentList:
             for pin in block.pins:
                 port, _, index = pin.name.rstrip("]").partition("[")
                 bit = cell.connections[port][int(index or 0)]
-                # TODO: tie off constant pins, so memories with a fixed write word or an unused address bit can map.
-                if not isinstance(bit, int) and pin.direction == Direction.IN:
+                # TODO: drive a pin tied high. Low is what an unconnected pin reads anyway.
+                if bit == "1" and pin.direction == Direction.IN:
                     raise ValueError(f"{cell_name}: {pin.name} is tied to {bit}")
                 if isinstance(bit, int):
                     pins.append(pin)
