@@ -1,10 +1,13 @@
 """Build examples/memread on one placement seed and run it in mchprs_headless on all modes.
 
-Counts through the preloaded words several times. Writes aren't exercised here.
+Counts through the preloaded words several times, then stores the count on some clocks and reads it back: count changes
+on the same edge, so a word that holds badly stores count + 1. The clock is gated (_clk & switch), and hold fixing has to
+see through that gate.
 
 Usage: check_memread.py <netlist.json> <out_dir> <seed> [minecraft_v args...]
 """
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -23,11 +26,20 @@ def expect(words: list[int], count: int) -> list[str]:
 
 def script() -> str:
     words = WORDS
-    lines = ["set switch 1", f"settle {SETTLE}"]
+    lines = ["set switch 1", "set wen 0", f"settle {SETTLE}"]
     count = 0
     lines += expect(words, count)
     for _ in range(40):
         lines += [f"pulse _clk {CLOCK_WIDTH}", f"settle {SETTLE}"]
+        count += 1
+        lines += expect(words, count)
+    words = list(words)
+    rng = random.Random(0)
+    for _ in range(80):
+        wen = rng.random() < 0.5
+        lines += [f"set wen {int(wen)}", f"settle {SETTLE}", f"pulse _clk {CLOCK_WIDTH}", f"settle {SETTLE}"]
+        if wen:
+            words[count & 7] = count & 0xffff
         count += 1
         lines += expect(words, count)
     return "\n".join(lines) + "\n"
