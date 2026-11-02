@@ -69,6 +69,14 @@ def _block_kind(bid: str) -> int:
 _NOTHING = (_AIR, None)  # a world entry with no block to ask about
 
 
+def classify_block(block: BlockState) -> tuple[int, int, int, bool]:
+    """What _astar.NetChecks needs of a palette entry: kind, _FACING_TO_DELTA of what has a meaningful facing, whether it's
+    a redstone block."""
+    kind = _block_kind(block.id)
+    dx, dz = _FACING_TO_DELTA[block["facing"]] if kind in (_REPEATER, _WALL_TORCH) else (0, 0)
+    return kind, dx, dz, block.id == "minecraft:redstone_block"
+
+
 def _kind_of(block: BlockState) -> tuple[int, BlockState | None]:
     kind = _block_kind(block.id)
     return _NOTHING if kind == _AIR else (kind, block)

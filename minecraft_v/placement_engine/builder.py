@@ -43,7 +43,7 @@ from .poisson import _poisson_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
 from .propagate import comparator_entity, settle as settle_blocks
-from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
+from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _astar, _find_wire_path, _signal_depths
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -52,7 +52,7 @@ from .template import (
 from .hold import fix_hold, flat_terminals, repeater_delay
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import Either, Excluding, HiddenBoxes, _World, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -756,6 +756,8 @@ class _KeptBranches:
 
 
 _LOG_EVERY_SECONDS = 30.0     # routing progress in the log
+_NET_CHECKS = os.environ.get("MINECRAFT_V_NET_CHECKS", "1")
+_FAULT_LATCH, _FAULT_INVERTED, _FAULT_GATE = 1, 2, 4  # _astar.NetChecks.faults
 _LOG_SLOW_SEARCH_SECONDS = 5.0
 _LOG_SLOW_JOB_SECONDS = 10.0
 
@@ -829,8 +831,12 @@ class _GreedyRouter:
         self.indexed = IndexedWorkspace(region)  # all writes go through this, keeping its index current
         self.indexed.attach_grid(solid, dust_owner, inverted_cells, footprint_blocked, terminal_positions)
         self.ws = JournalingWorkspace(self.indexed, rec)
+        self.net_checks = self._make_net_checks()
         # job key -> (net id, ordered sink paths): what _place_repeaters_for_net walks.
         self.paths: dict[str, tuple[str, list[list[Pos]]]] = {} if paths is None else paths
+        self.net_keys: dict[str, dict[str, None]] = {}  # net id -> its keys in paths, in that order
+        for key, (net_id, _) in self.paths.items():
+            self.net_keys.setdefault(net_id, {})[key] = None
         self.failed_goal: dict[str, Pos] = {}  # job key -> sink whose search/laying raised
         self.kept: dict[str, _KeptBranches] = {}  # jobs to carry on from their failed sink
         self.has_kept_wire: set[str] = set()  # those, and jobs whose kept wire a whole retry has to clear
@@ -839,15 +845,26 @@ class _GreedyRouter:
         self.wide_budget: set[str] = set()  # job keys on their last try, searching with _ROUTE_RETRY_BUDGET
         self.rips_blockers = True  # whether a failed sink can get room by ripping (run's rip_blockers)
 
+    def _make_net_checks(self):
+        """The compiled per-net checks, if this router's world is what they read. MINECRAFT_V_NET_CHECKS: 0 verify's alone,
+        check compares them to verify on every net."""
+        grid = self.indexed.block_index().grid
+        if (grid is None or _NET_CHECKS == "0" or not _astar.NetChecks.usable(self.region)
+                or grid.fp_set() is not self.footprint_blocked or grid.terminal_set() is not self.terminal_positions):
+            return None
+        return _astar.NetChecks(self.region, grid, self.gate_cells, classify_block)
+
     def net_paths(self, net_id: str) -> list[list[Pos]]:
-        return [p for nid, ps in self.paths.values() if nid == net_id for p in ps]
+        return [p for key in self.net_keys.get(net_id, ()) for p in self.paths[key][1]]
 
     def rip(self, key: str) -> None:
         self.kept.pop(key, None)
         self.laid.pop(key, None)
         self.has_kept_wire.discard(key)
         rip_up(self.rec, key, self.indexed, self.solid, self.dust_owner)
-        self.paths.pop(key, None)
+        entry = self.paths.pop(key, None)
+        if entry is not None:
+            del self.net_keys[entry[0]][key]
 
     def rip_branch(self, job: _RouteJob, around: list[Pos]) -> None:
         """Rip the job's branch nearest any of around, with the branches that hang off it; keep the rest.
@@ -1082,21 +1099,43 @@ class _GreedyRouter:
         # Wire branches off the net's own sinks, so signal has to be followed through those. Not into a RAM block, though:
         # it's millions of cells, tested on its own, and nothing inside can come back onto this net.
         stop = Excluding(self.terminal_positions, {job.src, *(t for t in job.sinks if t not in self.block_inputs)})
-        world = _World(self.region, frozenset(), frozenset())
-        latch = find_latch(self.region, job.src, stop, world)
-        if latch and all(self.dust_owner.get(cell, job.net_id) == job.net_id for cell in latch):
-            raise LayConflict(f"Net '{job.net_id}': wire past a repeater feeds back into it (latch)", tuple(latch))
-        # The search only sees its own path's last few cells, and a tower or drop can land beside wire laid earlier.
-        own_cells = frozenset(e[2] for e in rec.journals[job.key] if e[0] == "block")
-        inverted = find_inverted_contacts(self.region, job.src, job.sinks, stop,
-                                          self.footprint_blocked, Either(self.terminal_positions, own_cells))
-        if inverted:
-            raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
-        touching = find_gate_contacts(self.region, own_cells, self.gate_cells, world)
-        if touching:
-            raise LayConflict(f"Net '{job.net_id}': wire powers a gate's block at {touching[:4]} (gate contact)", tuple(touching))
+        self._check_net(job, stop)
         self.paths[job.key] = (job.net_id, paths)
+        self.net_keys.setdefault(job.net_id, {})[job.key] = None
         self.has_kept_wire.discard(job.key)
+
+    def _check_net(self, job: _RouteJob, stop: Excluding) -> None:
+        """Raises on a fault of a finished net. The compiled checks clear almost every net; what they don't, verify looks at."""
+        faults = _FAULT_LATCH | _FAULT_INVERTED | _FAULT_GATE
+        compare = False
+        if self.net_checks is not None:
+            faults = self.net_checks.faults(job.src, job.sinks, stop.excluded, self.rec.journals[job.key])
+            compare = _NET_CHECKS == "check"
+            if not faults and not compare:
+                return
+
+        def differs(fault: int, found: list[Pos]) -> None:
+            if compare and bool(found) != bool(faults & fault):
+                raise AssertionError(f"Net {job.key}: compiled check {fault} of {faults}, verify found {found[:4]}")
+
+        if faults & _FAULT_LATCH or compare:
+            latch = find_latch(self.region, job.src, stop)
+            differs(_FAULT_LATCH, latch)
+            if latch and all(self.dust_owner.get(cell, job.net_id) == job.net_id for cell in latch):
+                raise LayConflict(f"Net '{job.net_id}': wire past a repeater feeds back into it (latch)", tuple(latch))
+        # The search only sees its own path's last few cells, and a tower or drop can land beside wire laid earlier.
+        own_cells = frozenset(e[2] for e in self.rec.journals[job.key] if e[0] == "block")
+        if faults & _FAULT_INVERTED or compare:
+            inverted = find_inverted_contacts(self.region, job.src, job.sinks, stop,
+                                              self.footprint_blocked, Either(self.terminal_positions, own_cells))
+            differs(_FAULT_INVERTED, inverted)
+            if inverted:
+                raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
+        if faults & _FAULT_GATE or compare:
+            touching = find_gate_contacts(self.region, own_cells, self.gate_cells)
+            differs(_FAULT_GATE, touching)
+            if touching:
+                raise LayConflict(f"Net '{job.net_id}': wire powers a gate's block at {touching[:4]} (gate contact)", tuple(touching))
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
         """Whether a waypoint is free: air with air around it, so no other net's wire is near, and outside other
@@ -1234,6 +1273,8 @@ class _GreedyRouter:
         attempts = 0
         # A full collection walks every set of cells, millions of entries, none of them garbage.
         gc.freeze()
+        # A search's cells are young tuples, none of them garbage until it ends: collect far less often than per 2000.
+        gc.set_threshold(200_000, 10, 10)
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
                 now = time.monotonic()
