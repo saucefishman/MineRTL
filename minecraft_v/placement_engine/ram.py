@@ -22,6 +22,7 @@ Pins are addresses, write enable and bitlines. Writes take the self-closing puls
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import pickle
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from minecraft_v.progress import log, phase
 from .block_utils import BulkRegion
 from .cosmetics import apply_dust_shapes
 from .macro import BlockArrays, Macro
-from .propagate import settle
+from .propagate import comparator_entity, settle
 from .verify import verify_support
 
 Pos = tuple[int, int, int]
@@ -316,16 +317,20 @@ def build_delay(name: str = "ram_delay") -> Macro:
 
 
 def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, width: int, init: list[int],
-                towers: dict[str, tuple[int, int, int]] | None = None, on_lanes: frozenset[str] = frozenset()) -> Macro:
+                towers: dict[str, tuple[int, int, int]] | None = None, on_lanes: frozenset[str] = frozenset(),
+                banks_out: list | None = None) -> Macro:
     """``banks`` 4-read arrays one above the other, as one block, holding bank numbers ``base`` up. Every input pin feeds a
     torch tower beside its line; each bank's line taps the tower. Each output has a tower too, which every bank's bitline
     powers at its own level, so the top of the tower is the OR of the banks. Every pin ends up on the south face. Lines near towers are repeaters, which ignore
     them. A tower inverts twice per 4 blocks, so its tap levels agree. Input pins in ``on_lanes`` get no way out to the
     south face: ``towers`` collects each one's tower base (x, y, z) instead, for build_group to feed.
+    With ``banks_out``, the banks' own blocks are left out, and it gets one (origin, array arguments, size) per bank: the
+    caller settles them separately, see settled_block.
     """
     depth = 1 << row_bits
     high_bits = abits - row_bits
-    arrays = [build_ram(name, depth, width, 4, init[k * depth:(k + 1) * depth], high_bits, base + k) for k in range(banks)]
+    bank_args = [(depth, width, tuple(init[k * depth:(k + 1) * depth]), high_bits, base + k) for k in range(banks)]
+    arrays = [build_ram(name, depth, width, 4, list(a[2]), high_bits, a[4]) for a in bank_args[:1 if banks_out is not None else banks]]
     bank = arrays[0].footprint
     north = _STACK_NORTH
     south = _STACK_SOUTH
@@ -334,9 +339,11 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
     exit_y = (bank.height + _BANK_PITCH * (banks - 1) + 3) // 4 * 4 + 1
     size = (bank.width + 1, exit_y + _READ_PLANES + 1, north + bank.depth + south)
     blocks: dict[Pos, BlockState] = {}
-    for k, array in enumerate(arrays):
+    for k, array in enumerate(arrays if banks_out is None else ()):
         for (x, y, z), block in array.blocks:
             blocks[(x, y + _BANK_PITCH * k, z + north)] = block
+    if banks_out is not None:
+        banks_out.extend(((0, _BANK_PITCH * k, north), a, (bank.width, bank.height, bank.depth)) for k, a in enumerate(bank_args))
 
     def line(x: int, y: int, z: int, facing: str = "south") -> None:
         blocks[(x, y, z)] = _repeater(facing)
@@ -411,7 +418,8 @@ class StackSpec:
     nets: dict[str, object]  # input pin -> the net on it
 
 
-def build_group(name: str, specs: list[StackSpec]) -> tuple[Macro, dict[str, tuple[int, str]], dict[object, str]]:
+def build_group(name: str, specs: list[StackSpec], banks_out: list | None = None
+                ) -> tuple[Macro, dict[str, tuple[int, str]], dict[object, str]]:
     """Stacks side by side, every net two or more of them share on a prebuilt lane below them. Other inputs stay on their
     stacks' own pins, carried out to the south face. Returns the block, then what its pins connect to: (stack, stack pin)
     per own pin, and lane pin per shared net.
@@ -433,8 +441,10 @@ def build_group(name: str, specs: list[StackSpec]) -> tuple[Macro, dict[str, tup
                     raise ValueError(f"{name}: stack {k} has {lower}[{bit}] alone but {upper}[{bit}] shared")
     lane_pins = {net: f"lane{n}" for n, net in enumerate(shared)}
     towers: list[dict[str, tuple[int, int, int]]] = [{} for _ in specs]
+    local: list[list] = [[] for _ in specs]
     built = [build_stack(f"{name}_{k}", spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init, towers[k],
-                         frozenset(pin for pin, net in spec.nets.items() if net in lane_pins))
+                         frozenset(pin for pin, net in spec.nets.items() if net in lane_pins),
+                         local[k] if banks_out is not None else None)
              for k, spec in enumerate(specs)]
     lift = _LANE_PITCH * len(shared) + 2
     lane_z = max(m.footprint.depth for m in built) + 1
@@ -443,6 +453,9 @@ def build_group(name: str, specs: list[StackSpec]) -> tuple[Macro, dict[str, tup
     blocks: dict[Pos, BlockState] = {}
     pins: list[PinRef] = []
     own_pins: dict[str, tuple[int, str]] = {}
+    if banks_out is not None:
+        for k, stack_banks in enumerate(local):
+            banks_out.extend(((xs[k] + o[0], lift + o[1], o[2]), args, size) for o, args, size in stack_banks)
 
     def floor(x: int, y: int, z: int) -> None:
         blocks.setdefault((x, y - 1, z), _GLASS)
@@ -553,16 +566,30 @@ def set_block_cache(directory: Path | None) -> None:
     _cache_dir = directory
 
 
-def settled_block(block: Macro) -> Macro:
+def settled_block(block: Macro, banks: list[tuple[Pos, Macro]] = ()) -> Macro:
     """The block alone, its dust shaped and everything in the state it rests in with its pins low, as arrays. A build
-    pastes this and only looks inside if the wire outside touches it or drives a pin high."""
+    pastes this and only looks inside if the wire outside touches it or drives a pin high.
+
+    banks: arrays already settled alone, with their origins in the block. They are pasted and treated as opaque boxes, so
+    only the wire around them is shaped and settled here; the result is the same as settling it all at once."""
     size = block.footprint.width, block.footprint.height, block.footprint.depth
     region = BulkRegion(0, 0, 0, *size)
     arrays = block.arrays_oriented(False, False)
     region.paste(arrays.xs, arrays.ys, arrays.zs, arrays.ids, arrays.palette)
-    apply_dust_shapes(region)
-    settle(region)
-    unsupported = verify_support(region, {})
+    boxes = []
+    for (ox, oy, oz), bank in banks:
+        w, h, d = bank.footprint.width, bank.footprint.height, bank.footprint.depth
+        box = (ox, oy, oz), (ox + w, oy + h, oz + d)
+        if region._Region__blocks[box[0][0]:box[1][0], box[0][1]:box[1][1], box[0][2]:box[1][2]].any():
+            raise ValueError(f"{block.name}: wire inside the box of a bank at {(ox, oy, oz)}")
+        settled = bank.settled
+        region.paste(settled.xs + ox, settled.ys + oy, settled.zs + oz, settled.ids, settled.palette)
+        region.tile_entities.extend(comparator_entity((x + ox, y + oy, z + oz), level) for (x, y, z), level in settled.comparators)
+        boxes.append(box)
+    apply_dust_shapes(region, boxes)
+    settle(region, boxes)
+    region.tile_entities.sort(key=lambda e: e.position)
+    unsupported = verify_support(region, {}, skip=boxes)
     if unsupported:
         log(f"[ram] {block.name}: {len(unsupported)} unsupported block(s), first {unsupported[0].pos}")
     ids = region._Region__blocks
@@ -596,21 +623,53 @@ def _load(path: Path) -> tuple[Macro, object] | None:
     return block, extra
 
 
-def _cached(key: object, build: Callable[[], tuple[Macro, object]]) -> tuple[Macro, object]:
+def _cached(key: object, build: Callable[[], tuple[Macro, object]],
+            finish: Callable[[Macro], Macro] = settled_block, subdirectory: str = "") -> tuple[Macro, object]:
     """A settled block and what else its build returned, from cache_dir if this code has built this block before."""
     digest = hashlib.sha256(repr((key, _ADDR_PITCH)).encode())
     for name in _CODE:
         digest.update((Path(__file__).parent / name).read_bytes())
-    path = None if _cache_dir is None else _cache_dir / f"{digest.hexdigest()[:24]}.block"
+    path = None if _cache_dir is None else _cache_dir / subdirectory / f"{digest.hexdigest()[:24]}.block"
     if path is not None and (found := _load(path)) is not None:
         log(f"[ram] {found[0].name}: {len(found[0].settled.ids)} blocks from {path}")
         return found
     with phase("[ram] building and settling a block"):
         block, extra = build()
-        block = settled_block(block)
+        block = finish(block)
     if path is not None:
         _save(path, block, extra)
     return block, extra
+
+
+def _bank_block(args: tuple) -> Macro:
+    """One bank of a stack, settled alone: the same bank in another stack or group is read from the cache."""
+    depth, width, init, high_bits, high = args
+    return _cached(("bank", *args), lambda: (build_ram("bank", depth, width, 4, list(init), high_bits, high), None),
+                   subdirectory="banks")[0]
+
+
+def _bank_job(args: tuple) -> tuple[tuple, tuple]:
+    block = _bank_block(args)
+    arrays = block.settled
+    palette = [(b.id, dict(b.properties())) for b in arrays.palette]
+    return args, (replace(block, settled=None), palette, arrays.comparators, arrays.xs.astype(np.uint16),
+                  arrays.ys.astype(np.uint16), arrays.zs.astype(np.uint16), arrays.ids.astype(np.uint32))
+
+
+def _settled_banks(jobs: list[tuple]) -> dict[tuple, Macro]:
+    """Each distinct bank settled, in as many processes as RAM_WORKERS says (the number of cores by default)."""
+    unique = sorted(dict.fromkeys(jobs), key=lambda a: -a[0] * a[1])
+    workers = min(int(os.environ.get("RAM_WORKERS", os.cpu_count() or 1)), len(unique))
+    if workers <= 1:
+        return {args: _bank_block(args) for args in unique}
+    found: dict[tuple, Macro] = {}
+    with multiprocessing.get_context("fork").Pool(workers) as pool:
+        for args, (block, palette, comparators, xs, ys, zs, ids) in pool.imap_unordered(_bank_job, unique, chunksize=1):
+            palette = [BlockState(name, **props) for name, props in palette]
+            block.settled = BlockArrays(xs.astype(np.int32), ys.astype(np.int32), zs.astype(np.int32), ids.astype(np.int32),
+                                        palette, comparators)
+            found[args] = block
+    return found
 
 
 def built_block(name: str) -> Macro:
@@ -654,9 +713,12 @@ def group_block(specs: list[StackSpec]) -> tuple[Macro, dict[str, tuple[int, str
     name = f"group_{hashlib.sha256(repr(shape).encode()).hexdigest()[:8]}"
 
     def build() -> tuple[Macro, object]:
-        block, own, lanes = build_group(name, specs)
+        banks: list = []
+        block, own, lanes = build_group(name, specs, banks)
+        settled = _settled_banks([args for _, args, _ in banks])
+        block = settled_block(block, [(origin, settled[args]) for origin, args, _ in banks])
         return block, (own, {numbers[net]: pin for net, pin in lanes.items()})
 
-    block, (own, lanes) = _cached(("group", shape), build)
+    block, (own, lanes) = _cached(("group", shape), build, lambda block: block)
     _built[block.name] = block
     return block, own, {net: lanes[number] for net, number in numbers.items() if number in lanes}

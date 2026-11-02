@@ -145,7 +145,7 @@ def test_block_cache_returns_the_same_block(tmp_path):
         again, own_again, lanes_again = group_block([replace(s, nets={p: f"other_{n}" for p, n in s.nets.items()}) for s in specs])
     finally:
         set_block_cache(None)
-    assert len(list(tmp_path.iterdir())) == 1
+    assert len(list(tmp_path.glob("*.block"))) == 1  # the group; its banks are in tmp_path/banks
     assert own == own_again and {f"other_{n}": pin for n, pin in lanes.items()} == lanes_again
     assert made.footprint == again.footprint and made.pins == again.pins
     assert made.settled.palette == again.settled.palette and made.settled.comparators == again.settled.comparators
@@ -170,3 +170,19 @@ def test_bulk_region_saves_what_region_saves():
         ours, theirs = bulk.to_nbt(), plain.to_nbt()
         assert np.array_equal(np.asarray(ours["BlockStates"]), np.asarray(theirs["BlockStates"]))
         assert ours.keys() == theirs.keys() and ours["BlockStatePalette"] == theirs["BlockStatePalette"]
+
+
+@pytest.mark.parametrize("workers", ["1", "2"])
+def test_group_settled_bank_by_bank_equals_settled_whole(monkeypatch, workers):
+    monkeypatch.setenv("RAM_WORKERS", workers)
+    shared = {"aa[0]": "n0", "ab[1]": "n1", "ac[0]": "n2", "we": "n3", "wd[1]": "n4"}
+    first = replace(_spec(), nets={**_spec().nets, **shared})
+    second = StackSpec(3, 2, 1, 4, 3, [(i * 3 + 1) % 8 for i in range(16)], dict(shared))
+    specs = [first, second]
+    whole = settled_block(build_group("g", specs)[0])
+    made = group_block(specs)[0]
+    cells = lambda b: sorted((x, y, z, repr((b.settled.palette[i].id, sorted(dict(b.settled.palette[i].properties()).items()))))
+                             for x, y, z, i in zip(b.settled.xs.tolist(), b.settled.ys.tolist(), b.settled.zs.tolist(),
+                                                   b.settled.ids.tolist()))
+    assert cells(made) == cells(whole)
+    assert made.settled.comparators == whole.settled.comparators
