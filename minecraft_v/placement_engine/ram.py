@@ -62,6 +62,11 @@ _LINE_PITCH = 2      # X between decoder lines; each line's torches sit between 
 _ADDR_PITCH = int(os.environ.get("RAM_ADDR_PITCH", 4))  # an address bit's true and complement lines; also the pins' X pitch
 _DECODER_REPEAT = 12 // _ADDR_PITCH * _ADDR_PITCH  # X between repeaters on a row line in the decoder: under a true line, never a torch
 
+# Write lines on plane 5 under the first read decoder, not beside it: narrower decoder, same bits. See build_ram.
+_FOLD = os.environ.get("RAM_FOLD") == "1"
+_STACK_SOUTH_FOLDED = 10
+_TOWER_Z_PITCH = 3  # Z between a column's towers when folded
+
 _GLASS = BlockState("minecraft:glass")
 _STONE = BlockState("minecraft:smooth_quartz")
 _DUST = BlockState("minecraft:redstone_wire")
@@ -154,6 +159,12 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
     write_x = enable_x + _LINE_PITCH
     write_end = write_x + _ADDR_PITCH * abits
     size_x = write_end
+    if _FOLD and reads == 4:
+        # Plane 5 is free east of the bits: read rows' blocks are above it and lock lines below. A column then has three
+        # pins, whose towers build_stack spreads along Z. Lock lines flow west, so they only reach the enable's torch.
+        write_x, enable_x = read_a_x, read_b_x
+        write_end = enable_x + _LINE_PITCH
+        size_x = read_b_x + _ADDR_PITCH * abits
     # Past the last row: the complement torch, the stub to it, the pin.
     last_row_gap = _ROW_PITCH * depth
     size_z = last_row_gap + 4
@@ -333,7 +344,7 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
     arrays = [build_ram(name, depth, width, 4, list(a[2]), high_bits, a[4]) for a in bank_args[:1 if banks_out is not None else banks]]
     bank = arrays[0].footprint
     north = _STACK_NORTH
-    south = _STACK_SOUTH
+    south = _STACK_SOUTH_FOLDED if _FOLD else _STACK_SOUTH
     # Outputs run over the top to the south face, with the inputs: a net can't cross a block, and logic reads and writes.
     # Lower and upper read lines take a Y each, as their columns touch; 1 mod 4 keeps tower polarity.
     exit_y = (bank.height + _BANK_PITCH * (banks - 1) + 3) // 4 * 4 + 1
@@ -359,12 +370,22 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
 
     pins: list[PinRef] = []
     arcs_in = _TOWER_TICKS * banks
+    # Folded: towers on lanes nearest, so wire from pins on the south face crosses none; lowest first of the others, as a
+    # line out runs under the further towers.
+    columns: dict[int, list] = {}
+    for pin in arrays[0].pins:
+        if pin.direction == Direction.IN:
+            columns.setdefault(pin.offset[0], []).append(pin)
+    tower_step = {pin.name: step for column in columns.values()
+                  for step, pin in enumerate(sorted(column, key=lambda p: (p.name not in on_lanes, p.offset[1])))}
     for pin in arrays[0].pins:
         x, y = pin.offset[0], pin.offset[1]
         if pin.direction == Direction.IN:
             # Upper read pins' towers sit further out: a lower line reaches its pin under them. So does write enable's,
             # whose tower would otherwise touch the first write address line.
             z = north + bank.depth + (_STACK_SOUTH_UPPER if y > _Y_READ_ADDR or pin.name == "we" else _STACK_SOUTH_LOWER)
+            if _FOLD:
+                z = north + bank.depth + _STACK_SOUTH_LOWER + _TOWER_Z_PITCH * tower_step[pin.name]
             tower(x + 1, z, y)
             for k in range(banks):
                 level = y + _BANK_PITCH * k
@@ -437,7 +458,7 @@ def build_group(name: str, specs: list[StackSpec], banks_out: list | None = None
         for bit in range(spec.abits):  # the upper pin's tower reaches down its lane through the lower pin's line out
             for lower, upper in (("aa", "ac"), ("ab", "ad")):
                 alone, above = spec.nets.get(f"{lower}[{bit}]"), spec.nets.get(f"{upper}[{bit}]")
-                if alone is not None and above is not None and len(users[alone]) == 1 and len(users[above]) > 1:
+                if not _FOLD and alone is not None and above is not None and len(users[alone]) == 1 and len(users[above]) > 1:
                     raise ValueError(f"{name}: stack {k} has {lower}[{bit}] alone but {upper}[{bit}] shared")
     lane_pins = {net: f"lane{n}" for n, net in enumerate(shared)}
     towers: list[dict[str, tuple[int, int, int]]] = [{} for _ in specs]
@@ -500,6 +521,8 @@ def build_group(name: str, specs: list[StackSpec], banks_out: list | None = None
                     blocks[(x, level + 1, z)] = _torch((top - level) // 2 % 2 == 0)
             # A read pin sharing its column with the upper read pin's further tower goes around it, on x + 2.
             around = pin_name[:2] in ("aa", "ab")
+            if _FOLD:
+                around = any(t[0] == towers[k][pin_name][0] and t[2] > z for t in towers[k].values())
             tap_x = x + 2 if around else x
             if around:
                 blocks[(x + 1, y, z)] = _repeater("east")
@@ -626,7 +649,7 @@ def _load(path: Path) -> tuple[Macro, object] | None:
 def _cached(key: object, build: Callable[[], tuple[Macro, object]],
             finish: Callable[[Macro], Macro] = settled_block, subdirectory: str = "") -> tuple[Macro, object]:
     """A settled block and what else its build returned, from cache_dir if this code has built this block before."""
-    digest = hashlib.sha256(repr((key, _ADDR_PITCH)).encode())
+    digest = hashlib.sha256(repr((key, _ADDR_PITCH, *(["fold"] if _FOLD else []))).encode())
     for name in _CODE:
         digest.update((Path(__file__).parent / name).read_bytes())
     path = None if _cache_dir is None else _cache_dir / subdirectory / f"{digest.hexdigest()[:24]}.block"
