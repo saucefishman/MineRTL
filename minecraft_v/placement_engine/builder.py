@@ -1167,6 +1167,33 @@ class _GreedyRouter:
         else:
             rollback(self.rec, key, mark)
 
+    def _dump_around(self, job: _RouteJob) -> None:
+        """What's around a failed net's ends: one plane per Y, per end. '.' free, 'b' blocked, 'k' keepout, 'g' gate."""
+        for name, (x0, y0, z0) in [("src", job.src), *((f"sink{i}", t) for i, t in enumerate(job.sinks[:3]))]:
+            log(f"[dump] {job.key} {name} at {(x0, y0, z0)}")
+            for y in range(y0 - 2, y0 + 3):
+                rows = []
+                for z in range(z0 - 6, z0 + 7):
+                    row = ""
+                    for x in range(x0 - 8, x0 + 9):
+                        p = (x, y, z)
+                        owner = self.dust_owner.get(p)
+                        block = self.region[p] if 0 <= x < self.region.width and 0 <= y < self.region.height and 0 <= z < self.region.length else None
+                        c = "?" if block is None else "."
+                        if block is not None and not _is_air(block):
+                            c = "#" if owner is None else "w"
+                        if p in self.gate_cells:
+                            c = "g"
+                        elif c == "." and p in self.footprint_blocked:
+                            c = "b"
+                        elif c == "." and p in job.protected:
+                            c = "k"
+                        if p == (x0, y0, z0):
+                            c = "@"
+                        row += c
+                    rows.append(row)
+                log(f"[dump] y={y}\n" + "\n".join(rows))
+
     def blockers(self, goal: Pos, key: str, keys: set[str], r: int = _BLOCKER_RADIUS) -> list[str]:
         """Jobs (of keys) with wire or blocks within r of goal, nearest first."""
         gx, gy, gz = goal
@@ -1293,6 +1320,8 @@ class _GreedyRouter:
                         raise RuntimeError(f"Routing failed for net {job.key}: {e}") from e
                     failures.append((job.key, e))
                     log(f"[error] skipped net {job.key}: {e}")
+                    if os.environ.get("ROUTE_DEBUG_FAILED"):
+                        self._dump_around(job)
                 if on_done is not None:
                     on_done(i, job)
         if self.resume:
