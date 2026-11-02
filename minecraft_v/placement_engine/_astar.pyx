@@ -780,6 +780,7 @@ cdef class World:
     cdef bint keep_fast, have_small
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
+    cdef bint pids_seeded
     cdef bint grid_check
     # Set while _Cells.load runs: moves, -4 sides and new cells go straight into its vectors.
     cdef vector[Move]* out
@@ -1165,7 +1166,16 @@ cdef class World:
         cdef int* slot = self.pid_map.get(cell_key(x, y, z), &ins)
         if not ins:
             return slot[0]
-        slot[0] = self.pid_slow(x, y, z)
+        if self.out_cells == NULL:
+            slot[0] = self.pid_slow(x, y, z)
+            return slot[0]
+        # Filling the search's vectors: the cell stays out of the Python containers unless flush_cells asks.
+        slot[0] = <int>self.out_cells.x.size()
+        self.out_cells.x.push_back(x)
+        self.out_cells.y.push_back(y)
+        self.out_cells.z.push_back(z)
+        self.out_cells.h.push_back(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
+        self.out_cells.cm.push_back(_NO_MOVES)
         return slot[0]
 
     cdef int pid_slow(self, int x, int y, int z) except -1:
@@ -1176,13 +1186,18 @@ cdef class World:
             self.pos_list.append(key)
             self.h_list.append(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
             self.move_cache.append(None)
-            if self.out_cells != NULL:
-                self.out_cells.x.push_back(x)
-                self.out_cells.y.push_back(y)
-                self.out_cells.z.push_back(z)
-                self.out_cells.h.push_back(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
-                self.out_cells.cm.push_back(_NO_MOVES)
         return i
+
+    cdef int seed_pids(self) except -1:
+        """The cells Python has ids for, once, before the first cell's moves go in the vectors."""
+        cdef int ins, x, y, z
+        if self.pids_seeded:
+            return 0
+        self.pids_seeded = True
+        for key, i in self.pos_ids.items():
+            x, y, z = key
+            self.pid_map.get(cell_key(x, y, z), &ins)[0] = i
+        return 0
 
     cdef int emit(self, list moves, int x, int y, int z, int tx, int ty, int tz, int cost, unsigned int forbid,
                   int gate, bint has_extra, int ex, int ey, int ez) except -1:
@@ -1563,6 +1578,19 @@ cdef class _Cells:
         if self.moves.capacity() > (1u << 22):  # a huge search: not kept for the next ones
             vector[Move]().swap(self.moves)
 
+    cdef int flush_cells(self, dict pos_ids, list pos_list, list h_list, list move_cache) except -1:
+        """Cells only the vectors have, into the Python containers: a failed search's report and its retry read them."""
+        cdef Py_ssize_t i
+        cdef int x, y, z
+        for i in range(len(pos_list), <Py_ssize_t>self.x.size()):
+            x, y, z = self.x[i], self.y[i], self.z[i]
+            key = (x, y, z)
+            pos_ids[key] = i
+            pos_list.append(key)
+            h_list.append(self.h[i])
+            move_cache.append(None)
+        return 0
+
     cdef void sync(self, list pos_list, list h_list):
         cdef Py_ssize_t i, n = len(pos_list)
         for i in range(<Py_ssize_t>self.x.size(), n):
@@ -1630,6 +1658,7 @@ cdef class _Cells:
         cdef int cx, cy, cz
         if world is not None and not verify and not world.grid_check and congestion_cost is None:
             # The kernel's move generation without going through Python tuples.
+            world.seed_pids()
             c.start = self.moves.size()
             c.m4_start = self.m4_sides.size()
             c.m4_move = -1
@@ -1691,6 +1720,12 @@ cdef Heap SEARCH_HEAP
 cdef extern from *:
     "#define count_trailing_zeros(x) __builtin_ctz(x)"
     int count_trailing_zeros(unsigned int x) nogil
+
+
+def cell_pos(int cid):
+    """A cell of the last search, which may be past pos_list: good until the next search starts."""
+    cdef int x = SEARCH_CELLS.x[cid], y = SEARCH_CELLS.y[cid], z = SEARCH_CELLS.z[cid]
+    return (x, y, z)
 
 
 def set_foot_repeaters(bint on) -> None:
@@ -1959,6 +1994,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             else:
                 h_radius_pruned += 1
 
+    if not has_reached and world is not None:
+        cells.flush_cells(world.pos_ids, pos_list, h_list, world.move_cache)
     STAT_SEARCHES += 1
     STAT_POPS += pops
     LAST.update(pops=pops, exp=n_exp, reexp=n_reexp, pos=n_explored_xyz, max_gap=max_gap, ok=has_reached,
