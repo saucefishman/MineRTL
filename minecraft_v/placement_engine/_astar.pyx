@@ -119,9 +119,9 @@ cdef extern from *:
             mask = cap - 1; count = 0;
         }
         static inline size_t mix(unsigned long long k) {
-            k ^= k >> 33; k *= 0xff51afd7ed558ccdULL; k ^= k >> 33;
-            k *= 0xc4ceb9fe1a85ec53ULL; k ^= k >> 33;
-            return (size_t)k;
+            k ^= k >> 29;  // the high bits (a node's cell) have to reach the low bits of the product's top half
+            k *= 0x9e3779b97f4a7c15ULL;
+            return (size_t)(k >> 32);
         }
         V* find(unsigned long long k) {
             size_t i = mix(k) & mask;
@@ -177,24 +177,26 @@ cdef extern from *:
 
 cdef struct NodeInfo:
     double g          # g_score
-    long long parent  # came_from (valid once expanded)
-    bint expanded     # in came_from / explored
+    long long parent  # came_from; NOT_EXPANDED until then
 
 
+cdef enum:
+    NOT_EXPANDED = -2   # NodeInfo.parent; -1 is a seed's
+    UNREACHED = -3      # a slot get() made for a cost past the limit
+
+
+# A search reads a cell's moves some thirty times over: small, so that's few cache lines.
 cdef struct Move:
-    int dest
-    int cost
     uint32_t forbid
-    int gate          # 0 always, 1 not right after a tower move, 2 only right after one
-    bint has_extra
-    int ex, ey, ez    # 2x-slope intermediate, relative to the expanded cell
-    int dx, dy, dz
-    int shift         # snapshot shift table index for (dx, dy, dz)
-    bint has_flat
-    int fdx, fdz
-    long long h
-    bint near
-    long long arrive
+    int dest
+    int h
+    short shift       # snapshot shift table index for (dx, dy, dz)
+    signed char cost
+    signed char gate  # 0 always, 1 not right after a tower move, 2 only right after one
+    signed char dx, dy, dz
+    signed char fdx, fdz
+    signed char ex, ey, ez  # 2x-slope intermediate, relative to the expanded cell
+    char has_extra, has_flat, near, arrive  # arrive: by a tower move
     double cong       # congestion cost of dest (0 without congestion)
 
 
@@ -334,19 +336,19 @@ cdef class CameFrom:
 
     def get(self, long long node, default=None):
         cdef NodeInfo* ni = self.nodes.find(node)
-        if ni == NULL or not ni.expanded:
+        if ni == NULL or ni.parent < -1:
             return default
         return ni.parent
 
     def __getitem__(self, long long node):
         cdef NodeInfo* ni = self.nodes.find(node)
-        if ni == NULL or not ni.expanded:
+        if ni == NULL or ni.parent < -1:
             raise KeyError(node)
         return ni.parent
 
     def __contains__(self, long long node):
         cdef NodeInfo* ni = self.nodes.find(node)
-        return ni != NULL and ni.expanded
+        return ni != NULL and ni.parent >= -1
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1017,7 +1019,7 @@ cdef class World:
         m.h = abs(tx - self.gx) * self.x_h_factor + abs(ty - self.gy) * 4 + abs(tz - self.gz)
         m.near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
                   and abs(self.gy - ty) < Y_RADIUS_MIN)
-        m.arrive = TOWER_FLAG if dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2)) else 0
+        m.arrive = dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2))
         m.cong = 0.0
         self.out.push_back(m)
         return 0
@@ -1405,7 +1407,7 @@ cdef class _Cells:
             m.fdx = m.fdz = 0
         m.h = entry[7]
         m.near = entry[8]
-        m.arrive = entry[9]
+        m.arrive = entry[9] != 0
         m.cong = 0.0
         if congestion_cost is not None:
             m.cong = congestion_cost(pos_list[m.dest])
@@ -1539,6 +1541,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef FlatMap[NodeInfo]* nodes = &came_from.nodes
     cdef FlatMap[unsigned int] depths_store
     cdef FlatMap[unsigned int]* depths = &depths_store
+    nodes.reset(1 << 14)  # most searches outgrow the default, and growing rehashes
+    depths.reset(1 << 13)
     cdef vector[long long] gbest = group_best_h
     cdef vector[double] gmax = group_max_f
     cdef vector[char] explored_xyz
@@ -1581,8 +1585,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         node = seed_nodes[i]
         np = nodes.get(node, &ins)
         np.g = 0
-        np.parent = -1
-        np.expanded = False
+        np.parent = NOT_EXPANDED
         note_depth(depths, node)
         h = cells.h[node >> NODE_SHIFT]
         e.f = weight * h
@@ -1618,7 +1621,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             continue
         # Dominance: the same state with less signal depth at no more cost reaches everything
         # this one can (it is expanded first, or was dominated in turn).
-        if not ni.expanded and dominated(nodes, depths, e.node, e.g):
+        if ni.parent == NOT_EXPANDED and dominated(nodes, depths, e.node, e.g):
             continue
         cid = <int>(e.node >> NODE_SHIFT)
         h = cells.h[cid]
@@ -1628,10 +1631,9 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if h < gbest[e.group]:
             gbest[e.group] = h
         n_exp += 1
-        if ni.expanded:
+        if ni.parent != NOT_EXPANDED:
             n_reexp += 1
         else:
-            ni.expanded = True
             ni.parent = e.parent
             if <Py_ssize_t>explored_xyz.size() <= cid:
                 explored_xyz.resize(cid + 1, 0)
@@ -1737,23 +1739,23 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 for i in range(side.start, side.start + 3 * side.count, 3):
                     snap |= snap_bit(cells.m4_cells[i] - m.dx, cells.m4_cells[i + 1] - m.dy,
                                      cells.m4_cells[i + 2] - m.dz)
-            nkey = ((<long long>m.dest << NODE_SHIFT) | m.arrive | snap
+            nkey = ((<long long>m.dest << NODE_SHIFT) | (TOWER_FLAG if m.arrive else 0) | snap
                     | (<long long>(ndepth | (ncand << 4)) << SIG_SHIFT))
             if dominated(nodes, depths, nkey, new_g):
                 continue
-            np = nodes.find(nkey)
-            if np != NULL:
+            np = nodes.get(nkey, &ins)
+            if ins or np.parent == UNREACHED:
+                if not new_g < 1e9:  # stays looking like nothing was ever here
+                    np.g = 1e300
+                    np.parent = UNREACHED
+                    continue
+                np.g = new_g
+                np.parent = NOT_EXPANDED
+                note_depth(depths, nkey)
+            else:
                 if not new_g < np.g:
                     continue
                 np.g = new_g
-            else:
-                if not new_g < 1e9:
-                    continue
-                np = nodes.get(nkey, &ins)
-                np.g = new_g
-                np.parent = -1
-                np.expanded = False
-                note_depth(depths, nkey)
             if m.h <= h_limit or m.near:
                 ne.f = new_g + weight * m.h
                 ne.neg_h = -m.h
