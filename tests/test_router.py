@@ -1,7 +1,7 @@
 import pytest
 from litemapy import BlockState, Region
 
-from minecraft_v.placement_engine import _astar, builder
+from minecraft_v.placement_engine import _astar, builder, pathfinding
 from minecraft_v.placement_engine.builder import (
     _GreedyRouter, _KeepoutMap, _RouteJob, _repair_faulty_nets, _terminal_halo,
 )
@@ -147,6 +147,25 @@ def test_router_rips_up_failed_job():
     assert [key for key, _ in failures] == ["n"]
     assert _state(region, solid, dust_owner) == before
     assert "n" not in router.paths and "n" not in router.rec.journals
+
+
+def test_cell_grid_gives_the_moves_the_containers_give(monkeypatch):
+    # check mode works out every cell's moves from both, raising on a difference; the second net
+    # is searched over a grid the first net's laying and rip-up have written to.
+    monkeypatch.setattr(pathfinding, "_ASTAR_GRID", "check")
+    router, region, solid, dust_owner = _router()
+    assert router.indexed.block_index().grid is not None
+    walled = (14, 1, 14)
+    terminals = {"a": {(2, 1, 2), (8, 1, 2), walled}, "b": {(2, 1, 6), (14, 1, 6)}}
+    keepouts = _KeepoutMap(terminals)
+    region[walled] = STONE
+    solid.add(walled)
+    jobs = [_RouteJob(key=net, net_id=net, src=src, sinks=sinks, bounds=BOUNDS, protected=keepouts.for_net(net),
+                      terminals=terminals[net])
+            for net, src, sinks in (("a", (2, 1, 2), [(8, 1, 2), walled]), ("b", (2, 1, 6), [(14, 1, 6)]))]
+    failures = router.run(jobs, "[test]")
+    assert [key for key, _ in failures] == ["a"]
+    assert dust_owner[(14, 1, 6)] == "b"
 
 
 def test_blockers_finds_jobs_near_a_goal():
