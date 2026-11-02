@@ -82,3 +82,5 @@ Rule: if the machine is strained (swap filling, stalled processes), write ideas 
 
 ## Job queue
 All builds and simulations go through `python3 scripts/job.py run --mem 7G --name floweypu-build --timeout 2400 -- <command>`; it blocks until there's room. Rough memory: floweypu build 7G, floweypu simulation 3G, small example 1G. `--exclusive` for builds whose time matters, `--priority 10` for final checks, `-10` for sweeps. `python3 scripts/job.py status` shows the queue. Timeouts don't count sleep.
+
+- t1, PLOT TARGET MET (density's branch worktree-agent-a704db239106ebe52, one seed, quiet machine): `RAM_FOLD=1 RAM_GATE_CHANNEL=380 RAM_GATE_WIDTH=.6`, synth 7s + build 361s = 368s (wire 227, placement 60). 863x306x989, 15,230 nets, 0 failed, 0 verify, peak 6.2 GB. 1-reset PASS at half 1500 in redstone and redpiler, compare_gate_rtl 0. Installed to MCHPRS with half 1500; not tried in game. Those settings aren't merged here or the default yet.
