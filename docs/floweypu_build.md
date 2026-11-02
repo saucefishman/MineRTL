@@ -63,3 +63,16 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Paused 2026-11-02 for machine sleep. Open agents, each with WIP commit and WIP_NOTES.md on its branch: clock-timing (worktree-agent-ac17b89ea74c4c619), regression-sweep (worktree-agent-ab2ac90f1a6888808), density (worktree-agent-a704db239106ebe52), ram-stack (worktree-agent-a5f131867af3f0c77). None reviewed or merged here. Resume them, then merge, then quiet full build plus acceptance.
 - RAM_FOLD=1 (write lines under the first read decoder) takes the floweypu group from 1086x252x405 to 808x252x408. RAM_STACK_BANKS=12 at synth (scripts/ram_measure.py to see) adds 704x316x408. Both off by default. A full build needs RAM_GATE_WIDTH near .6: at .35 the narrower block makes gates deeper. Open: bpmem at 8 banks a stack fails its model check on the first read after power-up, with or without fold, both seeds; 12 and 16 pass.
 - Regression check against main (all examples, every flag, random inputs against RTL in redstone): only examples/cpu had broken, on seeds 0 and 1. Two causes. A: the 190-high stack limit also split routed banks: now RAM blocks only. B: no repeater at a slope's foot walls cpu's nets off: now on only for designs with RAM blocks (pathfinding.set_foot_repeaters, from main.py), so floweypu's path is the same code as before, not rebuilt. Without RAM, foot repeaters are back as on main; verify and repair catch their faults. Nothing deprecated. Broken on main too: --debug, pinext and video pin targets, sevenseg --flat, halfvideo --route-passes 3. New and open: --tiled-ram memread reads wrong words at any clock tested (7 of 1280 bits, half 428 and 3000).
+
+## TODO: investigate when the machine has room
+Rule: if the machine is strained (swap filling, stalled processes), write ideas here instead of starting them.
+- Longer test program exercising branches and the predictor; `hi` is too short to clear it. Wait for preload-fault.
+- Footprint: fold + `RAM_STACK_BANKS=12` with gate width about .55 if fold alone can't route under 1024x1024.
+- Footprint: two RAM tiers with lanes in two bundles (estimate 432x328x413, not prototyped).
+- Clock: false-path handling, once clock-timing reports how much pessimism they cause.
+- Routing: pin-access stubs at RAM south pins, coarse global routing corridors, tag_rf and select lanes.
+- Routing: failed-set PathFinder for hard nets; per-module ABC; stage hierarchy.
+- Open: `--tiled-ram` on `memread` wrong words, `bpmem` `next_pc1` (preload-fault running).
+- Open: `hist` 1 failure at half 500 and 350, folded and current, not looked into.
+- Open: full-adder opens in hf1 and hf2, `net_9622` inverted, unexplained.
+- Open: RAM group with lone lower read pin refused, address pitch 5 broken.
