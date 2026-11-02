@@ -43,3 +43,5 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Full routes hit 60 min limit at last rip-ups, 0 errors: d15, d10, d07 all. Run g1 (scratchpad/g1) with 2h limit, density 0.15, fanout 64.
 - Machine has 17GB: run ONE full build at a time, memory pressure wrecks timings (rank at 15 min: 15,178 alone vs 13,900 with three). A* grid (CellGrid) merged: 1.9x on examples/cpu, identical paths. MINECRAFT_V_ASTAR_GRID=0 off, =check verifies.
 - Remaining router gain: verify._World latch and inverted walks in kernel, 1.3-1.5x guess.
+- h1 (A* grid, density .15, fanout-first 64, big nets not ripped): first full route: 15,230 nets, 4 failed, wire 1200s, verify 1 short, critical 2703 ticks. Next w5: RAM_GATE_WIDTH=.5 centered compact gates.
+- h1 PASSES scripts/check_floweypu.py in redstone (half 3000): 1 2 3 h+i. Total 1828s, 1191x306x724, 4 failed nets, 1 short (net_1069/net_5485). Saved at scratchpad/h1. Goal left: 0 failures/shorts, under 1200s total.
