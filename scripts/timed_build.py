@@ -5,6 +5,9 @@ d = sys.argv[1]
 os.environ["MINECRAFT_V_ARTIFACTS_DIR"] = d
 from minecraft_v import main as M
 from minecraft_v.placement_engine import builder as B
+if os.environ.get("TIMED_PROGRESS"):  # routing progress in the log; --debug would also save snapshots mid-route
+    set_debug = M.set_debug
+    M.set_debug = lambda on: set_debug(True)
 times = {}
 ends = {}
 def wrap(mod, name, label=None):
