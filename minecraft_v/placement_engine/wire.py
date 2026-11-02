@@ -372,6 +372,8 @@ def _signal_returns(
     def input_side(block: BlockState) -> tuple[int, int]:
         return next(d for d, f in _DELTA_TO_FACING.items() if f == block["facing"])
 
+    # Most neighbours are neither; the index saves reading those from the region.
+    index = workspace.block_index() if hasattr(workspace, "block_index") else None
     seen = {start, cut}
     stack = [start]
     while stack:
@@ -386,7 +388,7 @@ def _signal_returns(
         else:
             nexts = [(x + dx, y + dy, z + dz) for dx, dz in _HORIZ_DIRS for dy in (-1, 0, 1)]
         for nxt in nexts:
-            if nxt in seen:
+            if nxt in seen or (index is not None and nxt not in index.wire and nxt not in index.repeater):
                 continue
             other = block_at(nxt)
             if other is None:

@@ -66,6 +66,14 @@ def _block_kind(bid: str) -> int:
     return _OTHER if any(m in bid for m in _NON_OPAQUE_MARKERS) else _OPAQUE
 
 
+_NOTHING = (_AIR, None)  # a world entry with no block to ask about
+
+
+def _kind_of(block: BlockState) -> tuple[int, BlockState | None]:
+    kind = _block_kind(block.id)
+    return _NOTHING if kind == _AIR else (kind, block)
+
+
 class Excluding:
     """Cells of a set, less a few: copying a whole design's terminals per net adds up."""
 
@@ -109,7 +117,9 @@ class _World:
         self._successors: dict[tuple[Pos, str], list[tuple[Pos, str]]] = {}
         self._size = (region.width, region.height, region.length)
         self._palette = getattr(region, "_Region__palette", None)  # straight there, this is read so often
-        self._blocks = getattr(region, "_Region__blocks", None)
+        blocks = getattr(region, "_Region__blocks", None)
+        self._blocks = None if blocks is None else memoryview(blocks)  # scalar reads are faster than numpy's
+        self._by_palette: dict[int, tuple[int, BlockState | None]] = {}  # what _lookup gives per palette entry
 
     def changed(self, p: Pos) -> None:
         """The block at p was written. Neighbours' successors depend on it too, so they all go."""
@@ -129,11 +139,20 @@ class _World:
             return cached
         x, y, z = p
         w, h, l = self._size
-        if not (0 <= x < w and 0 <= y < h and 0 <= z < l) or (p in self.blocked and p not in self.terminals):
-            result = (_AIR, None)  # component internals are invisible
+        if not (0 <= x < w and 0 <= y < h and 0 <= z < l):
+            result = _NOTHING
         else:
-            b = self._palette[self._blocks[p]] if self._blocks is not None else self.region[p]
-            result = (_block_kind(b.id), b)
+            if self._blocks is not None:
+                entry = self._blocks[p]
+                result = self._by_palette.get(entry)
+                if result is None:
+                    b = self._palette[entry]
+                    result = self._by_palette[entry] = _kind_of(b)
+            else:
+                result = _kind_of(self.region[p])
+            # Air first: blocked can be millions of cells, and most lookups here are air.
+            if result is not _NOTHING and p in self.blocked and p not in self.terminals:
+                result = _NOTHING  # component internals are invisible
         self._kind[p] = result
         return result
 
