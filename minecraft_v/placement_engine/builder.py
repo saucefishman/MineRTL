@@ -1194,7 +1194,9 @@ class _GreedyRouter:
         if self.resume:
             jobs = self.resume.in_saved_order(jobs)
         failures: list[tuple[str, Exception]] = []
-        keys = {job.key for job in jobs}
+        keep_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 0))
+        # Blockers to rip: not nets routed first for being huge. Redoing one costs more than the sink it would free.
+        keys = {job.key for job in jobs if not keep_fanout or len(job.sinks) < keep_fanout}
         by_key = {job.key: job for job in jobs}
         queue = deque(enumerate(jobs, 1))
         cleared_for: dict[str, set[Pos]] = {}  # job key -> sinks whose blockers were ripped
