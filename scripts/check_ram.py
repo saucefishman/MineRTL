@@ -1,6 +1,6 @@
 """Check the tiled RAM in mchprs_headless on all modes.
 
-  check_ram.py array <depth> <width> <out_dir>           the bare array: every word written twice, read on both ports
+  check_ram.py array <depth> <width> <out_dir> [reads]   the bare array: every word written twice, read on both ports
   check_ram.py build <netlist.json> <out_dir> <seed>     examples/ramtile built, random traffic against a model of the RTL
 """
 import os
@@ -23,7 +23,7 @@ DEPTH, WIDTH, ABITS = 4, 2, 2
 NORMAL = {"east": (1, 0), "north": (0, -1), "south": (0, 1)}
 
 
-def array_script(depth: int, width: int, seed: int) -> str:
+def array_script(depth: int, width: int, seed: int, reads: int = 2, init: list[int] | None = None) -> str:
     rng = random.Random(seed)
     mask = (1 << width) - 1
     abits = depth.bit_length() - 1
@@ -32,22 +32,26 @@ def array_script(depth: int, width: int, seed: int) -> str:
     def address(pin: str, value: int) -> list[str]:
         return [f"set {pin}[{b}] {value >> b & 1}" for b in range(abits)]
 
-    lines = ["set we 0"] + address("wa", 0) + address("aa", 0) + address("ab", 0) + [f"settle {ARRAY_SETTLE}"]
+    ports = "abcd"[:reads]
+    lines = ["set we 0"] + address("wa", 0) + [line for p in ports for line in address(f"a{p}", 0)] + [f"settle {ARRAY_SETTLE}"]
+    for a in range(depth) if init else ():  # preload reads back before any write
+        lines += [line for p in ports for line in address(f"a{p}", a)] + [f"settle {ARRAY_SETTLE}"]
+        lines += [f"expect r{p}[{i}] {init[a] >> i & 1}" for p in ports for i in range(width)]
     for k, word in [(k, ~w & mask) for k, w in enumerate(words)] + list(enumerate(words)):
         lines += address("wa", k) + [f"set wd[{i}] {word >> i & 1}" for i in range(width)]
         lines += [f"settle {ARRAY_SETTLE}", "set we 1", f"settle {ARRAY_SETTLE}", "set we 0", f"settle {ARRAY_SETTLE}"]
     lines += [f"set wd[{i}] 0" for i in range(width)] + [f"settle {ARRAY_SETTLE}"]
     for a in range(depth):
-        b = depth - 1 - a
-        lines += address("aa", a) + address("ab", b) + [f"settle {ARRAY_SETTLE}"]
-        lines += [f"expect ra[{i}] {words[a] >> i & 1}" for i in range(width)]
-        lines += [f"expect rb[{i}] {words[b] >> i & 1}" for i in range(width)]
+        at = {p: (a + n) % depth if n % 2 == 0 else depth - 1 - (a + n) % depth for n, p in enumerate(ports)}
+        lines += [line for p in ports for line in address(f"a{p}", at[p])] + [f"settle {ARRAY_SETTLE}"]
+        lines += [f"expect r{p}[{i}] {words[at[p]] >> i & 1}" for p in ports for i in range(width)]
     return "\n".join(lines) + "\n"
 
 
-def check_array(depth: int, width: int, out: Path) -> int:
+def check_array(depth: int, width: int, out: Path, reads: int = 2) -> int:
     out.mkdir(parents=True, exist_ok=True)
-    ram = build_ram("ram", depth, width)
+    init = [random.Random(depth + k).randrange(1 << width) for k in range(depth)] if reads == 4 else None
+    ram = build_ram("ram", depth, width, reads, init)
     fp = ram.footprint
     region = Region(0, 0, 0, fp.width, fp.height, fp.depth)
     for pos, block in ram.blocks:
@@ -57,12 +61,12 @@ def check_array(depth: int, width: int, out: Path) -> int:
         for pin in ram.pins:
             nx, nz = NORMAL[pin.side.value]
             f.write(f"{pin.name} {pin.offset[0]} {pin.offset[1]} {fp.depth - 1 - pin.offset[2]} {nx} {nz}\n")
-    (out / "ram.script").write_text(array_script(depth, width, depth * 100 + width))
+    (out / "ram.script").write_text(array_script(depth, width, depth * 100 + width, reads, init))
     print(f"{fp.width}x{fp.height}x{fp.depth}, {fp.width * fp.height * fp.depth / depth / width:.0f} volume per bit, "
           f"{len(ram.blocks) / depth / width:.0f} blocks per bit")
     levers = [arg for pin in ram.pins if pin.direction == Direction.IN for arg in ("--add-lever", pin.name)]
     return subprocess.run([headless_binary(), "test", out / "ram.litematic", out / "ram.pins", out / "ram.script",
-                           "--modes", MODES, *levers]).returncode
+                           "--modes", "redstone,redpiler", *levers]).returncode
 
 
 def build_script(seed: int, steps: int = 60) -> str:
@@ -113,7 +117,7 @@ def check_build(netlist: str, out: Path, seed: str, *args: str) -> int:
 def main() -> int:
     mode, *rest = sys.argv[1:]
     if mode == "array":
-        return check_array(int(rest[0]), int(rest[1]), Path(rest[2]))
+        return check_array(int(rest[0]), int(rest[1]), Path(rest[2]), *map(int, rest[3:]))
     return check_build(rest[0], Path(rest[1]), rest[2], *rest[3:])
 
 

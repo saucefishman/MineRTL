@@ -54,12 +54,12 @@ module _ram_2r1w (RD_CLK, RD_EN, RD_ARST, RD_SRST, RD_ADDR, RD_DATA, WR_CLK, WR_
     wire [ABITS-1:0] waddr;
     wire [WIDTH-1:0] wdata;
     wire wen;
-    \$dff #(.WIDTH(ABITS), .CLK_POLARITY(1'b1)) waddr_reg (.CLK(WR_CLK), .D(WR_ADDR), .Q(waddr));
-    \$dff #(.WIDTH(WIDTH), .CLK_POLARITY(1'b1)) wdata_reg (.CLK(WR_CLK), .D(WR_DATA), .Q(wdata));
-    \$dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) wen_reg (.CLK(WR_CLK), .D(WR_EN[0]), .Q(wen));
+    \$dff #(.WIDTH(ABITS), .CLK_POLARITY(1'b1)) waddr_reg (.CLK(WR_CLK[0]), .D(WR_ADDR[ABITS-1:0]), .Q(waddr));
+    \$dff #(.WIDTH(WIDTH), .CLK_POLARITY(1'b1)) wdata_reg (.CLK(WR_CLK[0]), .D(WR_DATA[WIDTH-1:0]), .Q(wdata));
+    \$dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) wen_reg (.CLK(WR_CLK[0]), .D(WR_EN[0]), .Q(wen));
 
     wire window;
-    ram_window window_gen (.clk(WR_CLK), .window(window));
+    ram_window window_gen (.clk(WR_CLK[0]), .window(window));
     generate
         if (RD_PORTS == 2) begin : map
             ram_2r1w #(.DEPTH(SIZE), .ABITS(ABITS), .WIDTH(WIDTH)) _TECHMAP_REPLACE_ (

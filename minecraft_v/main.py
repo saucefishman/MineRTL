@@ -12,7 +12,7 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
-from minecraft_v.placement_engine.ram import RAM_CELL, WINDOW_CELL, WINDOW_MACRO, build_ram, build_window
+from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX
 from minecraft_v.placement_engine.resume import ResumeStore
@@ -86,10 +86,8 @@ def module_to_component_list(module: Module) -> ComponentList:
     for cell_name, cell in module.cells.items():
         if cell.type in DEBUG_CELLS:
             continue
-        if cell.type in (RAM_CELL, WINDOW_CELL):
-            params = {k: int(v, 2) for k, v in cell.parameters.items()}
-            block = build_ram(f"ram_{params['DEPTH']}x{params['WIDTH']}", params["DEPTH"], params["WIDTH"]) \
-                if cell.type == RAM_CELL else build_window()
+        if cell.type in BLOCK_CELLS:
+            block = block_for_cell(cell.type, cell.parameters)
             pins = []
             for pin in block.pins:
                 port, _, index = pin.name.rstrip("]").partition("[")
@@ -101,7 +99,7 @@ def module_to_component_list(module: Module) -> ComponentList:
                     pins.append(pin)
                     bit_endpoints[bit].append((cell_name, pin.name, pin.direction))
             components.append(Component(id=cell_name, type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
-                                        metadata={"macro": block.name, **params}))
+                                        metadata={"macro": block.name, **({"bank": True} if cell.type == RAM4_CELL else {})}))
             continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))
@@ -305,8 +303,7 @@ def main():
 
     macros = None
     flat_comp = component_list
-    rams = {c.metadata["macro"]: build_window() if c.metadata["macro"] == WINDOW_MACRO
-            else build_ram(c.metadata["macro"], c.metadata["DEPTH"], c.metadata["WIDTH"])
+    rams = {c.metadata["macro"]: built_block(c.metadata["macro"])
             for c in component_list.components if c.type == ComponentType.CUSTOM}
     if rams:
         macros = rams

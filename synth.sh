@@ -148,7 +148,7 @@ map_tiled_ram=""
 if [[ "$tiled_ram" == true ]]; then
     map_tiled_ram="opt
 memory_collect
-techmap -map techmap/ram_2r1w.v t:\$mem_v2"
+techmap -map techmap/ram_2r1w.v -map techmap/ram_4r2w.v t:\$mem_v2"
 fi
 yosys_status=0
 yosys -q -l "$yosys_log" -p "

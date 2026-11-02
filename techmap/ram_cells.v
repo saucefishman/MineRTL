@@ -11,3 +11,16 @@ endmodule
 (* blackbox *)
 module ram_window (input clk, output window);
 endmodule
+
+(* blackbox *)
+module ram_4r1w #(parameter DEPTH = 2, parameter ABITS = 1, parameter WIDTH = 1, parameter INIT = 0) (
+    input [ABITS-1:0] aa, ab, ac, ad, wa,
+    input ea, eb, ec, ed, we,
+    input [WIDTH-1:0] wd,
+    output [WIDTH-1:0] ra, rb, rc, rd);
+endmodule
+
+// The clock late by four amounts, for the write turns of ram_4r2w.
+(* blackbox *)
+module ram_delay (input clk, output t0, t1, t2, t3);
+endmodule
