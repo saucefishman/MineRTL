@@ -15,6 +15,7 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Stay faithful to the original; adjust only for legitimate impossibilities in synthesis.
 - Test program: prints 1, 2, 3 one at a time, then "hi" together, lowercase, on one clock. Output on the CPU's character ports (e0/d0, e1/d1).
 - Footprint should be closer to square, not as wide (baseline 2965x380x499).
+- Owner: verify is sometimes wrong. Once a build has 0 failed nets, simulate; acceptance decides, a verify-only fault isn't a blocker.
 
 ## State
 - Branch at beef260: main merged. RAM work in minecraft_v/placement_engine/ram.py, techmap/ram_*.v, flag --tiled-ram.
