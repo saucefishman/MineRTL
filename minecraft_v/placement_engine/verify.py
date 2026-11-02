@@ -97,6 +97,11 @@ class _World:
         self._palette = getattr(region, "_Region__palette", None)  # straight there, this is read so often
         self._blocks = getattr(region, "_Region__blocks", None)
 
+    def changed(self, p: Pos) -> None:
+        """The block at p was written. Neighbours' successors depend on it too, so they all go."""
+        self._kind.pop(p, None)
+        self._successors.clear()
+
     def kind(self, p: Pos) -> int:
         cached = self._kind.get(p)
         return cached[0] if cached is not None else self._lookup(p)[0]

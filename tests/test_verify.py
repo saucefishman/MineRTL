@@ -390,3 +390,39 @@ def test_hold_only_converts_dust_on_a_straight_run():
     world = _World(region, frozenset(), frozenset())
     assert _straight_run(world, (2, 1, 1)) is None
     assert set(_straight_run(world, (2, 1, 4))) == {(1, 1, 4), (3, 1, 4)}
+
+
+def test_hold_keeps_dust_that_powers_a_torch_below():
+    # cpu net_118: a repeater on a powered -4 drop's launch cell leaves the drop's torch stuck.
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.hold import _straight_run
+    from minecraft_v.placement_engine.verify import _World
+
+    region = Region(0, 0, 0, 8, 6, 6)
+    for z in (1, 4):
+        for x in (1, 2, 3):
+            region[x, 3, z] = BlockState("minecraft:redstone_wire")
+        region[2, 2, z] = BlockState("minecraft:stone")
+    region[2, 2, 2] = BlockState("minecraft:redstone_wall_torch", facing="south")  # on the block under (2, 3, 1)
+    region[2, 2, 5] = BlockState("minecraft:redstone_wall_torch", facing="north")  # on another block's far side
+    region[2, 1, 4] = BlockState("minecraft:stone")
+    world = _World(region, frozenset(), frozenset())
+    assert _straight_run(world, (2, 3, 1)) is None
+    assert set(_straight_run(world, (2, 3, 4))) == {(1, 3, 4), (3, 3, 4)}
+
+
+def test_world_successors_follow_a_changed_block():
+    from minecraft_v.placement_engine.verify import _World
+    region = Region(0, 0, 0, 5, 3, 3)
+    for x in range(5):
+        region[x, 0, 1] = BlockState("minecraft:stone")
+        region[x, 1, 1] = BlockState("minecraft:redstone_wire")
+    world = _World(region, frozenset(), frozenset())
+    assert ((3, 1, 1), "") in world.successors(((2, 1, 1), ""))
+    assert ((1, 1, 1), "") in world.successors(((2, 1, 1), ""))
+
+    region[2, 1, 1] = BlockState("minecraft:repeater", facing=_DELTA_TO_FACING[(-1, 0)], delay="1")
+    world.changed((2, 1, 1))
+    assert world.successors(((2, 1, 1), "")) == [((3, 1, 1), "")]
+    assert ((2, 1, 1), "") not in world.successors(((3, 1, 1), ""))

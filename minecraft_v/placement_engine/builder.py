@@ -28,7 +28,7 @@ from minecraft_v.placement_engine.ir import (
 from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
-    _ROUTE_STAGNATION_FIRST, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
+    _ROUTE_STAGNATION_FIRST, _ROUTE_RETRY_BUDGET, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
     _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT, _ROUTE_BATCH_PER_WORKER,
 )
 from .layout import (
@@ -824,6 +824,7 @@ class _GreedyRouter:
         self.has_kept_wire: set[str] = set()  # those, and jobs whose kept wire a whole retry has to clear
         self.sinks_cleared: dict[str, set[Pos]] = {}  # job key -> sinks that have had their one per-sink rip
         self.laid: dict[str, _KeptBranches] = {}  # finished jobs' branches, for rip_branch
+        self.wide_budget: set[str] = set()  # job keys on their last try, searching with _ROUTE_RETRY_BUDGET
         self.rips_blockers = True  # whether a failed sink can get room by ripping (run's rip_blockers)
 
     def net_paths(self, net_id: str) -> list[list[Pos]]:
@@ -905,13 +906,19 @@ class _GreedyRouter:
         if kept:
             vias, leads, sinks = kept.vias, kept.leads, kept.sinks
         else:
-            vias = [v for v in (self._open_via(v, job) for v in job.via) if v is not None]
-            leads = [v for v in (self._open_via(v, job) for v in job.lead) if v is not None]
+            def open_waypoint(wanted: Pos) -> Pos | None:
+                find = lambda: self._open_via(wanted, job)
+                return self.resume.waypoint_cell(job.key, wanted, find) if self.resume else find()
+
+            vias = [v for v in map(open_waypoint, job.via) if v is not None]
+            leads = [v for v in map(open_waypoint, job.lead) if v is not None]
             # Nearest first; a lead comes before its pin, which is further on the same line.
             sinks = sorted([*job.sinks, *leads],
                            key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
             sinks = [*first, *(p for p in sinks if p not in first)]
         targets = [*vias, *sinks]
+        if self.resume and not kept:
+            targets = self.resume.targets_in_saved_order(job.key, targets)
         all_seeds: list[Pos] = net_seeds + [pos for path in paths for pos in path]
         tree = _TreeCells()
         tree.add(all_seeds)
@@ -943,7 +950,8 @@ class _GreedyRouter:
                 try:
                     try:
                         def search(stagnation: int = -1) -> list[Pos]:
-                            if tree_seeds is all_seeds and tree.n > _NEAREST_SEEDS:
+                            wide = stagnation < 0 and job.key in self.wide_budget  # a last try: no holding back
+                            if tree_seeds is all_seeds and tree.n > _NEAREST_SEEDS and not wide:
                                 try:
                                     return search_from(tree.nearest(dst, _NEAREST_SEEDS), stagnation)
                                 except ValueError:
@@ -964,6 +972,7 @@ class _GreedyRouter:
                                 seed_depths=seed_depths,
                                 pending_sinks=pending,
                                 stagnation=stagnation,
+                                budget=_ROUTE_RETRY_BUDGET if stagnation < 0 and job.key in self.wide_budget else 1,
                                 **job.search_kwargs,
                             )
 
@@ -1169,6 +1178,8 @@ class _GreedyRouter:
         on_done(i, job): called after each job's attempt, i its 1-based position in jobs.
         """
         self.rips_blockers = rip_blockers
+        if self.resume:
+            jobs = self.resume.in_saved_order(jobs)
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
         by_key = {job.key: job for job in jobs}
@@ -1202,6 +1213,8 @@ class _GreedyRouter:
                 try:
                     with self.rec.recording(job.key):
                         self.route_job_retrying(job)
+                    if self.resume:
+                        self.resume.finished(job.key)
                     if time.monotonic() - job_started >= _LOG_SLOW_JOB_SECONDS:
                         debug(f"{label} {job.key}: {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                 except Exception as e:
@@ -1244,10 +1257,13 @@ class _GreedyRouter:
                     where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
                     wider = [] if where is None or job.key in escalated or not rip_blockers else \
                         self.blockers(where, job.key, keys, _ESCALATE_RADIUS)[:_ESCALATE_MAX]
-                    if wider:
+                    if wider or (where is not None and job.key not in escalated and rip_blockers
+                                 and not isinstance(e, LayConflict)):
                         escalated.add(job.key)
                         requeued.add(job.key)
-                        log(f"{label} {job.key}: {e}; ripping a branch of {len(wider)} nets around {where} and retrying")
+                        self.wide_budget.add(job.key)
+                        log(f"{label} {job.key}: {e}; ripping a branch of {len(wider)} nets around {where} "
+                            f"and retrying with a wider budget")
                         for v in wider:
                             self.rip_branch(by_key[v], [where])
                             ripped.add(v)

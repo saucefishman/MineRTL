@@ -200,6 +200,23 @@ def test_router_breaks_long_descent_for_repeaters(drop, horiz):
     assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
 
 
+def test_router_gets_past_a_wall_on_a_wider_budget():
+    # cpu net_104: source and sink at either X end of a memory bank. A clear route exists, but the search
+    # spends a normal budget on states along the near face.
+    bounds = (0, 0, 0, 29, 44, 104)
+    rec = Recorder()
+    region = Region(0, 0, 0, bounds[3] + 1, bounds[4] + 1, bounds[5] + 1)
+    solid, dust_owner = JournaledSet(rec, name="solid"), JournaledDict(rec)
+    wall = frozenset((x, y, z) for x in (14, 15) for y in range(23) for z in range(4, 101))
+    router = _GreedyRouter(region, rec, solid, dust_owner, JournaledSet(rec, name="inverted"),
+                           wall, bounds[4], frozenset())
+    src, sink = (8, 17, 76), (21, 11, 76)
+    job = _RouteJob(key="n", net_id="n", src=src, sinks=[sink], bounds=bounds, protected=frozenset(),
+                    terminals={src, sink})
+    assert router.run([job], "[test]") == []
+    assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
+
+
 def test_slope_notch_checked_when_cell_starts_a_longer_move():
     """A cell that a 1-step slope lands on can also start a 2x slope; the notch check still applies."""
     workspace = Region(0, 0, 0, 12, 16, 12)
