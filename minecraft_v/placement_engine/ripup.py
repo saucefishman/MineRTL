@@ -50,6 +50,9 @@ class Recorder:
 
 
 class JournaledSet(set):
+    _grid = None  # _astar.CellGrid mirroring this set, and which bit (see CellGrid)
+    _grid_bit = 0
+
     def __init__(self, recorder: Recorder, iterable=(), name: str = ""):
         super().__init__(iterable)
         self._rec = recorder
@@ -59,20 +62,28 @@ class JournaledSet(set):
         if self._rec.active is not None and not set.__contains__(self, key):
             self._rec.log(("set", self, key, False, None))
         set.add(self, key)
+        if self._grid is not None:
+            self._grid.put(key, self._grid_bit, True)
 
     def discard(self, key) -> None:
         if self._rec.active is not None and set.__contains__(self, key):
             self._rec.log(("set", self, key, True, None))
         set.discard(self, key)
+        if self._grid is not None:
+            self._grid.put(key, self._grid_bit, False)
 
     def _restore(self, key, present: bool) -> None:
         if present:
             set.add(self, key)
         else:
             set.discard(self, key)
+        if self._grid is not None:
+            self._grid.put(key, self._grid_bit, present)
 
 
 class JournaledDict(dict):
+    _grid = None  # _astar.CellGrid mirroring this dict
+
     def __init__(self, recorder: Recorder, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._rec = recorder
@@ -81,10 +92,14 @@ class JournaledDict(dict):
         if self._rec.active is not None:
             self._rec.log(("dict", self, key, dict.get(self, key, _MISSING), None))
         dict.__setitem__(self, key, value)
+        if self._grid is not None:
+            self._grid.put_owner(key, value)
 
     def pop(self, key, *default):
         if self._rec.active is not None and dict.__contains__(self, key):
             self._rec.log(("dict", self, key, dict.__getitem__(self, key), None))
+        if self._grid is not None:
+            self._grid.put_owner(key, None)
         return dict.pop(self, key, *default)
 
     def _restore(self, key, prev) -> None:
@@ -92,6 +107,8 @@ class JournaledDict(dict):
             dict.pop(self, key, None)
         else:
             dict.__setitem__(self, key, prev)
+        if self._grid is not None:
+            self._grid.put_owner(key, None if prev is _MISSING else prev)
 
 
 class JournalingWorkspace:

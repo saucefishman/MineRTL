@@ -826,6 +826,7 @@ class _GreedyRouter:
         self.max_bridge_y = max_bridge_y
         self.terminal_positions = terminal_positions
         self.indexed = IndexedWorkspace(region)  # all writes go through this, keeping its index current
+        self.indexed.attach_grid(solid, dust_owner, inverted_cells, footprint_blocked, terminal_positions)
         self.ws = JournalingWorkspace(self.indexed, rec)
         # job key -> (net id, ordered sink paths): what _place_repeaters_for_net walks.
         self.paths: dict[str, tuple[str, list[list[Pos]]]] = {} if paths is None else paths
