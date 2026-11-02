@@ -101,38 +101,6 @@ def _decode_error(err: tuple[bool, str, str]) -> Exception:
     return RouteTimeout(msg) if is_timeout else RuntimeError(f"{type_name}: {msg}")
 
 
-def _fork_child(conn: Connection, task: Callable[[], object]) -> None:
-    try:
-        conn.send(task())
-    except Exception:
-        conn.send(None)
-    conn.close()
-
-
-def run_forked(tasks: list[Callable[[], object]]) -> list[object]:
-    """Run each task in its own process forked from the current state; results in task order, None for a crash.
-
-    What a task changes stays in its process, so it can mutate whatever it inherited.
-    """
-    ctx = multiprocessing.get_context("fork")
-    children = []
-    for task in tasks:
-        parent, child = ctx.Pipe(duplex=False)
-        proc = ctx.Process(target=_fork_child, args=(child, task), daemon=True)
-        proc.start()
-        child.close()
-        children.append((parent, proc))
-    results = []
-    for conn, proc in children:
-        try:
-            results.append(conn.recv())
-        except EOFError:
-            results.append(None)
-        conn.close()
-        proc.join()
-    return results
-
-
 class RouteWorkers:
     """N forked processes that each route one net at a time against a congestion replica."""
 
