@@ -53,7 +53,11 @@ module _ram_4r2w (RD_CLK, RD_EN, RD_ARST, RD_SRST, RD_ADDR, RD_DATA, WR_CLK, WR_
     localparam ROW_BITS = ABITS < 6 ? ABITS : 6;
     localparam ROWS = 1 << ROW_BITS;
     localparam BANKS = 1 << (ABITS - ROW_BITS);
+`ifdef RAM_STACK_BANKS
+    localparam STACK_BANKS = `RAM_STACK_BANKS;
+`else
     localparam STACK_BANKS = 8;  // what fits under the world's height
+`endif
     localparam STACKS = (BANKS + STACK_BANKS - 1) / STACK_BANKS;
 
     wire clk = WR_CLK[0];

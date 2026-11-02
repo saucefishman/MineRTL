@@ -158,7 +158,7 @@ opt_clean
 peepopt
 opt -full -purge
 memory_collect
-techmap -map techmap/ram_2r1w.v -map techmap/ram_4r2w.v t:\$mem_v2"
+techmap ${RAM_STACK_BANKS:+-D RAM_STACK_BANKS=$RAM_STACK_BANKS} -map techmap/ram_2r1w.v -map techmap/ram_4r2w.v t:\$mem_v2"
 fi
 abc_step=""
 if [[ "$tiled_ram" == true ]]; then

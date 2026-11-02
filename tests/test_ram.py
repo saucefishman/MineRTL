@@ -12,6 +12,7 @@ from litemapy import BlockState, Region
 
 from minecraft_v.placement_engine.block_utils import BulkRegion
 from minecraft_v.placement_engine.cosmetics import apply_dust_shapes
+from minecraft_v.placement_engine import ram
 from minecraft_v.placement_engine.ir import Direction
 from minecraft_v.placement_engine.propagate import comparator_entity, settle
 from minecraft_v.placement_engine.ram import (StackSpec, build_group, build_ram, build_stack, build_window, group_block,
@@ -150,6 +151,31 @@ def test_block_cache_returns_the_same_block(tmp_path):
     assert made.footprint == again.footprint and made.pins == again.pins
     assert made.settled.palette == again.settled.palette and made.settled.comparators == again.settled.comparators
     assert np.array_equal(made.settled.ids, again.settled.ids) and np.array_equal(made.settled.xs, again.settled.xs)
+
+
+def test_fold_narrows_the_stack_and_keeps_pins_and_bits(monkeypatch):
+    spec = _spec()
+    plain = build_stack("s", spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init)
+    monkeypatch.setattr(ram, "_FOLD", True)
+    folded = build_stack("s", spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init)
+    assert folded.footprint.width == plain.footprint.width - 3 * ram._ADDR_PITCH - ram._LINE_PITCH
+    assert {(p.name, p.direction) for p in folded.pins} == {(p.name, p.direction) for p in plain.pins}
+    count = lambda m, kind: sum(block.id == kind for _, block in m.blocks)
+    assert count(folded, "minecraft:comparator") == count(plain, "minecraft:comparator")
+
+
+def test_fold_group_with_a_lone_lower_read_pin_under_a_shared_upper_pin(monkeypatch):
+    """The layout the guard refuses unfolded: lane towers come nearest, so the lone pin's way out crosses none."""
+    shared = {"ac[0]": "n", "wa[0]": "m"}
+    first = replace(_spec(), nets={**_spec().nets, **shared, "aa[0]": "alone"})
+    second = replace(_spec(), base=0, nets=dict(shared))
+    with pytest.raises(ValueError):
+        build_group("g", [first, second])
+    monkeypatch.setattr(ram, "_FOLD", True)
+    block, own, lanes = build_group("g", [first, second])
+    assert set(lanes) == {"n", "m"} and "s0_aa[0]" in own
+    assert all(0 <= p[a] < s for p, _ in block.blocks for a, s in enumerate(
+        (block.footprint.width, block.footprint.height, block.footprint.depth)))
 
 
 def test_preload_survives_settling_and_comparators_keep_their_signal():
