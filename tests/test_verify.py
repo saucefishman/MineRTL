@@ -390,3 +390,23 @@ def test_hold_only_converts_dust_on_a_straight_run():
     world = _World(region, frozenset(), frozenset())
     assert _straight_run(world, (2, 1, 1)) is None
     assert set(_straight_run(world, (2, 1, 4))) == {(1, 1, 4), (3, 1, 4)}
+
+
+def test_hold_keeps_dust_that_powers_a_torch_below():
+    # cpu net_118: a repeater on a powered -4 drop's launch cell leaves the drop's torch stuck.
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.hold import _straight_run
+    from minecraft_v.placement_engine.verify import _World
+
+    region = Region(0, 0, 0, 8, 6, 6)
+    for z in (1, 4):
+        for x in (1, 2, 3):
+            region[x, 3, z] = BlockState("minecraft:redstone_wire")
+        region[2, 2, z] = BlockState("minecraft:stone")
+    region[2, 2, 2] = BlockState("minecraft:redstone_wall_torch", facing="south")  # on the block under (2, 3, 1)
+    region[2, 2, 5] = BlockState("minecraft:redstone_wall_torch", facing="north")  # on another block's far side
+    region[2, 1, 4] = BlockState("minecraft:stone")
+    world = _World(region, frozenset(), frozenset())
+    assert _straight_run(world, (2, 3, 1)) is None
+    assert set(_straight_run(world, (2, 3, 4))) == {(1, 3, 4), (3, 3, 4)}
