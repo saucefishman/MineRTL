@@ -306,7 +306,7 @@ def _find_wire_path(
         footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
         terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
-        weight: float = 1.5,
+        weight: float = 1.75,
         limit_exclusions=False,
         x_h_factor=1,
         congestion_cost: Callable[[tuple[int, int, int]], float] | None = None,

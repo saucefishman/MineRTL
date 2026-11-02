@@ -18,7 +18,7 @@ from litemapy import BlockState, Region
 
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from .ir import ComponentList, ComponentType
-from .verify import _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _World
+from .verify import Excluding, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _World
 
 Pos = tuple[int, int, int]
 _SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
@@ -87,7 +87,7 @@ class _HoldTiming:
             n = self.nets[net_id]
             src = self.terminals[n.source.component_id, n.source.pin_name]
             sinks = {self.terminals[s.component_id, s.pin_name] for s in n.sinks}
-            self.cache[net_id] = wire_arrivals(self.world, src, self.all_terminals - sinks - {src})
+            self.cache[net_id] = wire_arrivals(self.world, src, Excluding(self.all_terminals, sinks | {src}))
         return self.cache[net_id]
 
     def propagate(self, starts: dict[str, int], gate: Callable[[str], int]) -> tuple[dict, dict]:
