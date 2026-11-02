@@ -12,7 +12,7 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
-from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block, group_block, stack_spec
+from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block, group_block, set_block_cache, stack_spec
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX
 from minecraft_v.placement_engine.resume import ResumeStore
@@ -289,7 +289,7 @@ def main():
     parser.add_argument("--resume-reroute", type=str, default="",
                         help="--resume-dir: comma-separated nets to search again instead of reusing their paths")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
-                        help="--macros: directory keeping routed macros between builds")
+                        help="Directory keeping routed macros and settled RAM blocks between builds")
     args = parser.parse_args()
 
     set_debug(args.debug)
@@ -315,6 +315,7 @@ def main():
     if module is None:
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
+    set_block_cache(Path(args.macro_cache) / "ram")
     component_list = module_to_component_list(module)
     probes = extract_probes(module) if args.debug_prints else None
 

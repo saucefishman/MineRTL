@@ -17,8 +17,9 @@ from collections.abc import Callable, Collection
 from litemapy import BlockState, Region
 
 from minecraft_v.cell_library import SCHEMATIC_MAP
+from .block_utils import Box
 from .ir import ComponentList, ComponentType
-from .verify import Excluding, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH, _WALL_TORCH, _World
+from .verify import Excluding, HiddenBoxes, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH, _WALL_TORCH, _World
 
 Pos = tuple[int, int, int]
 _SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
@@ -258,12 +259,12 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
 
 
 def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str],
-             probed: Collection[str] = ()) -> int:
+             probed: Collection[str] = (), opaque: Collection[Box] = ()) -> int:
     """Pad every data path that beats its flip-flop's clock; returns the slowest safe clock period. comp is the flat
-    netlist, terminals its gate pins' cells, probed the cells prints read."""
+    netlist, terminals its gate pins' cells, probed the cells prints read, opaque boxes that net searches stop at."""
     if not any(c.type in _SEQUENTIAL for c in comp.components):
         return 0
-    world = _World(workspace, frozenset(), frozenset(terminals.values()))
+    world = _World(workspace, HiddenBoxes(frozenset(), opaque), frozenset(terminals.values()))
     timing = _HoldTiming(world, comp, terminals, failed)
     protected = frozenset(terminals.values())
     counts = {"raised": 0, "new": 0}

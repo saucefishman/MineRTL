@@ -26,7 +26,7 @@ from minecraft_v.placement_engine.ir import (
     ComponentType,
     NetConnection,
 )
-from .block_utils import _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
+from .block_utils import Box, BulkRegion, _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
     _ROUTE_STAGNATION_FIRST, _ROUTE_RETRY_BUDGET, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
@@ -40,7 +40,7 @@ from .anneal import _optimize_placement
 from .poisson import _poisson_placement
 from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
 from .parallel import RouteWorkers, claims_of
-from .propagate import settle as settle_blocks
+from .propagate import comparator_entity, settle as settle_blocks
 from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _find_wire_path, _signal_depths
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
@@ -48,9 +48,9 @@ from .template import (
     _default_io_side, _paste_template, _load_template_region,
 )
 from .hold import fix_hold, flat_terminals, repeater_delay
-from .macro import Macro, io_column_pins, load_macro, macro_from_capture, save_macro
+from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import Either, Excluding, _World, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, Excluding, HiddenBoxes, _World, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -85,7 +85,7 @@ def _place_gate_templates(
     ref_mc_version = 2975
     ref_lm_version = 6
     ref_lm_sub = 1
-    oriented_blocks: dict[tuple[str, bool, bool], list] = {}
+    oriented_blocks: dict[tuple[str, bool, bool], BlockArrays] = {}
     refs: dict[str, Schematic] = {}
     for item in placed:
         c = item.component
@@ -126,16 +126,16 @@ def _stamp_macro(
         solid: set[tuple[int, int, int]],
         mirrored: bool,
         rotated: bool,
-        oriented_blocks: dict[tuple[str, bool, bool], list],
+        oriented_blocks: dict[tuple[str, bool, bool], BlockArrays],
 ) -> None:
     """Paste a routed macro. Its footprint is walled off, so `solid` only has to know the hull."""
     key = (macro.name, mirrored, rotated)
     if key not in oriented_blocks:
-        oriented_blocks[key] = macro.blocks_oriented(mirrored, rotated)
-    blocks = oriented_blocks[key]
+        oriented_blocks[key] = macro.arrays_oriented(mirrored, rotated)
+    arrays = oriented_blocks[key]
     ox, oy, oz = origin
-    for (x, y, z), block in blocks:
-        workspace[ox + x, oy + y, oz + z] = block
+    BulkRegion.paste(workspace, arrays.xs + ox, arrays.ys + oy, arrays.zs + oz, arrays.ids, arrays.palette)
+    workspace.tile_entities.extend(comparator_entity((x + ox, y + oy, z + oz), level) for (x, y, z), level in arrays.comparators)
 
 
 def _place_const_sources(
@@ -397,6 +397,13 @@ def _route_output_pin_extensions(
     failures = router.run(jobs, "[ext]", rip_blockers=False)
     log(f"[ext] done ({len(jobs)} extensions, {len(failures)} failed)")
     return failures
+
+
+def _opaque_boxes(placed: list[_Placed], macros: dict[str, Macro] | None) -> list[Box]:
+    """Blocks pasted already settled: post-route passes work on the wire around them, and stop at their pins."""
+    return [(p.origin, tuple(o + n for o, n in zip(p.origin, (fp.width, fp.height, fp.depth))))
+            for p in placed if p.component.type == ComponentType.CUSTOM and macros[p.component.metadata["macro"]].settled is not None
+            for fp in [p.component.footprint]]
 
 
 def _component_interior(placed: list[_Placed]) -> set[tuple[int, int, int]]:
@@ -1815,6 +1822,7 @@ def _report_flat_violations(
                                   bool(p.component.metadata.get("rotate_180")))
               for p in placed if p.component.type == ComponentType.CUSTOM}
     hidden = _component_interior(placed)
+    opaque = _opaque_boxes(placed, macros)
     owner = {pos: net for pos, net in dust_owner.items()}
     spec: dict[str, tuple[tuple[int, int, int], list[tuple[int, int, int]]]] = {}
 
@@ -1855,14 +1863,15 @@ def _report_flat_violations(
                               [macro.world(macro.terminals[s], origin, mirrored, rotated) for s in sinks])
         for rel, inner in macro.owner.items():
             owner[macro.world(rel, origin, mirrored, rotated)] = exposed[cid].get(inner, f"{cid}/{inner}")
-        w = macro.footprint.width
+        if macro.settled is not None:
+            continue  # all hidden, as one of the opaque boxes
         for (x, y, z), (sx, sy, sz) in macro.gate_boxes:
             for dx in range(sx):
                 for dy in range(sy):
                     for dz in range(sz):
                         hidden.add(macro.world((x + dx, y + dy, z + dz), origin, mirrored, rotated))
     with ProgressBar("[verify] flat signals", len(spec)) as bar:
-        violations = verify_signals(workspace, spec, owner, frozenset(hidden),
+        violations = verify_signals(workspace, spec, owner, HiddenBoxes(frozenset(hidden), opaque),
                                     on_net=lambda net_id: bar.update(info=net_id))
     for violation in violations:
         log(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
@@ -1874,10 +1883,11 @@ def _report_unsupported_blocks(
         workspace: Region,
         dust_owner: dict[tuple[int, int, int], str],
         component_cells: frozenset[tuple[int, int, int]],
+        opaque: list[Box] = (),
 ) -> None:
     """Print verify_support hits: dust/repeaters/torches with nothing under (or behind) them."""
     with phase("[verify] support"):
-        violations = verify_support(workspace, dust_owner, component_cells)
+        violations = verify_support(workspace, dust_owner, component_cells, opaque)
     for violation in violations:
         block = workspace[violation.pos]
         log(f"[verify] unsupported {block.id} {sorted(violation.nets)} at {violation.pos}")
@@ -2194,7 +2204,8 @@ def build_litematic_from_component_list(
     output_layer_z = 0
     workspace_depth = depth
 
-    workspace = Region(0, 0, 0, width, height, workspace_depth)
+    workspace = BulkRegion(0, 0, 0, width, height, workspace_depth)
+    opaque = _opaque_boxes(placed, macros)
     rec = Recorder()
     solid: set[tuple[int, int, int]] = JournaledSet(rec, name="solid")
     dust_owner: dict[tuple[int, int, int], str] = JournaledDict(rec)
@@ -2295,7 +2306,7 @@ def build_litematic_from_component_list(
         save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
         # Placement splits multi-bit IO into one component per bit, named after the bit.
         flat_period = fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
-                                                 inner), failed_nets, probe_components(probes) if probes else frozenset())
+                                                 inner), failed_nets, probe_components(probes) if probes else frozenset(), opaque)
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)
@@ -2341,7 +2352,7 @@ def build_litematic_from_component_list(
         elif snapshot_dir is not None:
             save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
 
-    _report_unsupported_blocks(workspace, dust_owner, _hidden_cells(placed))
+    _report_unsupported_blocks(workspace, dust_owner, _hidden_cells(placed), opaque)
 
     if capture is not None:
         capture.update(
@@ -2364,7 +2375,7 @@ def build_litematic_from_component_list(
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
     with phase("[finish] dust shapes and signs"):
-        apply_dust_shapes(workspace)
+        apply_dust_shapes(workspace, opaque)
         place_io_signs(workspace, io_signs)
         place_io_fixtures(workspace, io_fixtures)
 
@@ -2420,7 +2431,7 @@ def build_litematic_from_component_list(
 
     if settled:
         with phase("[settle] propagating"):
-            settle_blocks(workspace)
+            settle_blocks(workspace, opaque)
 
     schematic = Schematic(
         name=schematic_name,

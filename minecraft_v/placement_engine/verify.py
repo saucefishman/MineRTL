@@ -23,7 +23,7 @@ Rules (see tests/test_verify.py):
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -86,8 +86,22 @@ class Either:
         return p in self.a or p in self.b
 
 
+class HiddenBoxes:
+    """Cells of a set, and of a few boxes that would be too many cells to list."""
+
+    def __init__(self, cells, boxes):
+        self.cells, self.boxes = cells, boxes
+
+    def __contains__(self, p) -> bool:
+        x, y, z = p
+        for (lx, ly, lz), (hx, hy, hz) in self.boxes:
+            if lx <= x < hx and ly <= y < hy and lz <= z < hz:
+                return True
+        return p in self.cells
+
+
 class _World:
-    def __init__(self, region: Region, blocked: frozenset[Pos], terminals: frozenset[Pos]):
+    def __init__(self, region: Region, blocked: Collection[Pos], terminals: frozenset[Pos]):
         self.region = region
         self.blocked = blocked
         self.terminals = terminals
@@ -376,7 +390,7 @@ def verify_signals(
         region: Region,
         nets: dict[str, tuple[Pos, list[Pos]]],
         owner: dict[Pos, str],
-        blocked: frozenset[Pos] = frozenset(),
+        blocked: Collection[Pos] = frozenset(),
         on_net: Callable[[str], None] | None = None,
 ) -> list[Violation]:
     """Opens (unreached sinks) and shorts (cross-net reach) for the given nets.
@@ -447,12 +461,14 @@ def _gives_support(block: BlockState) -> bool:
 def verify_support(
         region: Region,
         owner: dict[Pos, str],
-        blocked: frozenset[Pos] = frozenset(),
+        blocked: Collection[Pos] = frozenset(),
+        skip: Iterable[tuple[Pos, Pos]] = (),
 ) -> list[Violation]:
     """Dust, repeaters, comparators and torches outside `blocked` with no supporting block.
 
     Floor-standing blocks need a sturdy block below; a wall torch needs one behind it.
     In-game such blocks pop off (or can't be pasted), so the circuit silently breaks.
+    skip: boxes (lowest cell, one past the highest) not to look in at all.
     """
     palette = region._Region__palette
     blocks = region._Region__blocks
@@ -460,7 +476,10 @@ def verify_support(
     if not needy:
         return []
     violations: list[Violation] = []
-    for p in map(tuple, np.argwhere(np.isin(blocks, needy)).tolist()):
+    mask = np.isin(blocks, needy)
+    for lo, hi in skip:
+        mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
+    for p in map(tuple, np.argwhere(mask).tolist()):
         if p in blocked:
             continue
         block = palette[blocks[p]]

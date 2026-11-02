@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+import numpy as np
 from litemapy import BlockState, Region, Schematic
 
 from minecraft_v.progress import log
@@ -29,6 +30,16 @@ from .template import _mirror_block_x, _rotate_block_180
 
 Pos = tuple[int, int, int]
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+
+
+@dataclass
+class BlockArrays:
+    xs: np.ndarray
+    ys: np.ndarray
+    zs: np.ndarray
+    ids: np.ndarray       # into palette
+    palette: list[BlockState]
+    comparators: list[tuple[Pos, int]] = field(default_factory=list)  # those with a signal, in cell order: their saved signal
 
 
 @dataclass
@@ -47,6 +58,27 @@ class Macro:
     nets: dict[str, tuple[str, list[str]]] = field(default_factory=dict)  # inner net -> source, sinks
     port_net: dict[str, str] = field(default_factory=dict)   # pin -> inner net
     cells: int = 0
+    settled: BlockArrays | None = None               # instead of blocks: already shaped and settled, see ram.py
+
+    def arrays_oriented(self, mirrored: bool, rotated: bool) -> BlockArrays:
+        """The blocks turned, as arrays for BulkRegion.paste."""
+        arrays = self.settled
+        if arrays is None:
+            palette: dict[BlockState, int] = {}
+            ids = np.fromiter((palette.setdefault(b, len(palette)) for _, b in self.blocks), dtype=np.int32, count=len(self.blocks))
+            cells = np.array([p for p, _ in self.blocks], dtype=np.int32).reshape(-1, 3)
+            arrays = BlockArrays(cells[:, 0], cells[:, 1], cells[:, 2], ids, list(palette))
+        xs, zs = arrays.xs, arrays.zs
+        turned = arrays.palette
+        if mirrored != rotated:  # as oriented()
+            xs = self.footprint.width - 1 - xs
+        if rotated:
+            zs = self.footprint.depth - 1 - zs
+            turned = [_rotate_block_180(b) for b in turned]
+        if mirrored:
+            turned = [_mirror_block_x(b) for b in turned]
+        return BlockArrays(xs, arrays.ys, zs, arrays.ids, turned,
+                           [(self.oriented(p, mirrored, rotated), level) for p, level in arrays.comparators])
 
     def blocks_oriented(self, mirrored: bool, rotated: bool) -> list[tuple[Pos, BlockState]]:
         out = []

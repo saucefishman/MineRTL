@@ -23,13 +23,22 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass
+import pickle
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from pathlib import Path
 
+import numpy as np
 from litemapy import BlockState
 
 from minecraft_v.placement_engine.ir import CardinalDirection, Direction, Footprint, PinRef
+from minecraft_v.progress import log, phase
 
-from .macro import Macro
+from .block_utils import BulkRegion
+from .cosmetics import apply_dust_shapes
+from .macro import BlockArrays, Macro
+from .propagate import settle
+from .verify import verify_support
 
 Pos = tuple[int, int, int]
 
@@ -529,6 +538,73 @@ def build_group(name: str, specs: list[StackSpec]) -> tuple[Macro, dict[str, tup
 
 
 _built: dict[str, Macro] = {}
+_cache_dir: Path | None = None
+_CODE = ("ram.py", "macro.py", "propagate.py", "cosmetics.py", "verify.py", "block_utils.py")
+
+
+def set_block_cache(directory: Path | None) -> None:
+    global _cache_dir
+    _cache_dir = directory
+
+
+def settled_block(block: Macro) -> Macro:
+    """The block alone, its dust shaped and everything in the state it rests in with its pins low, as arrays. A build
+    pastes this and only looks inside if the wire outside touches it or drives a pin high."""
+    size = block.footprint.width, block.footprint.height, block.footprint.depth
+    region = BulkRegion(0, 0, 0, *size)
+    arrays = block.arrays_oriented(False, False)
+    region.paste(arrays.xs, arrays.ys, arrays.zs, arrays.ids, arrays.palette)
+    apply_dust_shapes(region)
+    settle(region)
+    unsupported = verify_support(region, {})
+    if unsupported:
+        log(f"[ram] {block.name}: {len(unsupported)} unsupported block(s), first {unsupported[0].pos}")
+    ids = region._Region__blocks
+    cells = np.argwhere(ids != 0).astype(np.int32)
+    return replace(block, blocks=[], settled=BlockArrays(cells[:, 0], cells[:, 1], cells[:, 2], ids[ids != 0].astype(np.int32),
+                                                         list(region._Region__palette),
+                                                         [(e.position, int(e.to_nbt()["OutputSignal"])) for e in region.tile_entities]))
+
+
+def _save(path: Path, block: Macro, extra: object) -> None:
+    arrays = block.settled
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(f"{path.name}.{os.getpid()}")
+    with open(partial, "wb") as f:
+        palette = [(b.id, dict(b.properties())) for b in arrays.palette]
+        pickle.dump((replace(block, settled=None), extra, palette, arrays.comparators), f)
+        np.savez(f, xs=arrays.xs.astype(np.uint16), ys=arrays.ys.astype(np.uint16), zs=arrays.zs.astype(np.uint16),
+                 ids=arrays.ids.astype(np.uint32))
+    os.replace(partial, path)
+
+
+def _load(path: Path) -> tuple[Macro, object] | None:
+    if not path.exists():
+        return None
+    with open(path, "rb") as f:
+        block, extra, palette, comparators = pickle.load(f)
+        palette = [BlockState(name, **props) for name, props in palette]
+        data = np.load(f)
+        block.settled = BlockArrays(data["xs"].astype(np.int32), data["ys"].astype(np.int32), data["zs"].astype(np.int32),
+                                    data["ids"].astype(np.int32), palette, comparators)
+    return block, extra
+
+
+def _cached(key: object, build: Callable[[], tuple[Macro, object]]) -> tuple[Macro, object]:
+    """A settled block and what else its build returned, from cache_dir if this code has built this block before."""
+    digest = hashlib.sha256(repr((key, _ADDR_PITCH)).encode())
+    for name in _CODE:
+        digest.update((Path(__file__).parent / name).read_bytes())
+    path = None if _cache_dir is None else _cache_dir / f"{digest.hexdigest()[:24]}.block"
+    if path is not None and (found := _load(path)) is not None:
+        log(f"[ram] {found[0].name}: {len(found[0].settled.ids)} blocks from {path}")
+        return found
+    with phase("[ram] building and settling a block"):
+        block, extra = build()
+        block = settled_block(block)
+    if path is not None:
+        _save(path, block, extra)
+    return block, extra
 
 
 def built_block(name: str) -> Macro:
@@ -548,8 +624,11 @@ def block_for_cell(cell_type: str, parameters: dict[str, str]) -> Macro:
         spec = stack_spec(parameters, {})
         words = len(spec.init)
         digest = hashlib.sha256(repr(spec.init).encode()).hexdigest()[:8]
-        block = build_stack(f"stack_{words}x{spec.width}_{spec.base}_{spec.abits}_{digest}", spec.row_bits, spec.banks, spec.base,
-                            spec.abits, spec.width, spec.init)
+        name = f"stack_{words}x{spec.width}_{spec.base}_{spec.abits}_{digest}"
+        if name in _built:
+            return _built[name]
+        block, _ = _cached(("stack", spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init),
+                           lambda: (build_stack(name, spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init), None))
     return _built.setdefault(block.name, block)
 
 
@@ -563,8 +642,15 @@ def stack_spec(parameters: dict[str, str], nets: dict[str, object]) -> StackSpec
 
 
 def group_block(specs: list[StackSpec]) -> tuple[Macro, dict[str, tuple[int, str]], dict[object, str]]:
-    digest = hashlib.sha256(repr([(s.row_bits, s.banks, s.base, s.abits, s.width, s.init, sorted(map(str, s.nets.items())))
-                                  for s in specs]).encode()).hexdigest()[:8]
-    block, own, lanes = build_group(f"group_{digest}", specs)
+    numbers: dict[object, int] = {}  # a block depends on which pins share a net, not on what nets are called
+    shape = [(s.row_bits, s.banks, s.base, s.abits, s.width, s.init,
+              [(pin, numbers.setdefault(net, len(numbers))) for pin, net in s.nets.items()]) for s in specs]
+    name = f"group_{hashlib.sha256(repr(shape).encode()).hexdigest()[:8]}"
+
+    def build() -> tuple[Macro, object]:
+        block, own, lanes = build_group(name, specs)
+        return block, (own, {numbers[net]: pin for net, pin in lanes.items()})
+
+    block, (own, lanes) = _cached(("group", shape), build)
     _built[block.name] = block
-    return block, own, lanes
+    return block, own, {net: lanes[number] for net, number in numbers.items() if number in lanes}

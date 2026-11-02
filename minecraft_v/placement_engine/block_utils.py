@@ -1,8 +1,14 @@
 from __future__ import annotations
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from math import ceil, log
 
+import numpy as np
 from litemapy import BlockState, Region
+from nbtlib.tag import Compound, Int, List, LongArray
+
 from .constants import STONE
+
+Box = tuple[tuple[int, int, int], tuple[int, int, int]]  # lowest cell, one past the highest
 
 
 def palette_writer(region: Region) -> Callable[[tuple[int, int, int], BlockState], None]:
@@ -24,6 +30,90 @@ def palette_writer(region: Region) -> Callable[[tuple[int, int, int], BlockState
         blocks[pos] = i
 
     return write
+
+
+def _pack_states(blocks: np.ndarray, nbits: int) -> LongArray:
+    """Palette ids as Litematica's bit array: y, then z, then x, lowest bits first, values crossing long boundaries."""
+    n_x, n_y, n_z = blocks.shape
+    out = np.zeros(ceil(n_x * n_y * n_z * nbits / 64), dtype="<u8")
+    done = 0  # longs written
+    held = np.zeros(0, dtype=np.uint8)  # bits short of a whole long
+    for y in range(n_y):
+        ids = blocks[:, y, :].T.ravel().astype("<u4")
+        bits = np.unpackbits(ids.view(np.uint8).reshape(-1, 4), axis=1, bitorder="little")[:, :nbits].ravel()
+        if held.size:
+            bits = np.concatenate((held, bits))
+        whole = bits.size // 64
+        out[done:done + whole] = np.frombuffer(np.packbits(bits[:whole * 64], bitorder="little").tobytes(), dtype="<u8")
+        done += whole
+        held = bits[whole * 64:]
+    if held.size:
+        out[done] = np.frombuffer(np.packbits(np.concatenate((held, np.zeros(64 - held.size, np.uint8))),
+                                              bitorder="little").tobytes(), dtype="<u8")[0]
+    return LongArray(out.astype("<i8"))
+
+
+class BulkRegion(Region):
+    """A Region with what a large build does in bulk done in numpy: Region.to_nbt loops over every cell of its volume."""
+
+    def paste(self, xs: np.ndarray, ys: np.ndarray, zs: np.ndarray, ids: np.ndarray, blocks: list[BlockState]) -> None:
+        """Writes blocks[ids[i]] at each (xs[i], ys[i], zs[i])."""
+        palette = self._Region__palette
+        known = {block: i for i, block in reversed(list(enumerate(palette)))}
+        table = np.empty(len(blocks), dtype=self._Region__blocks.dtype)
+        for i, block in enumerate(blocks):
+            at = known.get(block)
+            if at is None:
+                at = known[block] = len(palette)
+                palette.append(block)
+            table[i] = at
+        self._Region__blocks[xs, ys, zs] = table[ids]
+
+    def _optimize_palette(self) -> None:
+        palette, blocks = self._Region__palette, self._Region__blocks
+        used = np.zeros(len(palette), dtype=bool)
+        used[np.unique(blocks)] = True
+        used[0] = True  # air stays at 0
+        kept: dict[BlockState, int] = {}
+        table = np.empty(len(palette), dtype=blocks.dtype)
+        for i in np.flatnonzero(used).tolist():
+            table[i] = kept.setdefault(palette[i], len(kept))
+        blocks[...] = table[blocks]
+        self._Region__palette = list(kept)
+
+    def to_nbt(self) -> Compound:
+        self._optimize_palette()
+        palette = self._Region__palette
+        root = Compound()
+        root["Position"] = Compound({"x": Int(self.x), "y": Int(self.y), "z": Int(self.z)})
+        root["Size"] = Compound({"x": Int(self.width), "y": Int(self.height), "z": Int(self.length)})
+        root["BlockStatePalette"] = List[Compound]([block.to_nbt() for block in palette])
+        root["Entities"] = List[Compound]([entity.to_nbt() for entity in self.entities])
+        root["TileEntities"] = List[Compound]([entity.to_nbt() for entity in self.tile_entities])
+        root["PendingBlockTicks"] = List[Compound](self.block_ticks)
+        root["PendingFluidTicks"] = List[Compound](self.fluid_ticks)
+        root["BlockStates"] = _pack_states(self._Region__blocks, max(ceil(log(len(palette), 2)), 2))
+        return root
+
+
+def cells_around_boxes(region: Region, boxes: Iterable[Box], reach: int) -> list[tuple[int, int, int]]:
+    """Non-air cells outside each box and within reach of its faces, the only cells that can touch what's inside it."""
+    blocks = region._Region__blocks
+    air = [i for i, b in enumerate(region._Region__palette) if b.id in ("minecraft:air", "minecraft:cave_air")]
+    found: set[tuple[int, int, int]] = set()
+    for lo, hi in boxes:
+        grown_lo = [max(c - reach, 0) for c in lo]
+        grown_hi = [min(c + reach, n) for c, n in zip(hi, blocks.shape)]
+        for axis in range(3):
+            for start, stop in ((grown_lo[axis], lo[axis]), (hi[axis], grown_hi[axis])):
+                if start >= stop:
+                    continue
+                corner = list(grown_lo)
+                corner[axis] = start
+                slab = tuple(slice(a, b) for a, b in zip(corner, (*grown_hi[:axis], stop, *grown_hi[axis + 1:])))
+                hits = np.argwhere(~np.isin(blocks[slab], air)) + corner
+                found.update(map(tuple, hits.tolist()))
+    return sorted(found)
 
 
 def _block_str(block: BlockState) -> str:
