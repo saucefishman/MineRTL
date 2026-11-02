@@ -34,6 +34,11 @@ from scipy.sparse.csgraph import connected_components
 
 from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
 
+try:
+    from . import _signals
+except ImportError:
+    _signals = None  # not built: the Python below does the same, slower
+
 Pos = tuple[int, int, int]
 
 _FACING_TO_DELTA = {facing: delta for delta, facing in _DELTA_TO_FACING.items()}
@@ -106,6 +111,50 @@ class HiddenBoxes:
             if lx <= x < hx and ly <= y < hy and lz <= z < hz:
                 return True
         return p in self.cells
+
+
+def cell_byte(block: BlockState | None) -> int:
+    """What _signals.Grid holds for a block: kind, then facing and delay where it has them."""
+    if block is None:
+        return 0
+    kind = _block_kind(block.id)
+    if kind == _AIR:
+        return 0
+    if block.id == "minecraft:redstone_block":
+        return 7
+    byte = kind
+    if kind in (_REPEATER, _WALL_TORCH):
+        byte |= _HORIZ_DIRS.index(_FACING_TO_DELTA[block["facing"]]) << 3
+    if kind == _REPEATER:
+        byte |= (int(block["delay"]) - 1 if "delay" in block else 0) << 5
+    return byte
+
+
+def signal_grid(region: Region, blocked: Collection[Pos], terminals: Collection[Pos]):
+    """The kernel's view of region as _World(region, blocked, terminals) has it, terminals marked as stops. None without
+    the kernel, or for what it can't hold: a region not backed by an array, a blocked it can't list, a cell outside."""
+    palette, blocks = getattr(region, "_Region__palette", None), getattr(region, "_Region__blocks", None)
+    if _signals is None or blocks is None or not isinstance(blocked, (HiddenBoxes, set, frozenset)):
+        return None
+    table = np.array([cell_byte(b) for b in palette], dtype=np.uint8)
+    size = blocks.shape
+    ends = np.array([p for p in terminals if p is not None], dtype=np.int64).reshape(-1, 3)
+    if len(ends) and ((ends < 0).any() or (ends >= size).any()):
+        return None
+    grid = np.asarray(table[blocks], order="C")
+    cells = blocked
+    if isinstance(blocked, HiddenBoxes):
+        for lo, hi in blocked.boxes:
+            grid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 0
+        cells = blocked.cells
+    if cells:
+        hidden = np.array(list(cells), dtype=np.int64).reshape(-1, 3)
+        hidden = hidden[((hidden >= 0) & (hidden < size)).all(axis=1)]
+        grid[hidden[:, 0], hidden[:, 1], hidden[:, 2]] = 0
+    if len(ends):
+        at = ends[:, 0], ends[:, 1], ends[:, 2]
+        grid[at] = table[blocks[at]] | 128
+    return _signals.Grid(grid)
 
 
 class _World:
@@ -420,6 +469,7 @@ def verify_signals(
     """
     terminals = frozenset(p for src, sinks in nets.values() for p in (src, *sinks))
     world = _World(region, blocked, terminals)
+    grid = signal_grid(region, blocked, terminals)
     violations: list[Violation] = []
     reached_by: dict[Pos, str] = {}
     short_pairs: set[frozenset[str]] = set()
@@ -435,18 +485,25 @@ def verify_signals(
         # own sinks there is only component interior, which `blocked` already hides.
         own = {source, *sinks}
         stop = Excluding(terminals, own)
-        reached = _reach(world, source, stop)
+        if grid is not None:
+            order, strong, has_latch, inverted = grid.check_net(source, sinks, own)
+            reached = set(order)  # built in the same order as _reach's: which cell a short reports depends on it
+            strong_enough = {sink for sink, ok in zip(sinks, strong) if ok}
+        else:
+            reached = _reach(world, source, stop)
+            strong_enough = _strengths(world, source, stop)
         for sink in sinks:
             if sink not in reached:
                 violations.append(Violation("open", frozenset({net_id}), sink))
-        strong_enough = _strengths(world, source, stop)
         for sink in sinks:
             if sink in reached and sink not in strong_enough:
                 violations.append(Violation("weak", frozenset({net_id}), sink))
-        latch = _latch_cycle(world, source, stop)
+        latch = _latch_cycle(world, source, stop) if grid is None or has_latch else []
         if latch:
             violations.append(Violation("latch", frozenset({net_id}), latch[0]))
-        for pos in _inverted_contacts(world, source, frozenset(sinks), stop)[:1]:
+        contacts = _inverted_contacts(world, source, frozenset(sinks), stop)[:1] if grid is None else \
+            ([] if inverted is None else [inverted])
+        for pos in contacts:
             violations.append(Violation("inverted", frozenset({net_id}), pos))
         for pos in reached:
             cell_owner = owner.get(pos)

@@ -14,7 +14,7 @@ from litemapy.minecraft import TileEntity
 from nbtlib.tag import Byte, Compound, List, String
 
 from .block_utils import Box, cells_around_boxes, palette_writer
-from .verify import _World
+from .verify import _World, signal_grid
 
 Pos = tuple[int, int, int]
 
@@ -36,13 +36,18 @@ def apply_dust_shapes(region: Region, opaque: Collection[Box] = ()) -> int:
     is_wire = np.isin(blocks, wire_ids)
     for lo, hi in opaque:
         is_wire[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
-    cells = list(map(tuple, np.argwhere(is_wire).tolist()))
+    at = np.argwhere(is_wire).astype(np.int32)
     del is_wire
     wires = set(wire_ids)
     near = {(x + dx, y + dy, z + dz) for x, y, z in cells_around_boxes(region, opaque, 1)
             for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)}
-    cells += sorted(p for p in near if any(all(a <= c < b for a, c, b in zip(lo, p, hi)) for lo, hi in opaque)
-                    and int(blocks[p]) in wires)
+    extra = sorted(p for p in near if any(all(a <= c < b for a, c, b in zip(lo, p, hi)) for lo, hi in opaque)
+                   and int(blocks[p]) in wires)
+    at = np.concatenate((at, np.array(extra, dtype=np.int32).reshape(-1, 3)))
+    grid = signal_grid(region, frozenset(), frozenset())
+    if grid is not None:
+        return _write_shapes(region, at, grid.dust_shapes(at[:, 0], at[:, 1], at[:, 2]))
+    cells = list(map(tuple, at.tolist()))
     world = _World(region, frozenset(), frozenset())
     shapes: list[tuple[Pos, tuple[str, ...]]] = []
     for p in cells:
@@ -61,6 +66,26 @@ def apply_dust_shapes(region: Region, opaque: Collection[Box] = ()) -> int:
             block = shaped[key] = palette[key[0]].with_properties(**dict(zip(names, sides)))
         write(p, block)
     return len(shapes)
+
+
+def _write_shapes(region: Region, at: np.ndarray, codes: np.ndarray) -> int:
+    """codes: per dust, 2 bits per direction of _DIR_NAME, 0 none, 1 side, 2 up. New blocks join the palette in the order
+    the dust first asks for them."""
+    palette, blocks = region._Region__palette, region._Region__blocks
+    write = palette_writer(region)
+    names = tuple(_DIR_NAME.values())
+    xs, ys, zs = at[:, 0], at[:, 1], at[:, 2]
+    keys = blocks[xs, ys, zs].astype(np.int64) << 8 | codes
+    unique, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    ids = np.empty(len(unique), dtype=blocks.dtype)
+    for u in np.argsort(first).tolist():
+        p = tuple(at[first[u]].tolist())
+        code = int(unique[u]) & 255
+        sides = tuple(("none", "side", "up")[code >> (2 * i) & 3] for i in range(4))
+        write(p, palette[int(unique[u]) >> 8].with_properties(**dict(zip(names, sides))))
+        ids[u] = blocks[p]
+    blocks[xs, ys, zs] = ids[inverse.ravel()]
+    return len(at)
 
 
 def place_io_signs(region: Region, signs: list[tuple[Pos, tuple[int, int], str]]) -> None:
