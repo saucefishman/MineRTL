@@ -16,6 +16,7 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Test program: prints 1, 2, 3 one at a time, then "hi" together, lowercase, on one clock. Output on the CPU's character ports (e0/d0, e1/d1).
 - Footprint should be closer to square, not as wide (baseline 2965x380x499).
 - Owner: verify is sometimes wrong. Once a build has 0 failed nets, simulate; acceptance decides, a verify-only fault isn't a blocker.
+- Owner: delegate liberally to subconversations and subagents. At each progress check, reassess a list of ideas to try and run them in parallel where possible (one full build at a time for memory).
 
 ## State
 - Branch at beef260: main merged. RAM work in minecraft_v/placement_engine/ram.py, techmap/ram_*.v, flag --tiled-ram.
@@ -48,3 +49,4 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - h1 PASSES scripts/check_floweypu.py in redstone (half 3000): 1 2 3 h+i. Total 1828s, 1191x306x724, 4 failed nets, 1 short (net_1069/net_5485). Saved at scratchpad/h1. Goal left: 0 failures/shorts, under 1200s total.
 - w35 (RAM_GATE_WIDTH .35, density .15, fanout first 64, big nets not ripped): wire 562s, 15,230 nets, 0 failed, 1094x263x1178. Verify 3 violations. w5 post-route hung 25+ min in settle: suspect oscillation from shorts.
 - Defaults now: RAM_GATE_WIDTH .35, RAM_GATE_DENSITY .15, ROUTE_FIRST_FANOUT 64 (env overrides). Build needs --no-macros and --tiled-ram. Agent hold-faults owns full builds: post-hold verify faults, phase speed, acceptance.
+- hf3: 0 failed, 0 verify, 1209s, but FAILS acceptance simulation; h1 still passes, harness fine. Verify misses it. Hunt: gate vs RTL on hf3 (verify-vs-sim session), settle cap suspect.
