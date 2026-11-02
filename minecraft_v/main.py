@@ -162,7 +162,7 @@ _MACRO_FANOUT = 2  # nets above this fanout are shared between instances, not gr
 _MACRO_MIN_CELLS = 8  # smallest repeated subcircuit worth a macro
 _MACRO_ROW_TILES = 0  # instances per array, sharing lanes; 0 = all instances of a pattern in one array
 _MACRO_BANK_COLUMNS = 4  # tiles per row in fixed two-row banks facing one lane plane
-_MACRO_CHANNEL = 24  # Z kept clear past a long macro's input face
+_MACRO_CHANNEL = int(os.environ.get("RAM_CHANNEL", 24))  # Z kept clear past a long macro's input face
 _MACRO_EAST_ROOM = 20  # X past a bank stack's pin end where gates may go; the rest go on top
 _MACRO_HEADROOM = 32  # layers kept above the tallest macro
 _BANK_GUTTER = 12

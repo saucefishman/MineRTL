@@ -22,6 +22,7 @@ Pins are addresses, write enable and bitlines. Writes take the self-closing puls
 from __future__ import annotations
 
 import hashlib
+import os
 
 from litemapy import BlockState
 
@@ -44,8 +45,8 @@ _STACK_SOUTH = 7
 _TOWER_TICKS = 8     # torches per bank
 _READ_PLANES = 4     # Y from one pair of read ports to the next
 _LINE_PITCH = 2      # X between decoder lines; each line's torches sit between it and the next
-_ADDR_PITCH = 4      # an address bit's true and complement lines
-_DECODER_REPEAT = 12 # X between repeaters on a row line in the decoder; on even X, under a line, never under a torch
+_ADDR_PITCH = int(os.environ.get("RAM_ADDR_PITCH", 4))  # an address bit's true and complement lines; also the pins' X pitch
+_DECODER_REPEAT = 12 // _ADDR_PITCH * _ADDR_PITCH  # X between repeaters on a row line in the decoder: under a true line, never a torch
 
 _GLASS = BlockState("minecraft:glass")
 _STONE = BlockState("minecraft:smooth_quartz")
