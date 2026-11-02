@@ -71,7 +71,7 @@ def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, i
 
     depth: signal distance since the last cell where _place_repeaters_for_net could put a
     repeater (or a tower / powered -4 reset). cand: 1 + the _HORIZ_DIRS index of the move
-    into the cell when that move lets it hold a repeater (unit step, flat or 1 down), else 0;
+    into the cell when that move lets it hold a repeater (flat unit step), else 0;
     the cell becomes a repeater slot once the next move is flat in that same direction.
     The search prunes moves whose depth reaches _REPEATER_INTERVAL, so every stretch of a
     path has a slot in reach and repeater placement can't fail for want of one.
@@ -82,7 +82,7 @@ def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, i
     step = abs(dx) + abs(dz)
     if cand and dy == 0 and step == 1 and _HORIZ_DIRS[cand - 1] == (dx, dz):
         depth = 0
-    unit = step == 1 and dy in (0, -1)
+    unit = step == 1 and dy == 0
     return depth + step, (_HORIZ_DIRS.index((dx, dz)) + 1) if unit else 0
 
 

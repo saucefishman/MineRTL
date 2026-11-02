@@ -1537,7 +1537,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 if ndepth >= SIG_LIMIT:
                     continue
                 ncand = 0
-                if step == 1 and (m.dy == 0 or m.dy == -1):
+                if step == 1 and m.dy == 0:
                     for i in range(4):
                         if HORIZ[i][0] == m.dx and HORIZ[i][1] == m.dz:
                             ncand = i + 1

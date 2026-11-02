@@ -7,7 +7,7 @@ import time
 import zlib
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Collection
 from math import ceil
 
 import numpy as np
@@ -1210,12 +1210,14 @@ class _GreedyRouter:
 
     def run(self, jobs: list[_RouteJob], label: str, deadline: float | None = None, fail_fast: bool = False,
             on_done: Callable[[int, _RouteJob], None] | None = None,
-            rip_blockers: bool = True) -> list[tuple[str, Exception]]:
+            rip_blockers: bool = True,
+            pool: list[_RouteJob] | None = None) -> list[tuple[str, Exception]]:
         """Route jobs in order; returns (job key, error) for the ones that failed.
 
         fail_fast: raise on the first job that fails instead of collecting failures.
         rip_blockers: False skips the rip-around-a-failed-sink layer.
         on_done(i, job): called after each job's attempt, i its 1-based position in jobs.
+        pool: the routed jobs blockers can be ripped from, when that's more than jobs.
         """
         self.rips_blockers = rip_blockers
         if self.resume:
@@ -1223,8 +1225,9 @@ class _GreedyRouter:
         failures: list[tuple[str, Exception]] = []
         keep_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 64))
         # Blockers to rip: not nets routed first for being huge. Redoing one costs more than the sink it would free.
-        keys = {job.key for job in jobs if not keep_fanout or len(job.sinks) < keep_fanout}
-        by_key = {job.key: job for job in jobs}
+        pool = jobs if pool is None else pool
+        keys = {job.key for job in pool if not keep_fanout or len(job.sinks) < keep_fanout}
+        by_key = {job.key: job for job in pool}
         queue = deque(enumerate(jobs, 1))
         cleared_for: dict[str, set[Pos]] = {}  # job key -> sinks whose blockers were ripped
         requeued: set[str] = set()
@@ -1275,7 +1278,7 @@ class _GreedyRouter:
                                 self.rip_branch(by_key[v], [goal])
                                 ripped.add(v)
                             queue = deque(entry for entry in queue if entry[1].key not in victims)
-                            queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
+                            queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in victims)
                         else:
                             self.rip(job.key)
                         queue.appendleft((i, job))
@@ -1296,7 +1299,7 @@ class _GreedyRouter:
                             self.rip_branch(by_key[v], [goal, job.src])
                             ripped.add(v)
                         queue.appendleft((i, job))
-                        queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in victims)
+                        queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in victims)
                         continue
                     where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
                     wider = [] if where is None or job.key in escalated or not rip_blockers else \
@@ -1314,7 +1317,7 @@ class _GreedyRouter:
                             ripped.add(v)
                         queue = deque(entry for entry in queue if entry[1].key not in wider)
                         queue.appendleft((i, job))
-                        queue.extend(entry for entry in enumerate(jobs, 1) if entry[1].key in wider)
+                        queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in wider)
                         continue
                     if fail_fast:
                         raise RuntimeError(f"Routing failed for net {job.key}: {e}") from e
@@ -1472,9 +1475,16 @@ def _route_all_nets(
     failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot)
     wire = sum(len(path) for _, net_paths in router.paths.values() for path in net_paths)
     log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed) {time.monotonic() - started:.1f}s, {wire} path cells")
-    if not macros:
-        failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
-                                        frozenset(_component_interior(placed)), deadline)
+    if failures and not fail_fast:
+        # With everything else laid, ripping around a failed net can free what it lost to the order.
+        log(f"[repair] routing again: {', '.join(key for key, _ in failures)}")
+        by_key = {job.key: job for job in jobs}
+        failures = router.run([by_key[key] for key, _ in failures], "[repair]", deadline=deadline, pool=jobs)
+    # A macro's inside is hidden whole: its nets are checked once stamped, this is the wire around it.
+    boxes = [(p.origin, (p.origin[0] + p.component.footprint.width, p.origin[1] + p.component.footprint.height,
+                         p.origin[2] + p.component.footprint.depth)) for p in macros]
+    failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
+                                    HiddenBoxes(frozenset(_component_interior(placed)), boxes), deadline)
     return failures, inverted_cells, router.paths
 
 
@@ -1482,7 +1492,7 @@ def _repair_faulty_nets(
         router: _GreedyRouter,
         jobs: list[_RouteJob],
         failed: set[str],
-        component_cells: frozenset[Pos],
+        component_cells: Collection[Pos],
         deadline: float | None,
 ) -> list[tuple[str, Exception]]:
     """Re-route nets verify finds fault with, away from the fault. Routing can succeed yet leave one:

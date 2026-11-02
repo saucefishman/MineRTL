@@ -518,3 +518,42 @@ def test_repair_reroutes_a_net_verify_finds_fault_with():
     dust_owner.pop(cut)
     assert _repair_faulty_nets(router, [job], set(), frozenset(), None) == []
     assert verify_signals(region, {"n": (job.src, job.sinks)}, dust_owner) == []
+
+
+def test_repair_runs_on_a_layout_with_a_macro(monkeypatch):
+    # floweypu: one RAM block turned repair off for the whole design, so faults only surfaced at the flat verify.
+    from types import SimpleNamespace
+
+    from minecraft_v.placement_engine.ir import ComponentType, NetConnection, NetEndpoint
+
+    router, region, solid, dust_owner = _router()
+    macro = SimpleNamespace(origin=(20, 1, 20), component=SimpleNamespace(
+        id="ram", type=ComponentType.CUSTOM, metadata={}, pins=[], footprint=SimpleNamespace(width=4, height=4, depth=4)))
+    region[21, 2, 21] = STONE  # inside the macro: hidden from verify
+    terminals = {("a", "y"): (2, 1, 2), ("b", "a"): (8, 1, 2)}
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="a", pin_name="y"),
+                        sinks=[NetEndpoint(component_id="b", pin_name="a")])
+    seen = []
+    real = builder._repair_faulty_nets
+
+    def spy(router, jobs, failed, cells, deadline):
+        seen.append((21, 2, 21) in cells)
+        return real(router, jobs, failed, cells, deadline)
+
+    monkeypatch.setattr(builder, "_repair_faulty_nets", spy)
+    failures, _, _ = builder._route_all_nets(region, router.rec, solid, dust_owner, [net], terminals, BOUNDS, BOUNDS[4],
+                                             frozenset(), {"n": set(terminals.values())}, placed=[macro])
+    assert failures == [] and seen == [True]
+
+
+def test_no_repeater_at_a_slopes_foot():
+    # floweypu net_2891, net_8652: it reads the block under the slope, which can be glass or powered by other wire.
+    assert pathfinding._signal_step(3, 0, (1, -1, 0)) == (4, 0)
+    region = Region(0, 0, 0, 40, 6, 3)
+    path = [(x, 3, 1) for x in range(1, 3)] + [(x, 2, 1) for x in range(3, 17)]
+    for x, y, z in path:
+        region[x, y, z] = BlockState("minecraft:redstone_wire")
+        region[x, y - 1, z] = STONE
+    _place_repeaters_for_net(region, {p: "n" for p in path}, "n", [path])
+    assert region[3, 2, 1].id == "minecraft:redstone_wire"
+    assert any(region[p].id == "minecraft:repeater" for p in path)
