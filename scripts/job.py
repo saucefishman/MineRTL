@@ -6,8 +6,8 @@
 
 `run` blocks until the job gets a slot, then runs it and exits with its code. There's no daemon: every waiting client
 takes the lock and works out who may start. A job starts when its memory fits in what's free right now and a core is
-spare. Memory is what's measured free, less what running jobs have declared but not touched yet. Peak memory per --name
-is remembered, so a job that declared too little declares enough next time.
+spare. Memory is what's measured free plus an allowance for swapping, less what running jobs have declared but not
+touched yet. Peak memory per --name is remembered, so a job that declared too little declares enough next time.
 
 Standard library only, so any worktree can call it with any python3. State is in $JOB_DIR, by default ~/.cache/mcv-jobs.
 """
@@ -27,7 +27,10 @@ _DIR = Path(os.environ.get("JOB_DIR", Path.home() / ".cache" / "mcv-jobs"))
 _GB = 1 << 30
 _DEFAULT_MEM = 2 * _GB
 _RESERVE = 1 * _GB  # kept free for everything not in the queue
-_SWAP_LOW = 1 * _GB  # less swap free than this: nothing new starts, and the lowest priority job pauses
+# Most jobs aren't urgent, so running slowly on swap beats waiting. --exclusive is for the ones whose time matters.
+_OVERCOMMIT = int(float(os.environ.get("JOB_OVERCOMMIT_GB", 6)) * _GB)
+_SWAP_CAP = 16 * _GB  # the system grows swap as needed, so the limit is on how much is in use
+_SWAP_LOW = 1 * _GB  # less room than this under the cap: nothing new starts, and the lowest priority job pauses
 _SWAP_OK = 2 * _GB  # paused jobs carry on once this much is free
 _PEAK_MARGIN = 1.1
 _MAX_BACKFILL_WAIT = 600  # seconds the head of the queue waits before smaller jobs stop passing it
@@ -57,13 +60,11 @@ def available_memory() -> int:
 
 
 def swap_free() -> int:
-    """Bytes of swap free. The system adds swap as it needs it, so a machine with none in use counts as plenty."""
+    """Bytes of swap still usable, under the cap."""
     if "JOB_FAKE_SWAP" in os.environ:
         return int(os.environ["JOB_FAKE_SWAP"])
     out = subprocess.run(["sysctl", "vm.swapusage"], capture_output=True, text=True, check=True).stdout
-    total = float(re.search(r"total = ([\d.]+)M", out)[1])
-    free = float(re.search(r"free = ([\d.]+)M", out)[1])
-    return 1 << 40 if total == 0 else int(free * (1 << 20))
+    return _SWAP_CAP - int(float(re.search(r"used = ([\d.]+)M", out)[1]) * (1 << 20))
 
 
 def _alive(pid: int) -> bool:
@@ -136,7 +137,7 @@ def may_start(key: str, state: dict, free: int, swap: int, cores: int, now: floa
         return False
     if me is not head and (head["exclusive"] or now - head["queued"] > _MAX_BACKFILL_WAIT):
         return False  # smaller jobs may pass it, but not forever
-    budget = free - _RESERVE - sum(max(0, _need(j, peaks) - j.get("rss", 0)) for j in running)
+    budget = free + _OVERCOMMIT - _RESERVE - sum(max(0, _need(j, peaks) - j.get("rss", 0)) for j in running)
     if sum(j["cores"] for j in running) + me["cores"] > cores:
         return False
     # Anyone ahead who fits goes first; don't take their room.
