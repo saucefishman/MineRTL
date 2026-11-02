@@ -310,7 +310,7 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
                 towers: dict[str, tuple[int, int, int]] | None = None, on_lanes: frozenset[str] = frozenset()) -> Macro:
     """``banks`` 4-read arrays one above the other, as one block, holding bank numbers ``base`` up. Every input pin feeds a
     torch tower beside its line; each bank's line taps the tower. Each output has a tower too, which every bank's bitline
-    powers at its own level, so the top of the tower is the OR of the banks. Lines near towers are repeaters, which ignore
+    powers at its own level, so the top of the tower is the OR of the banks. Every pin ends up on the south face. Lines near towers are repeaters, which ignore
     them. A tower inverts twice per 4 blocks, so its tap levels agree. Input pins in ``on_lanes`` get no way out to the
     south face: ``towers`` collects each one's tower base (x, y, z) instead, for build_group to feed.
     """
@@ -320,7 +320,10 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
     bank = arrays[0].footprint
     north = _STACK_NORTH
     south = _STACK_SOUTH
-    size = (bank.width + 1, bank.height + _BANK_PITCH * (banks - 1), north + bank.depth + south)
+    # Outputs run over the top to the south face, with the inputs: a net can't cross a block, and logic reads and writes.
+    # Lower and upper read lines take a Y each, as their columns touch; 1 mod 4 keeps tower polarity.
+    exit_y = (bank.height + _BANK_PITCH * (banks - 1) + 3) // 4 * 4 + 1
+    size = (bank.width + 1, exit_y + _READ_PLANES + 1, north + bank.depth + south)
     blocks: dict[Pos, BlockState] = {}
     for k, array in enumerate(arrays):
         for (x, y, z), block in array.blocks:
@@ -330,9 +333,9 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
         blocks[(x, y, z)] = _repeater(facing)
         blocks[(x, y - 1, z)] = _GLASS
 
-    def tower(x: int, z: int, bottom: int) -> None:
-        """Up from ``bottom`` through the last bank's level, in the state of an idle low signal."""
-        top = bottom + _BANK_PITCH * (banks - 1)
+    def tower(x: int, z: int, bottom: int, top: int | None = None) -> None:
+        """Up from ``bottom`` through the last bank's level or to ``top``, in the state of an idle low signal."""
+        top = bottom + _BANK_PITCH * (banks - 1) if top is None else top
         for y in range(bottom, top + 1, 2):
             blocks[(x, y, z)] = _STONE
             if y < top:
@@ -375,12 +378,15 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
                 else:
                     line(x, level, north - 1)
                     line(x, level, north - 2)
-            tower(tower_x, north - 3, y)
-            top = y + _BANK_PITCH * (banks - 1)
-            line(tower_x, top, north - 4)
-            line(tower_x, top, north - 5)
-            pins.append(PinRef(name=pin.name, direction=Direction.OUT, side=CardinalDirection.NORTH,
-                               offset=(tower_x, top, size[2] - 1)))
+            top = exit_y + _READ_PLANES if upper else exit_y
+            tower(tower_x, north - 3, y, top)
+            for z in range(north - 2, size[2]):
+                if z == north - 2 or z == size[2] - 1 or (z - north) % _LANE_REPEAT == 0:
+                    blocks[(tower_x, top, z)] = _repeater("north")
+                else:
+                    blocks[(tower_x, top, z)] = _DUST
+                blocks[(tower_x, top - 1, z)] = _GLASS
+            pins.append(PinRef(name=pin.name, direction=Direction.OUT, side=CardinalDirection.SOUTH, offset=(tower_x, top, 0)))
     arcs = {pin: {out: ticks + arcs_in for out, ticks in outs.items()} for pin, outs in arrays[0].arcs.items()}
     return _opaque(name, size, blocks, pins, arcs, len(init) * width)
 
@@ -439,8 +445,10 @@ def build_group(name: str, specs: list[StackSpec]) -> tuple[Macro, dict[str, tup
             own_pins[group_pin] = (k, pin.name)
             x, y = pin.offset[0] + xs[k], pin.offset[1] + lift
             if pin.direction == Direction.OUT:
-                pins.append(PinRef(name=group_pin, direction=Direction.OUT, side=CardinalDirection.NORTH,
-                                   offset=(x, y, size[2] - 1)))
+                for z in range(depth, size[2]):
+                    blocks[(x, y, z)] = _repeater("north")
+                    floor(x, y, z)
+                pins.append(PinRef(name=group_pin, direction=Direction.OUT, side=CardinalDirection.SOUTH, offset=(x, y, 0)))
             else:
                 for z in range(depth, size[2]):
                     blocks[(x, y, z)] = _repeater("south")

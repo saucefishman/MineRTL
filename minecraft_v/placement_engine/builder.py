@@ -1325,7 +1325,8 @@ def _route_all_nets(
     macros = [p for p in placed if p.component.type == ComponentType.CUSTOM]
     walls = [p for p in placed if p.component.type == ComponentType.CUSTOM
              and (p.component.metadata.get("bank")
-                  or p.component.footprint.width >= 2 * p.component.footprint.depth)]  # others are easy to go around
+                  or (p.component.footprint.width >= 2 * p.component.footprint.depth
+                      and not p.component.metadata.get("thin")))]  # others are easy to go around
     with phase("[wire] preparing nets"):
         router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                                frozenset(pin_terminal.values()), resume=resume,

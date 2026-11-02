@@ -679,6 +679,13 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
         for i in outputs:
             limits += [*z0[in_way(pos_all[i, 0])], *connected[i]]
         output_z = min(limits) - routing_gutter - 1
+        blocks = [i for i, c in enumerate(netlist.comps[:n]) if c.metadata.get("south_pins")]
+        if blocks:
+            # Gates are all south of the block, so outputs can't be north of it. Nothing routes ahead of an output at any Y,
+            # so they go past its east end, not in front of its pins.
+            output_z = max(pos_all[i, 2] + netlist.comps[i].footprint.depth for i in blocks) + _SOUTH_PINS_OUTPUT_Z
+            east = max(pos_all[i, 0] + netlist.comps[i].footprint.width for i in blocks) + _IO_COLUMN_CLEAR
+            pos_all[outputs, 0] += east - pos_all[outputs, 0].min()
     pos_all[outputs, 2] = output_z
 
 
@@ -687,7 +694,7 @@ def _long_macros(gates: list[Component]) -> list[int]:
     macros = [(i, c.footprint) for i, c in enumerate(gates) if c.type == ComponentType.CUSTOM]
     widest = max((fp.width for _, fp in macros), default=0)
     return [i for i, fp in macros if fp.width * 2 >= widest and fp.width >= 2 * fp.depth
-            and not gates[i].metadata.get("bank")]
+            and not gates[i].metadata.get("bank") and not gates[i].metadata.get("thin")]
 
 
 _BANK_LOG_EVERY = 200
@@ -695,6 +702,9 @@ _BANK_SPOT_TRIES = (20000, 200000, 2000000)
 _BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
 _BANK_STACK_HEIGHT = 190  # worlds aren't tall enough for one stack of a big memory
 _BANK_COLUMN_GAP = 4
+_SOUTH_PINS_CLEAR = 24  # Z past a south_pins block's face, for the output row and wire to its pins
+_SOUTH_PINS_DENSITY = 0.3
+_SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
                             # spill onto later gates' targets and each search walks through all that's piled there
 
@@ -727,11 +737,17 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
         column_width = max(column_width, fp.width)
     width = x + column_width
     y = top
-    box = (np.zeros(3), np.array([width + channel, y, depth + 2.0 * channel]))
     free = [i for i in range(len(gates)) if i not in fixed]
-    volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
-    dims = np.array([width + channel + east_room, 0.0, depth + 2.0 * channel])
-    dims[1] = max(volume / (dims[0] * dims[2]), y + float(sizes[free, 1].max()))
+    if all(gates[i].metadata.get("south_pins") for i in banks):
+        # Every pin is on the south face and a net can't cross a block: all gates go south, past room for outputs and wire.
+        box = (np.zeros(3), np.array([width, y, channel + depth + _SOUTH_PINS_CLEAR]))
+        gate_depth = float(np.prod(sizes[free], axis=1).sum()) / _SOUTH_PINS_DENSITY / (width * y)
+        dims = np.array([width, y, box[1][2] + gate_depth + float(sizes[free, 2].max())])
+    else:
+        box = (np.zeros(3), np.array([width + channel, y, depth + 2.0 * channel]))
+        volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
+        dims = np.array([width + channel + east_room, 0.0, depth + 2.0 * channel])
+        dims[1] = max(volume / (dims[0] * dims[2]), y + float(sizes[free, 1].max()))
     log(f"[place] poisson: around banks, domain {tuple(int(v) for v in dims)}")
     pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, fixed, box))
     occ = _Occupancy(np.vstack([sizes, box[1]]))

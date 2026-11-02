@@ -96,7 +96,7 @@ def _add_ram_group(stacks, components: list[Component], bit_endpoints) -> None:
             pins.append(pin)
             bit_endpoints[bit].append(("ram_group", name, pin.direction))
     components.append(Component(id="ram_group", type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
-                                metadata={"macro": block.name, "bank": True}))
+                                metadata={"macro": block.name, "bank": True, "south_pins": True}))
 
 
 def module_to_component_list(module: Module) -> ComponentList:
@@ -137,7 +137,7 @@ def module_to_component_list(module: Module) -> ComponentList:
                     pins.append(pin)
                     bit_endpoints[bit].append((cell_name, pin.name, pin.direction))
             components.append(Component(id=cell_name, type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
-                                        metadata={"macro": block.name, **({"bank": True} if cell.type == RAM4_CELL else {})}))
+                                        metadata={"macro": block.name, **({"bank": True, "south_pins": True} if cell.type == RAM4_CELL else {"thin": True})}))
             continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))
