@@ -468,6 +468,7 @@ cdef class World:
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint grid_check
+    cdef vector[Move]* out           # set: entry() appends Moves here instead of returning tuples
 
     def __init__(self, non_air, wire, torch, repeater, solid, dust_owner, net_id, bounds,
                  int max_bridge_y, goal, int x_h_factor, eprot, prot, fp_relief, fp, inverted, terminal,
@@ -840,6 +841,29 @@ cdef class World:
                       int gate=0, object extra=None):
         """_find_wire_path's _entry, with the snapshot tables slot left None."""
         cdef int dx = tx - x, dy = ty - y, dz = tz - z
+        cdef Move m
+        if self.out != NULL:
+            m.dest = self.pid(tx, ty, tz)
+            m.cost = cost
+            m.forbid = forbid
+            m.gate = gate
+            m.has_extra = extra is not None
+            if m.has_extra:
+                m.ex, m.ey, m.ez = extra[0] - x, extra[1] - y, extra[2] - z
+            else:
+                m.ex = m.ey = m.ez = 0
+            m.dx, m.dy, m.dz = dx, dy, dz
+            m.shift = shift_index(dx, dy, dz)
+            m.has_flat = dy == 0 and abs(dx) <= 1 and abs(dz) <= 1
+            m.fdx = dx if m.has_flat else 0
+            m.fdz = dz if m.has_flat else 0
+            m.h = abs(tx - self.gx) * self.x_h_factor + abs(ty - self.gy) * 4 + abs(tz - self.gz)
+            m.near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
+                      and abs(self.gy - ty) < Y_RADIUS_MIN)
+            m.arrive = TOWER_FLAG if dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2)) else 0
+            m.cong = 0.0
+            self.out.push_back(m)
+            return None
         flat_dir = (dx, dz) if dy == 0 and abs(dx) <= 1 and abs(dz) <= 1 else None
         dest = self.pid(tx, ty, tz)
         h = self.h_list[dest]
@@ -1206,8 +1230,43 @@ cdef class _Cells:
         self.moves.push_back(m)
         return 0
 
+    cdef int add_m4_sides(self, int cid, list sides) except -1:
+        cdef M4Side side
+        for forbid, cells in sides:
+            side.forbid = forbid
+            side.start = self.m4_cells.size()
+            side.count = len(cells)
+            for cell in cells:
+                self.m4_cells.push_back(cell[0] - self.x[cid])
+                self.m4_cells.push_back(cell[1] - self.y[cid])
+                self.m4_cells.push_back(cell[2] - self.z[cid])
+            self.m4_sides.push_back(side)
+        return 0
+
     cdef int load(self, int cid, object expand, World world, bint verify, list pos_list, list h_list,
                   object congestion_cost) except -1:
+        cdef CellMoves c
+        cdef M4Side side
+        if world is not None and not verify and not world.grid_check and congestion_cost is None:
+            # The kernel's move generation without going through Python tuples.
+            c.start = self.moves.size()
+            world.out = &self.moves
+            try:
+                m4_sides = world._static_moves(self.x[cid], self.y[cid], self.z[cid])[1]
+            finally:
+                world.out = NULL
+            self.sync(pos_list, h_list)
+            c.count = <int>self.moves.size() - c.start
+            c.m4_move = -1
+            c.m4_start = self.m4_sides.size()
+            c.m4_count = 0
+            if m4_sides is not None:
+                c.count -= 1
+                c.m4_move = <int>self.moves.size() - 1
+                self.add_m4_sides(cid, m4_sides[1])
+                c.m4_count = <int>self.m4_sides.size() - c.m4_start
+            self.cm[cid] = c
+            return 0
         if world is None:
             static = expand(cid)
         else:
@@ -1219,8 +1278,6 @@ cdef class _Cells:
                                          f"  kernel {static}\n  python {expected}")
         moves, m4 = static
         self.sync(pos_list, h_list)
-        cdef CellMoves c
-        cdef M4Side side
         c.start = self.moves.size()
         for entry in moves:
             self.convert(cid, entry, pos_list, h_list, congestion_cost)
@@ -1231,15 +1288,7 @@ cdef class _Cells:
         if m4 is not None:
             c.m4_move = self.moves.size()
             self.convert(cid, m4[0], pos_list, h_list, congestion_cost)
-            for forbid, cells in m4[1]:
-                side.forbid = forbid
-                side.start = self.m4_cells.size()
-                side.count = len(cells)
-                for cell in cells:
-                    self.m4_cells.push_back(cell[0] - self.x[cid])
-                    self.m4_cells.push_back(cell[1] - self.y[cid])
-                    self.m4_cells.push_back(cell[2] - self.z[cid])
-                self.m4_sides.push_back(side)
+            self.add_m4_sides(cid, m4[1])
             c.m4_count = <int>self.m4_sides.size() - c.m4_start
         self.cm[cid] = c
         return 0
