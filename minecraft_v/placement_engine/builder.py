@@ -20,6 +20,7 @@ from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFA
 from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
 from minecraft_v.progress import ProgressBar, debug, log, phase, status
 from minecraft_v.placement_engine.ir import (
+    Direction,
     Component,
     ComponentList,
     ComponentType,
@@ -804,9 +805,10 @@ class _GreedyRouter:
                  terminal_positions: frozenset[Pos],
                  paths: dict[str, tuple[str, list[list[Pos]]]] | None = None,
                  resume: ResumeStore | None = None,
-                 gate_cells: frozenset[Pos] = frozenset()):
+                 gate_cells: frozenset[Pos] = frozenset(), block_inputs: frozenset[Pos] = frozenset()):
         self.resume = resume
         self.gate_cells = gate_cells
+        self.block_inputs = block_inputs
         self.region = region
         self.rec = rec
         self.solid = solid
@@ -1067,8 +1069,9 @@ class _GreedyRouter:
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
-        # Wire branches off the net's own sinks, so signal has to be followed through those.
-        stop = Excluding(self.terminal_positions, {job.src, *job.sinks})
+        # Wire branches off the net's own sinks, so signal has to be followed through those. Not into a RAM block, though:
+        # it's millions of cells, tested on its own, and nothing inside can come back onto this net.
+        stop = Excluding(self.terminal_positions, {job.src, *(t for t in job.sinks if t not in self.block_inputs)})
         world = _World(self.region, frozenset(), frozenset())
         latch = find_latch(self.region, job.src, stop, world)
         if latch and all(self.dust_owner.get(cell, job.net_id) == job.net_id for cell in latch):
@@ -1397,7 +1400,10 @@ def _route_all_nets(
     with phase("[wire] preparing nets"):
         router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                                frozenset(pin_terminal.values()), resume=resume,
-                               gate_cells=frozenset(_component_interior(placed)))
+                               gate_cells=frozenset(_component_interior(placed)),
+                               block_inputs=frozenset(pin_terminal[(p.component.id, pin.name)] for p in placed
+                                                      if p.component.metadata.get("south_pins")
+                                                      for pin in p.component.pins if pin.direction == Direction.IN))
         jobs = [
             _RouteJob(
                 key=net.net_id, net_id=net.net_id,

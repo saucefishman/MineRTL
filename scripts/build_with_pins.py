@@ -2,11 +2,16 @@
 
 Usage: build_with_pins.py <pins.txt> <minecraft_v args...>
 """
+import faulthandler
+import os
 import sys
 
 from minecraft_v.main import main
 from minecraft_v.placement_engine import builder
 
+if os.environ.get("STACK_DUMP_EVERY"):  # a poor man's profiler for long builds: py-spy needs root here
+    stacks = open(os.environ["MINECRAFT_V_ARTIFACTS_DIR"] + "/stacks.txt", "w")
+    faulthandler.dump_traceback_later(int(os.environ["STACK_DUMP_EVERY"]), repeat=True, file=stacks)
 pins_path = sys.argv[1]
 sys.argv = [sys.argv[0], *sys.argv[2:]]
 place_io = builder._place_io_repeaters

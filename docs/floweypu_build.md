@@ -26,3 +26,6 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - examples/floweypu_hi = CPU + ROM (main.v copied from floweypu/test/main_rom.v; cpu.v a symlink). Test bench `sh examples/floweypu/test/run.sh` passes in RTL. Program pads slot 1 with nops for 1 2 3 on e0/d0; h on e0 and i on e1 share a clock. rst needs at least one clock high (sync); no-reset power-up doesn't work. rv(t+2)=mem[ra(t)].
 - Fixed: macro classes whose instance outputs feed another instance's input crashed check_equivalent; now skipped (_chains_within).
 - Predictor on merged code: wire done 690 nets 0 failed in 1036s, 1.5s per net, far too slow per net; profile.
+- Baseline examples/floweypu full build: 17,214 top components, 18,587 nets, 2965x380x499. Failed at 1307s on net_6948, a 15-block net at a macro bank (f-cap), only 1 failed search before it. Progress unknown: add a nets-done count.
+- Latch walk through RAM blocks was 93% of routing time (find_latch through own sinks). Stopped at block inputs: hist routing 145s -> 5s. Rest of hist build (190s) is post-route passes walking 1.1M block cells: settle 59s, dust shapes 38s, stamp 20s, hold 15s. Scales with block count, so predictor's 8.5M would be 20+ min.
+- STACK_DUMP_EVERY=<s> in scripts/build_with_pins.py dumps stacks to artifacts/stacks.txt. py-spy needs root here.
