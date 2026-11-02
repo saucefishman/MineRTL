@@ -229,6 +229,7 @@ cdef long long TOWER_FLAG = 0
 cdef int NODE_SHIFT = 0
 cdef int SIG_SHIFT = 0           # signal depth (4 bits) then repeater-candidate dir (3 bits)
 cdef int SIG_LIMIT = 0           # _REPEATER_INTERVAL
+cdef bint FOOT_REPEATERS = False  # see pathfinding.set_foot_repeaters
 cdef long long SNAP_MASK = 0
 cdef int STAGNATION = 0
 cdef int MAX_NODES = 0
@@ -1523,6 +1524,11 @@ cdef inline void note_depth(FlatMap[unsigned int]* depths, long long node) noexc
     depths.get(node & ~(<long long>15 << SIG_SHIFT), &ins)[0] |= 1u << ((node >> SIG_SHIFT) & 15)
 
 
+def set_foot_repeaters(bint on) -> None:
+    global FOOT_REPEATERS
+    FOOT_REPEATERS = on
+
+
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False,
@@ -1727,7 +1733,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 if ndepth >= SIG_LIMIT:
                     continue
                 ncand = 0
-                if step == 1 and m.dy == 0:
+                if step == 1 and (m.dy == 0 or (FOOT_REPEATERS and m.dy == -1)):
                     for i in range(4):
                         if HORIZ[i][0] == m.dx and HORIZ[i][1] == m.dz:
                             ncand = i + 1

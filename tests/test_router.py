@@ -559,6 +559,22 @@ def test_no_repeater_at_a_slopes_foot():
     assert any(region[p].id == "minecraft:repeater" for p in path)
 
 
+def test_repeater_at_a_slopes_foot_when_allowed():
+    # examples/cpu, routed banks: without these it fails routing on every seed tried. main.py turns them on without RAM blocks.
+    pathfinding.set_foot_repeaters(True)
+    try:
+        assert pathfinding._signal_step(3, 0, (1, -1, 0)) == (4, 1)
+        region = Region(0, 0, 0, 40, 6, 3)
+        path = [(x, 3, 1) for x in range(1, 3)] + [(x, 2, 1) for x in range(3, 17)]
+        for x, y, z in path:
+            region[x, y, z] = BlockState("minecraft:redstone_wire")
+            region[x, y - 1, z] = STONE
+        _place_repeaters_for_net(region, {p: "n" for p in path}, "n", [path])
+        assert any(region[p].id == "minecraft:repeater" for p in path)
+    finally:
+        pathfinding.set_foot_repeaters(False)
+
+
 def test_no_repeater_at_a_sinks_pin_cell():
     # floweypu net_2367: a later branch leaves from a sink's pin cell and runs straight on, and the repeater search
     # picked that cell, so the gate read the repeater's output side and never switched.

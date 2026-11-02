@@ -7,6 +7,8 @@ from .constants import (
 )
 from .block_utils import _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
 
+_foot_repeaters = [False]  # see pathfinding.set_foot_repeaters
+
 
 class LayConflict(ValueError):
     """A searched path that can't be laid as-is (e.g. it crosses its own support or wire).
@@ -446,8 +448,9 @@ def _place_repeaters_for_net(
         dx, dz = x - px, z - pz
         if (dx, dz) not in _DELTA_TO_FACING:
             return False
-        if ny != y or y != py:
-            return False  # at a slope's foot it would read the block under the slope: glass, or powered by other wire
+        # At a slope's foot it would read the block under the slope: glass, or powered by other wire.
+        if (ny != y or y != py) and not (_foot_repeaters[0] and y == py - 1 and ny == y):
+            return False
         if (nx - x, nz - z) != (dx, dz):
             return False  # turn after repeater
         if path[j] in branch_points:
