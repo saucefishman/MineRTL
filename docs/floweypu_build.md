@@ -45,3 +45,4 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Remaining router gain: verify._World latch and inverted walks in kernel, 1.3-1.5x guess.
 - h1 (A* grid, density .15, fanout-first 64, big nets not ripped): first full route: 15,230 nets, 4 failed, wire 1200s, verify 1 short, critical 2703 ticks. Next w5: RAM_GATE_WIDTH=.5 centered compact gates.
 - h1 PASSES scripts/check_floweypu.py in redstone (half 3000): 1 2 3 h+i. Total 1828s, 1191x306x724, 4 failed nets, 1 short (net_1069/net_5485). Saved at scratchpad/h1. Goal left: 0 failures/shorts, under 1200s total.
+- w35 (RAM_GATE_WIDTH .35, density .15, fanout first 64, big nets not ripped): wire 562s, 15,230 nets, 0 failed, 1094x263x1178. Verify 3 violations. w5 post-route hung 25+ min in settle: suspect oscillation from shorts.
