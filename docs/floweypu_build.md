@@ -37,3 +37,4 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - RAM blocks are settled alone once, cached in build/macro_cache/ram by contents and code, and pasted in bulk. Post-route passes treat their boxes as opaque and go in only if wire touches them or a pin is driven high. hist post-route 62s -> 3s; predictor 56s. First build of a block: 30s hist, 325s predictor.
 - Comparators save their settled signal in a tile entity: without it a preloaded row read at rest left bitlines stuck until next read.
 - Open: a preloaded group with one stack's read address not shared with the other (a0 = m[~addr0] in examples/preload) reads a0 and a2 stuck, same on old code. Not looked into.
+- Acceptance: scripts/check_floweypu.py <lit> <pins> <half> (PYTHONPATH=scripts). Fanout-first (ROUTE_FIRST_FANOUT) experiment: scratchpad f64, f16.
