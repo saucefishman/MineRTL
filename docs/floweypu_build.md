@@ -76,3 +76,6 @@ Rule: if the machine is strained (swap filling, stalled processes), write ideas 
 - Open: `hist` 1 failure at half 500 and 350, folded and current, not looked into.
 - Open: full-adder opens in hf1 and hf2, `net_9622` inverted, unexplained.
 - Open: RAM group with lone lower read pin refused, address pitch 5 broken.
+
+## Job queue
+All builds and simulations go through `python3 scripts/job.py run --mem 7G --name floweypu-build --timeout 2400 -- <command>`; it blocks until there's room. Rough memory: floweypu build 7G, floweypu simulation 3G, small example 1G. `--exclusive` for builds whose time matters, `--priority 10` for final checks, `-10` for sweeps. `python3 scripts/job.py status` shows the queue. Timeouts don't count sleep.
