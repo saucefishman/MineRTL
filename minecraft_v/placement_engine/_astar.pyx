@@ -23,6 +23,7 @@ from minecraft_v.progress import pulse
 cdef extern from *:
     """
     #include <algorithm>
+    #include <functional>
     #include <vector>
     struct HeapEntry {
         double f; long long neg_h; double g; long long counter;
@@ -32,12 +33,19 @@ cdef extern from *:
     // the pops don't depend on how the heap is laid out: 4-ary over 16 byte keys, with the rest of an
     // entry in an array by counter. Sifting is most of a big search's cache misses.
     struct HeapKey { double f; int neg_h; unsigned int counter; };
-    struct HeapData { double g; double g_wire; long long node; long long parent; int group; };
+    struct HeapData { double g; double g_wire; long long node; long long parent; int group; int next; };
+    // One queue per (f, -h), first in first out, which is the counter's order: a search has few of them.
+    struct Bucket { unsigned long long key; int head, tail; };
     struct Heap {
         std::vector<HeapKey> keys;
         std::vector<HeapData> data;
-        // With g and weight * h whole quarters, f and h fix g exactly, so it needs no looking at.
+        // With g and weight * h whole quarters, f and h fix g exactly, so it needs no looking at, and entries
+        // go in buckets by (f, -h). Otherwise the 4-ary heap on keys.
         bool g_can_differ = true;
+        std::vector<Bucket> buckets;     // open addressing; head < 0 is an empty queue
+        size_t bucket_count = 0;
+        std::vector<unsigned long long> active;  // min-heap of the keys of non-empty queues
+        static constexpr unsigned long long NO_BUCKET = ~0ULL;
         inline bool before(const HeapKey& a, const HeapKey& b) const {
             if (a.f != b.f) return a.f < b.f;
             if (a.neg_h != b.neg_h) return a.neg_h < b.neg_h;
@@ -47,15 +55,63 @@ cdef extern from *:
             }
             return a.counter < b.counter;
         }
-        bool empty() const { return keys.empty(); }
+        bool empty() const { return keys.empty() && active.empty(); }
         void clear() {
             keys.clear();
             data.clear();
+            active.clear();
             if (data.capacity() > (1u << 22)) { std::vector<HeapData>().swap(data); std::vector<HeapKey>().swap(keys); }
+            size_t cap = buckets.size() > (1u << 12) || buckets.empty() ? (1u << 10) : buckets.size();
+            buckets.assign(cap, Bucket{NO_BUCKET, -1, -1});
+            bucket_count = 0;
+        }
+        static inline size_t bucket_mix(unsigned long long k) {
+            k *= 0x9e3779b97f4a7c15ULL;
+            return (size_t)(k >> 40);
+        }
+        inline Bucket* bucket(unsigned long long key) {
+            size_t mask = buckets.size() - 1, i = bucket_mix(key) & mask;
+            while (buckets[i].key != key) {
+                if (buckets[i].key == NO_BUCKET) {
+                    if ((bucket_count + 1) * 2 > mask + 1) {
+                        std::vector<Bucket> old;
+                        old.swap(buckets);
+                        buckets.assign(old.size() * 2, Bucket{NO_BUCKET, -1, -1});
+                        size_t m = buckets.size() - 1;
+                        for (const Bucket& b : old) {
+                            if (b.key == NO_BUCKET) continue;
+                            size_t j = bucket_mix(b.key) & m;
+                            while (buckets[j].key != NO_BUCKET) j = (j + 1) & m;
+                            buckets[j] = b;
+                        }
+                        return bucket(key);
+                    }
+                    buckets[i].key = key;
+                    bucket_count++;
+                    return &buckets[i];
+                }
+                i = (i + 1) & mask;
+            }
+            return &buckets[i];
         }
         // e.counter is its place in data: the number of pushes so far.
         inline void push(const HeapEntry& e) {
-            data.push_back(HeapData{e.g, e.g_wire, e.node, e.parent, e.group});
+            data.push_back(HeapData{e.g, e.g_wire, e.node, e.parent, e.group, -1});
+            if (!g_can_differ) {
+                // f * 4 < 2^32: g is under 1e9 by the time it gets here, and h is a few thousand.
+                unsigned long long key = ((unsigned long long)(e.f * 4) << 32) | (unsigned int)((int)e.neg_h + 0x40000000);
+                Bucket* b = bucket(key);
+                int at = (int)e.counter;
+                if (b->head < 0) {
+                    b->head = b->tail = at;
+                    active.push_back(key);
+                    std::push_heap(active.begin(), active.end(), std::greater<unsigned long long>());
+                } else {
+                    data[b->tail].next = at;
+                    b->tail = at;
+                }
+                return;
+            }
             HeapKey k{e.f, (int)e.neg_h, (unsigned int)e.counter};
             size_t i = keys.size();
             keys.push_back(k);
@@ -69,6 +125,21 @@ cdef extern from *:
             h[i] = k;
         }
         inline HeapEntry pop() {
+            if (!g_can_differ) {
+                unsigned long long key = active[0];
+                Bucket* b = bucket(key);
+                int at = b->head;
+                const HeapData& d = data[at];
+                b->head = d.next;
+                if (d.next < 0) {
+                    std::pop_heap(active.begin(), active.end(), std::greater<unsigned long long>());
+                    active.pop_back();
+                } else {
+                    __builtin_prefetch(&data[d.next]);
+                }
+                return HeapEntry{(double)(key >> 32) / 4, (long long)(int)((unsigned int)key - 0x40000000), d.g, at,
+                                 d.g_wire, d.node, d.parent, d.group};
+            }
             HeapKey* h = keys.data();
             HeapKey top = h[0];
             size_t n = keys.size() - 1;
@@ -154,6 +225,117 @@ cdef extern from *:
             if (p.size() < 32 && old.capacity() <= (1u << 20)) p.emplace_back(std::move(old));
         }
     };
+    typedef int bint_;
+    // A search's states. Hashed without the signal depth, so the same state at other depths sits next to it and
+    // one walk answers both "known at no more cost" and "dominated by less depth". 16 byte slots: g is whole
+    // without congestion, else an index into gs; parent is NOT_EXPANDED, UNREACHED or an index into parents.
+    struct NodeSlot { unsigned long long key; int g; int parent; };
+    struct NodeTable {
+        static constexpr unsigned long long EMPTY = ~0ULL;
+        static constexpr int NOT_EXPANDED_ = -2, UNREACHED_ = -3;
+        std::vector<NodeSlot> slots;
+        std::vector<long long> parents;
+        std::vector<double> gs;
+        size_t mask = 0, count = 0;
+        unsigned long long depth_mask = 0;
+        bool side_g = false;
+        static std::vector<std::vector<NodeSlot>>& pool() {
+            static std::vector<std::vector<NodeSlot>> p;
+            return p;
+        }
+        NodeTable() {
+            std::vector<std::vector<NodeSlot>>& p = pool();
+            if (!p.empty()) { slots.swap(p.back()); p.pop_back(); }
+            reset(1 << 12, 0, false);
+        }
+        ~NodeTable() {
+            std::vector<std::vector<NodeSlot>>& p = pool();
+            if (p.size() < 32 && slots.capacity() <= (1u << 20)) p.emplace_back(std::move(slots));
+        }
+        void reset(size_t cap, unsigned long long depths, bool side) {
+            slots.assign(cap, NodeSlot{EMPTY, 0, 0});
+            mask = cap - 1; count = 0;
+            depth_mask = depths; side_g = side;
+            parents.clear(); gs.clear();
+        }
+        inline size_t start(unsigned long long k) const { return FlatMap<char>::mix(k & ~depth_mask) & mask; }
+        inline void prefetch(unsigned long long k) const { __builtin_prefetch(&slots[start(k)]); }
+        inline double g_of(const NodeSlot* s) const { return side_g ? gs[s->g] : (double)s->g; }
+        inline NodeSlot* find(unsigned long long k) {
+            size_t i = start(k);
+            while (slots[i].key != EMPTY) {
+                if (slots[i].key == k) return &slots[i];
+                i = (i + 1) & mask;
+            }
+            return nullptr;
+        }
+        // Whether the same state with less signal depth is known at no more cost.
+        inline bool dominated(unsigned long long k, double g) const {
+            unsigned long long d = k & depth_mask;
+            if (!d) return false;
+            for (size_t i = start(k); slots[i].key != EMPTY; i = (i + 1) & mask) {
+                const NodeSlot& s = slots[i];
+                if (!((s.key ^ k) & ~depth_mask) && (s.key & depth_mask) < d && s.parent != UNREACHED_ && g_of(&s) <= g)
+                    return true;
+            }
+            return false;
+        }
+        // A move's arrival at k with cost g: *skip if k is known at no more cost or dominated, else k's slot if it has one.
+        inline NodeSlot* probe(unsigned long long k, double g, bint_* skip) {
+            unsigned long long d = k & depth_mask;
+            NodeSlot* found = nullptr;
+            *skip = 0;
+            for (size_t i = start(k); slots[i].key != EMPTY; i = (i + 1) & mask) {
+                NodeSlot* s = &slots[i];
+                if (s->key == k) {
+                    found = s;
+                    if (s->parent != UNREACHED_ && !(g < g_of(s))) { *skip = 1; return s; }
+                } else if (!((s->key ^ k) & ~depth_mask) && (s->key & depth_mask) < d && s->parent != UNREACHED_
+                           && g_of(s) <= g) {
+                    *skip = 1;
+                    return s;
+                }
+            }
+            return found;
+        }
+        // Invalidates slot pointers. k isn't in the table.
+        inline NodeSlot* insert(unsigned long long k) {
+            if ((count + 1) * 2 > mask + 1) grow();
+            size_t i = start(k);
+            while (slots[i].key != EMPTY) i = (i + 1) & mask;
+            slots[i] = NodeSlot{k, 0, NOT_EXPANDED_};
+            count++;
+            return &slots[i];
+        }
+        // First cost of a slot that has none yet.
+        inline void set_first_g(NodeSlot* s, double g) {
+            if (side_g) { s->g = (int)gs.size(); gs.push_back(g); }
+            else s->g = (int)g;
+            s->parent = NOT_EXPANDED_;
+        }
+        inline void set_g(NodeSlot* s, double g) {
+            if (side_g) gs[s->g] = g;
+            else s->g = (int)g;
+        }
+        inline void set_unreached(NodeSlot* s) { s->parent = UNREACHED_; }
+        inline void set_parent(NodeSlot* s, long long parent) { s->parent = (int)parents.size(); parents.push_back(parent); }
+        inline long long parent_of(const NodeSlot* s) const { return parents[s->parent]; }
+        void grow() {
+            std::vector<NodeSlot> old;
+            old.swap(slots);
+            std::vector<std::vector<NodeSlot>>& p = pool();
+            if (!p.empty()) { slots.swap(p.back()); p.pop_back(); }
+            slots.assign(old.size() * 2, NodeSlot{EMPTY, 0, 0});
+            mask = slots.size() - 1;
+            for (const NodeSlot& s : old) {
+                if (s.key == EMPTY) continue;
+                size_t i = start(s.key);
+                while (slots[i].key != EMPTY) i = (i + 1) & mask;
+                slots[i] = s;
+            }
+            if (p.size() < 32 && old.capacity() <= (1u << 20)) p.emplace_back(std::move(old));
+        }
+    };
     """
     cdef struct HeapEntry:
         double f
@@ -175,17 +357,27 @@ cdef extern from *:
         V* find(unsigned long long k)
         V* get(unsigned long long k, int* inserted)
         void reset(size_t cap)
-
-
-cdef struct NodeInfo:
-    double g          # g_score
-    long long parent  # came_from; NOT_EXPANDED until then
+    cdef struct NodeSlot:
+        int parent
+    cdef cppclass NodeTable:
+        void reset(size_t cap, unsigned long long depths, bint side)
+        void prefetch(unsigned long long k)
+        double g_of(const NodeSlot* s)
+        NodeSlot* find(unsigned long long k)
+        bint dominated(unsigned long long k, double g)
+        NodeSlot* probe(unsigned long long k, double g, int* skip)
+        NodeSlot* insert(unsigned long long k)
+        void set_first_g(NodeSlot* s, double g)
+        void set_g(NodeSlot* s, double g)
+        void set_unreached(NodeSlot* s)
+        void set_parent(NodeSlot* s, long long parent)
+        long long parent_of(const NodeSlot* s)
 
 
 cdef enum:
     MAX_CELL_MOVES = 64  # more than _static_moves' (flat, slopes, 2x slopes, +1, towers, -4)
-    NOT_EXPANDED = -2   # NodeInfo.parent; -1 is a seed's
-    UNREACHED = -3      # a slot get() made for a cost past the limit
+    NOT_EXPANDED = -2   # NodeSlot.parent
+    UNREACHED = -3      # a slot made for a cost past the limit
 
 
 # A search reads a cell's moves some thirty times over: small, so that's few cache lines.
@@ -336,23 +528,23 @@ cdef int shift_index(int dx, int dy, int dz) except -1:
 @cython.final
 cdef class CameFrom:
     """came_from as a read-only mapping (node -> parent node), like the Python loop's dict."""
-    cdef FlatMap[NodeInfo] nodes
+    cdef NodeTable nodes
 
     def get(self, long long node, default=None):
-        cdef NodeInfo* ni = self.nodes.find(node)
-        if ni == NULL or ni.parent < -1:
+        cdef NodeSlot* ni = self.nodes.find(node)
+        if ni == NULL or ni.parent < 0:
             return default
-        return ni.parent
+        return self.nodes.parent_of(ni)
 
     def __getitem__(self, long long node):
-        cdef NodeInfo* ni = self.nodes.find(node)
-        if ni == NULL or ni.parent < -1:
+        cdef NodeSlot* ni = self.nodes.find(node)
+        if ni == NULL or ni.parent < 0:
             raise KeyError(node)
-        return ni.parent
+        return self.nodes.parent_of(ni)
 
     def __contains__(self, long long node):
-        cdef NodeInfo* ni = self.nodes.find(node)
-        return ni != NULL and ni.parent >= -1
+        cdef NodeSlot* ni = self.nodes.find(node)
+        return ni != NULL and ni.parent >= 0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -588,6 +780,7 @@ cdef class World:
     cdef bint keep_fast, have_small
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
+    cdef bint pids_seeded
     cdef bint grid_check
     # Set while _Cells.load runs: moves, -4 sides and new cells go straight into its vectors.
     cdef vector[Move]* out
@@ -973,7 +1166,16 @@ cdef class World:
         cdef int* slot = self.pid_map.get(cell_key(x, y, z), &ins)
         if not ins:
             return slot[0]
-        slot[0] = self.pid_slow(x, y, z)
+        if self.out_cells == NULL:
+            slot[0] = self.pid_slow(x, y, z)
+            return slot[0]
+        # Filling the search's vectors: the cell stays out of the Python containers unless flush_cells asks.
+        slot[0] = <int>self.out_cells.x.size()
+        self.out_cells.x.push_back(x)
+        self.out_cells.y.push_back(y)
+        self.out_cells.z.push_back(z)
+        self.out_cells.h.push_back(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
+        self.out_cells.cm.push_back(_NO_MOVES)
         return slot[0]
 
     cdef int pid_slow(self, int x, int y, int z) except -1:
@@ -984,13 +1186,18 @@ cdef class World:
             self.pos_list.append(key)
             self.h_list.append(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
             self.move_cache.append(None)
-            if self.out_cells != NULL:
-                self.out_cells.x.push_back(x)
-                self.out_cells.y.push_back(y)
-                self.out_cells.z.push_back(z)
-                self.out_cells.h.push_back(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
-                self.out_cells.cm.push_back(_NO_MOVES)
         return i
+
+    cdef int seed_pids(self) except -1:
+        """The cells Python has ids for, once, before the first cell's moves go in the vectors."""
+        cdef int ins, x, y, z
+        if self.pids_seeded:
+            return 0
+        self.pids_seeded = True
+        for key, i in self.pos_ids.items():
+            x, y, z = key
+            self.pid_map.get(cell_key(x, y, z), &ins)[0] = i
+        return 0
 
     cdef int emit(self, list moves, int x, int y, int z, int tx, int ty, int tz, int cost, unsigned int forbid,
                   int gate, bint has_extra, int ex, int ey, int ez) except -1:
@@ -1371,6 +1578,19 @@ cdef class _Cells:
         if self.moves.capacity() > (1u << 22):  # a huge search: not kept for the next ones
             vector[Move]().swap(self.moves)
 
+    cdef int flush_cells(self, dict pos_ids, list pos_list, list h_list, list move_cache) except -1:
+        """Cells only the vectors have, into the Python containers: a failed search's report and its retry read them."""
+        cdef Py_ssize_t i
+        cdef int x, y, z
+        for i in range(len(pos_list), <Py_ssize_t>self.x.size()):
+            x, y, z = self.x[i], self.y[i], self.z[i]
+            key = (x, y, z)
+            pos_ids[key] = i
+            pos_list.append(key)
+            h_list.append(self.h[i])
+            move_cache.append(None)
+        return 0
+
     cdef void sync(self, list pos_list, list h_list):
         cdef Py_ssize_t i, n = len(pos_list)
         for i in range(<Py_ssize_t>self.x.size(), n):
@@ -1438,6 +1658,7 @@ cdef class _Cells:
         cdef int cx, cy, cz
         if world is not None and not verify and not world.grid_check and congestion_cost is None:
             # The kernel's move generation without going through Python tuples.
+            world.seed_pids()
             c.start = self.moves.size()
             c.m4_start = self.m4_sides.size()
             c.m4_move = -1
@@ -1501,27 +1722,10 @@ cdef extern from *:
     int count_trailing_zeros(unsigned int x) nogil
 
 
-cdef inline bint dominated(FlatMap[NodeInfo]* nodes, FlatMap[unsigned int]* depths, long long node, double g):
-    """Whether a node with less signal depth, otherwise the same, is known at no more cost.
-    depths: which signal depths exist per node with its depth cleared, so only those are looked up."""
-    cdef int d = (node >> SIG_SHIFT) & 15
-    if d == 0:
-        return False
-    cdef long long base = node & ~(<long long>15 << SIG_SHIFT)
-    cdef unsigned int* present = depths.find(base)
-    if present == NULL:
-        return False
-    cdef unsigned int bits = present[0] & ((1u << d) - 1)
-    while bits:
-        if nodes.find(base | (<long long>count_trailing_zeros(bits) << SIG_SHIFT)).g <= g:
-            return True
-        bits &= bits - 1
-    return False
-
-
-cdef inline void note_depth(FlatMap[unsigned int]* depths, long long node) noexcept:
-    cdef int ins
-    depths.get(node & ~(<long long>15 << SIG_SHIFT), &ins)[0] |= 1u << ((node >> SIG_SHIFT) & 15)
+def cell_pos(int cid):
+    """A cell of the last search, which may be past pos_list: good until the next search starts."""
+    cdef int x = SEARCH_CELLS.x[cid], y = SEARCH_CELLS.y[cid], z = SEARCH_CELLS.z[cid]
+    return (x, y, z)
 
 
 def set_foot_repeaters(bint on) -> None:
@@ -1547,11 +1751,9 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     heap.clear()
     heap.g_can_differ = congestion_cost is not None or (weight * 4) % 1 != 0
     cdef CameFrom came_from = CameFrom()
-    cdef FlatMap[NodeInfo]* nodes = &came_from.nodes
-    cdef FlatMap[unsigned int] depths_store
-    cdef FlatMap[unsigned int]* depths = &depths_store
-    nodes.reset(1 << 14)  # most searches outgrow the default, and growing rehashes
-    depths.reset(1 << 13)
+    cdef NodeTable* nodes = &came_from.nodes
+    # Most searches outgrow the default, and growing rehashes.
+    nodes.reset(1 << 14, <unsigned long long>15 << SIG_SHIFT, congestion_cost is not None)
     cdef vector[long long] gbest = group_best_h
     cdef vector[double] gmax = group_max_f
     cdef vector[char] explored_xyz
@@ -1559,10 +1761,9 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef vector[int] taken
     cdef vector[int] extras  # (ex, ey, ez) triples of this expansion's taken 2x slopes
     cdef HeapEntry e, ne
-    cdef NodeInfo* np
-    cdef int ins
-    cdef NodeInfo info
-    cdef NodeInfo* ni
+    cdef NodeSlot* np
+    cdef int skip
+    cdef NodeSlot* ni
     cdef Move* m
     cdef CellMoves* cmv
     cdef M4Side* side
@@ -1597,10 +1798,10 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
 
     for i in range(len(seed_nodes)):
         node = seed_nodes[i]
-        np = nodes.get(node, &ins)
-        np.g = 0
-        np.parent = NOT_EXPANDED
-        note_depth(depths, node)
+        np = nodes.find(node)
+        if np == NULL:
+            np = nodes.insert(node)
+        nodes.set_first_g(np, 0)
         h = cells.h[node >> NODE_SHIFT]
         e.f = weight * h
         e.neg_h = -h
@@ -1631,11 +1832,11 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 break
             continue
         ni = nodes.find(e.node)
-        if e.g > ni.g:
+        if e.g > nodes.g_of(ni):
             continue
         # Dominance: the same state with less signal depth at no more cost reaches everything
         # this one can (it is expanded first, or was dominated in turn).
-        if ni.parent == NOT_EXPANDED and dominated(nodes, depths, e.node, e.g):
+        if ni.parent == NOT_EXPANDED and nodes.dominated(e.node, e.g):
             continue
         cid = <int>(e.node >> NODE_SHIFT)
         h = cells.h[cid]
@@ -1648,7 +1849,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if ni.parent != NOT_EXPANDED:
             n_reexp += 1
         else:
-            ni.parent = e.parent
+            nodes.set_parent(ni, e.parent)
             if <Py_ssize_t>explored_xyz.size() <= cid:
                 explored_xyz.resize(cid + 1, 0)
             if not explored_xyz[cid]:
@@ -1762,31 +1963,22 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             next_g_wire[n_next] = new_g_wire
             n_next += 1
             nodes.prefetch(nkey)
-            depths.prefetch(nkey & ~(<long long>15 << SIG_SHIFT))
-        # The tables are big and these are scattered: asking for them all first saves waiting for each in turn.
+        # The table is big and these are scattered: asking for them all first saves waiting for each in turn.
         for k in range(n_next):
             m = &cells.moves[next_move[k]]
             nkey, new_g, new_g_wire = next_key[k], next_g[k], next_g_wire[k]
-            # Most moves lead to a state already known at no more cost. Either test only skips the move, so the
-            # one probe goes first, ahead of dominated's several.
-            np = nodes.find(nkey)
-            if np != NULL and np.parent != UNREACHED and not new_g < np.g:
+            np = nodes.probe(nkey, new_g, &skip)
+            if skip:
                 continue
-            if dominated(nodes, depths, nkey, new_g):
-                continue
-            np = nodes.get(nkey, &ins)
-            if ins or np.parent == UNREACHED:
+            if np == NULL or np.parent == UNREACHED:
+                if np == NULL:
+                    np = nodes.insert(nkey)
                 if not new_g < 1e9:  # stays looking like nothing was ever here
-                    np.g = 1e300
-                    np.parent = UNREACHED
+                    nodes.set_unreached(np)
                     continue
-                np.g = new_g
-                np.parent = NOT_EXPANDED
-                note_depth(depths, nkey)
+                nodes.set_first_g(np, new_g)
             else:
-                if not new_g < np.g:
-                    continue
-                np.g = new_g
+                nodes.set_g(np, new_g)
             if m.h <= h_limit or m.near:
                 ne.f = new_g + weight * m.h
                 ne.neg_h = -m.h
@@ -1802,6 +1994,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             else:
                 h_radius_pruned += 1
 
+    if not has_reached and world is not None:
+        cells.flush_cells(world.pos_ids, pos_list, h_list, world.move_cache)
     STAT_SEARCHES += 1
     STAT_POPS += pops
     LAST.update(pops=pops, exp=n_exp, reexp=n_reexp, pos=n_explored_xyz, max_gap=max_gap, ok=has_reached,

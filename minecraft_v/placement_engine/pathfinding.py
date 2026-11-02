@@ -876,8 +876,12 @@ def _find_wire_path(
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
         error = RouteTimeout if early_stop_reason and early_stop_reason.startswith("timeout") else ValueError
         raise error(f"No route for net {net_id} from {start} to {goal} (closest reached: {node_str(best_node)}{reason}; h_radius_pruned={h_radius_pruned})")
-    if walkable(goal) and pos_list[reached >> _NODE_SHIFT] != goal:
-        raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {node_str(reached)}")
+    def pos_of(cid: int) -> tuple[int, int, int]:
+        """A successful kernel search leaves the cells it made in its own vectors, not pos_list."""
+        return pos_list[cid] if cid < len(pos_list) else _astar.cell_pos(cid)
+
+    if walkable(goal) and pos_of(reached >> _NODE_SHIFT) != goal:
+        raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {pos_of(reached >> _NODE_SHIFT)}")
 
     path: list[tuple[int, int, int]] = []
     back_visited = set()
@@ -885,7 +889,7 @@ def _find_wire_path(
     while cur != _NO_PARENT:
         if cur in back_visited:
             raise ValueError("Path tracing resulted in loop")
-        cur_pos = pos_list[cur >> _NODE_SHIFT]
+        cur_pos = pos_of(cur >> _NODE_SHIFT)
         path.append(cur_pos)
         back_visited.add(cur)
         cur = came_from[cur]
