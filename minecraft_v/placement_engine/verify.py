@@ -318,7 +318,7 @@ def _strengths(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
 
 def find_latch(region: Region, source: Pos, stop: frozenset[Pos], world: _World | None = None) -> list[Pos]:
     """The cells of a signal cycle from source through a repeater, if any. world: one to reuse, with nothing hidden."""
-    return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop)
+    return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop, torches=True)
 
 
 def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos], torches: bool = False) -> list[Pos]:
