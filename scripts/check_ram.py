@@ -1,6 +1,6 @@
 """Check the tiled RAM in mchprs_headless on all modes.
 
-  check_ram.py array <depth> <width> <out_dir> [reads]   the bare array: every word written twice, read on both ports
+  check_ram.py array <depth> <width> <out_dir> [reads [banks]]  the bare array: every word written twice, read on both ports
   check_ram.py build <netlist.json> <out_dir> <seed>     examples/ramtile built, random traffic against a model of the RTL
 """
 import os
@@ -12,12 +12,12 @@ from pathlib import Path
 from litemapy import Region, Schematic
 
 from minecraft_v.placement_engine.ir import Direction
-from minecraft_v.placement_engine.ram import build_ram
+from minecraft_v.placement_engine.ram import build_ram, build_stack
 from settle_schematic import headless_binary
 
 ROOT = Path(__file__).parent.parent
 MODES = "noupdate,redstone,redpiler"
-ARRAY_SETTLE = 80
+ARRAY_SETTLE = 300  # towers add up in a tall stack
 HALF_PERIOD = 40
 DEPTH, WIDTH, ABITS = 4, 2, 2
 NORMAL = {"east": (1, 0), "north": (0, -1), "south": (0, 1)}
@@ -48,10 +48,17 @@ def array_script(depth: int, width: int, seed: int, reads: int = 2, init: list[i
     return "\n".join(lines) + "\n"
 
 
-def check_array(depth: int, width: int, out: Path, reads: int = 2) -> int:
+def check_array(depth: int, width: int, out: Path, reads: int = 2, banks: int = 1) -> int:
+    """With ``banks`` above 1, ``depth`` is per bank and the block is a stack."""
     out.mkdir(parents=True, exist_ok=True)
-    init = [random.Random(depth + k).randrange(1 << width) for k in range(depth)] if reads == 4 else None
-    ram = build_ram("ram", depth, width, reads, init)
+    total = depth * banks
+    init = [random.Random(total + k).randrange(1 << width) for k in range(total)] if reads == 4 else None
+    if banks > 1:
+        row_bits = depth.bit_length() - 1
+        ram = build_stack("ram", row_bits, banks, 0, (total - 1).bit_length(), width, init)
+    else:
+        ram = build_ram("ram", depth, width, reads, init)
+    depth = total
     fp = ram.footprint
     region = Region(0, 0, 0, fp.width, fp.height, fp.depth)
     for pos, block in ram.blocks:

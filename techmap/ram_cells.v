@@ -13,9 +13,10 @@ module ram_window (input clk, output window);
 endmodule
 
 (* blackbox *)
-module ram_4r1w #(parameter DEPTH = 2, parameter ABITS = 1, parameter WIDTH = 1, parameter INIT = 0) (
+module ram_stack #(parameter ROW_BITS = 1, parameter BANKS = 1, parameter BASE = 0, parameter ABITS = 1, parameter WIDTH = 1,
+                   parameter INIT = 0) (
     input [ABITS-1:0] aa, ab, ac, ad, wa,
-    input ea, eb, ec, ed, we,
+    input we,
     input [WIDTH-1:0] wd,
     output [WIDTH-1:0] ra, rb, rc, rd);
 endmodule

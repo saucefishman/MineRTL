@@ -1,5 +1,5 @@
-// Memories with four asynchronous reads and two rising edge writes become banks of tiled arrays (placement_engine/ram.py).
-// Each bank has one write path: the ports take turns in the clock's low phase, and the second port wins a clash.
+// Memories with four asynchronous reads and two rising edge writes become stacked tiled arrays (placement_engine/ram.py).
+// Each stack has one write path: the ports take turns in the clock's low phase, and the second port wins a clash.
 // TODO: other port counts, partial writes.
 (* techmap_celltype = "$mem_v2" *)
 module _ram_4r2w (RD_CLK, RD_EN, RD_ARST, RD_SRST, RD_ADDR, RD_DATA, WR_CLK, WR_EN, WR_ADDR, WR_DATA);
@@ -51,9 +51,10 @@ module _ram_4r2w (RD_CLK, RD_EN, RD_ARST, RD_SRST, RD_ADDR, RD_DATA, WR_CLK, WR_
         || WR_WIDE_CONTINUATION !== 2'b00 || (WR_PRIORITY_MASK !== 4'b0100 && WR_PRIORITY_MASK !== 4'b0000) || !whole_word_writes(0);
 
     localparam ROW_BITS = ABITS < 6 ? ABITS : 6;
-    localparam BANK_BITS = ABITS - ROW_BITS;
     localparam ROWS = 1 << ROW_BITS;
-    localparam BANKS = 1 << BANK_BITS;
+    localparam BANKS = 1 << (ABITS - ROW_BITS);
+    localparam STACK_BANKS = 8;  // what fits under the world's height
+    localparam STACKS = (BANKS + STACK_BANKS - 1) / STACK_BANKS;
 
     wire clk = WR_CLK[0];
     wire [ABITS-1:0] waddr0, waddr1;
@@ -77,31 +78,22 @@ module _ram_4r2w (RD_CLK, RD_EN, RD_ARST, RD_SRST, RD_ADDR, RD_DATA, WR_CLK, WR_
     wire [WIDTH-1:0] wdata = second ? wdata1 : wdata0;
 
     localparam OUT_BITS = RD_PORTS*WIDTH;
-    wire [(BANKS+1)*OUT_BITS-1:0] bank_out;
-    assign bank_out[OUT_BITS-1:0] = 0;
-    assign RD_DATA = bank_out[BANKS*OUT_BITS +: OUT_BITS];
-    genvar b, p;
+    wire [(STACKS+1)*OUT_BITS-1:0] stack_out;
+    assign stack_out[OUT_BITS-1:0] = 0;
+    assign RD_DATA = stack_out[STACKS*OUT_BITS +: OUT_BITS];
+    genvar s;
     generate
-        if (RD_PORTS == 4 && BANKS > 0) begin : map
-            for (b = 0; b < BANKS; b = b + 1) begin : bank
-                wire [RD_PORTS-1:0] enable;
-                wire [RD_PORTS*ROW_BITS-1:0] row;
-                for (p = 0; p < RD_PORTS; p = p + 1) begin : port
-                    assign row[p*ROW_BITS +: ROW_BITS] = RD_ADDR[p*ABITS +: ROW_BITS];
-                    if (BANK_BITS > 0)
-                        assign enable[p] = RD_ADDR[p*ABITS+ROW_BITS +: (BANK_BITS > 0 ? BANK_BITS : 1)] == b;
-                    else
-                        assign enable[p] = 1'b1;
-                end
-                wire select = BANK_BITS > 0 ? waddr[ABITS-1:(BANK_BITS > 0 ? ROW_BITS : 0)] == b : 1'b1;
-                wire [RD_PORTS*WIDTH-1:0] out;
-                ram_4r1w #(.DEPTH(ROWS), .ABITS(ROW_BITS), .WIDTH(WIDTH), .INIT(INIT[b*ROWS*WIDTH +: ROWS*WIDTH])) array (
-                    .aa(row[ROW_BITS-1:0]), .ab(row[2*ROW_BITS-1:ROW_BITS]),
-                    .ac(row[3*ROW_BITS-1:2*ROW_BITS]), .ad(row[4*ROW_BITS-1:3*ROW_BITS]),
-                    .ea(enable[0]), .eb(enable[1]), .ec(enable[2]), .ed(enable[3]),
-                    .wa(waddr[ROW_BITS-1:0]), .we(we && select), .wd(wdata),
-                    .ra(out[WIDTH-1:0]), .rb(out[2*WIDTH-1:WIDTH]), .rc(out[3*WIDTH-1:2*WIDTH]), .rd(out[4*WIDTH-1:3*WIDTH]));
-                assign bank_out[(b+1)*OUT_BITS +: OUT_BITS] = bank_out[b*OUT_BITS +: OUT_BITS] | out;
+        if (RD_PORTS == 4) begin : map
+            for (s = 0; s < STACKS; s = s + 1) begin : stack
+                localparam SBANKS = BANKS - s*STACK_BANKS < STACK_BANKS ? BANKS - s*STACK_BANKS : STACK_BANKS;
+                wire [OUT_BITS-1:0] out;
+                ram_stack #(.ROW_BITS(ROW_BITS), .BANKS(SBANKS), .BASE(s*STACK_BANKS), .ABITS(ABITS), .WIDTH(WIDTH),
+                            .INIT(INIT[s*STACK_BANKS*ROWS*WIDTH +: SBANKS*ROWS*WIDTH])) array (
+                    .aa(RD_ADDR[ABITS-1:0]), .ab(RD_ADDR[2*ABITS-1:ABITS]),
+                    .ac(RD_ADDR[3*ABITS-1:2*ABITS]), .ad(RD_ADDR[RD_PORTS*ABITS-1:(RD_PORTS-1)*ABITS]),
+                    .wa(waddr), .we(we), .wd(wdata),
+                    .ra(out[WIDTH-1:0]), .rb(out[2*WIDTH-1:WIDTH]), .rc(out[3*WIDTH-1:2*WIDTH]), .rd(out[RD_PORTS*WIDTH-1:(RD_PORTS-1)*WIDTH]));
+                assign stack_out[(s+1)*OUT_BITS +: OUT_BITS] = stack_out[s*OUT_BITS +: OUT_BITS] | out;
             end
         end
     endgenerate

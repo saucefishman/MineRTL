@@ -36,6 +36,12 @@ _ROW_PITCH = 6
 _REPEAT_EVERY = 2  # rows or columns between line repeaters; dust from a repeater reaches 15 cells
 
 _Y_WRITE, _Y_STORE, _Y_LOCK, _Y_MIDDLE, _Y_READ, _Y_CELL, _Y_WORD, _Y_READ_ADDR = 1, 2, 3, 4, 5, 6, 7, 9
+_BANK_PITCH = 16     # Y between a stack's banks; a whole number of tower inversions pairs
+_STACK_NORTH = 5     # Z past a bank's output pins, for towers and the way out
+_STACK_SOUTH_LOWER = 1  # Z past a bank's input pins of the tower of a pin on a lower plane
+_STACK_SOUTH_UPPER = 4  # and of a pin on the upper read address plane
+_STACK_SOUTH = 7
+_TOWER_TICKS = 8     # torches per bank
 _READ_PLANES = 4     # Y from one pair of read ports to the next
 _LINE_PITCH = 2      # X between decoder lines; each line's torches sit between it and the next
 _ADDR_PITCH = 4      # an address bit's true and complement lines
@@ -46,7 +52,7 @@ _STONE = BlockState("minecraft:smooth_quartz")
 _DUST = BlockState("minecraft:redstone_wire")
 # TODO: other port counts: more read ports need another S per pair, more write ports a per-bit OR.
 RAM_CELL = "ram_2r1w"
-RAM4_CELL = "ram_4r1w"
+RAM4_CELL = "ram_stack"
 DELAY_CELL = "ram_delay"
 # Chain cells before each tap of build_delay, 4 ticks a cell. After clk falls: the first write's window; a gap, since an
 # idle port's flip-flops hold 0 and switching to them as the window closes could reach its latches; settling for the second
@@ -118,18 +124,21 @@ def build_window() -> Macro:
     return _opaque(WINDOW_MACRO, size, blocks, pins, {"clk": {"window": 8}}, 1)
 
 
-def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int] | None = None, banked: bool = False) -> Macro:
-    """``reads`` is 2 or 4. ``init`` holds a preloaded word per row. ``banked`` adds an enable per read port: a disabled
-    port selects no row, so several arrays can OR their bitlines."""
-    abits = depth.bit_length() - 1
-    if abits < 1 or depth != 1 << abits:
+def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int] | None = None,
+              high_bits: int = 0, high: int = 0) -> Macro:
+    """``reads`` is 2 or 4. ``init`` holds a preloaded word per row. With ``high_bits``, addresses have that many more
+    bits, and this array answers only when they equal ``high``: several can share address lines and OR their bitlines."""
+    row_bits = depth.bit_length() - 1
+    if row_bits < 1 or depth != 1 << row_bits:
         raise ValueError(f"{name}: depth {depth} is not a power of two above 1")
+    abits = row_bits + high_bits
     decoder_x = _COLUMN_PITCH * width + 2
-    enable = _LINE_PITCH if banked else 0
-    read_a_x = decoder_x + enable
-    read_b_x = read_a_x + _ADDR_PITCH * abits + enable
-    write_x = decoder_x + _LINE_PITCH  # after the write enable line
-    size_x = read_b_x + _ADDR_PITCH * abits
+    read_a_x = decoder_x
+    read_b_x = read_a_x + _ADDR_PITCH * abits
+    enable_x = read_b_x + _ADDR_PITCH * abits  # write lines have their own X, so each pin can have its own tower
+    write_x = enable_x + _LINE_PITCH
+    write_end = write_x + _ADDR_PITCH * abits
+    size_x = write_end
     # Past the last row: the complement torch, the stub to it, the pin.
     last_row_gap = _ROW_PITCH * depth
     size_z = last_row_gap + 4
@@ -187,10 +196,9 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
         blocks[(x + 2, y, stub_z)] = _STONE
         blocks[(x + 2, y, stub_z - 1)] = BlockState("minecraft:redstone_wall_torch", facing="north", lit="true")
         for k, z in rows:
-            tap(x if k >> bit & 1 else x + 2, y, z)
+            tap(x if (k | high << row_bits) >> bit & 1 else x + 2, y, z)
 
     lock_rows = [(k, row_z(k) - 2) for k in range(depth)]
-    write_end = write_x + _ADDR_PITCH * abits
     ports = [("a", 0, -2, read_a_x), ("b", 0, 2, read_b_x)]
     if reads == 4:
         ports += [("c", _READ_PLANES, -2, read_a_x), ("d", _READ_PLANES, 2, read_b_x)]
@@ -200,20 +208,14 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
             row_line(_Y_WORD + up, z, line_x + _ADDR_PITCH * abits)
         for bit in range(abits):
             address_lines(line_x + _ADDR_PITCH * bit, _Y_READ_ADDR + up, f"a{port}[{bit}]", rows, bit)
-        if banked:
-            enable_x = line_x - enable
-            bitline(enable_x, _Y_READ_ADDR + up, size_z - 1)
-            add_pin(f"e{port}", Direction.IN, CardinalDirection.SOUTH, (enable_x, _Y_READ_ADDR + up, size_z - 1))
-            for _, z in rows:
-                tap(enable_x, _Y_READ_ADDR + up, z)
     for _, z in lock_rows:
         row_line(_Y_LOCK, z, write_end, high=True)
     for bit in range(abits):
         address_lines(write_x + _ADDR_PITCH * bit, _Y_READ, f"wa[{bit}]", lock_rows, bit)
-    bitline(decoder_x, _Y_READ, size_z - 1)
-    add_pin("we", Direction.IN, CardinalDirection.SOUTH, (decoder_x, _Y_READ, size_z - 1))
+    bitline(enable_x, _Y_READ, size_z - 1)
+    add_pin("we", Direction.IN, CardinalDirection.SOUTH, (enable_x, _Y_READ, size_z - 1))
     for _, z in lock_rows:
-        tap(decoder_x, _Y_READ, z)
+        tap(enable_x, _Y_READ, z)
 
     for i in range(width):
         sx = column_x(i)
@@ -268,9 +270,6 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
         for port in outs:
             arcs[f"a{port}[{bit}]"] = {f"r{port}[{i}]": read for i in range(width)}
         arcs[f"wa[{bit}]"] = {f"r{p}[{i}]": decode + along_row + written for p in outs for i in range(width)}
-    if banked:
-        for port in outs:
-            arcs[f"e{port}"] = {f"r{port}[{i}]": read for i in range(width)}
     arcs["we"] = {f"r{p}[{i}]": decode + along_row + written for p in outs for i in range(width)}
     for i in range(width):
         arcs[f"wd[{i}]"] = {f"r{p}[{i}]": along_column + written for p in outs}
@@ -302,6 +301,80 @@ def build_delay(name: str = "ram_delay") -> Macro:
     return _opaque(name, size, blocks, pins, {"clk": arcs}, 1)
 
 
+def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, width: int, init: list[int]) -> Macro:
+    """``banks`` 4-read arrays one above the other, as one block, holding bank numbers ``base`` up. Every input pin feeds a
+    torch tower beside its line; each bank's line taps the tower. Each output has a tower too, which every bank's bitline
+    powers at its own level, so the top of the tower is the OR of the banks. Lines near towers are repeaters, which ignore
+    them. A tower inverts twice per 4 blocks, so its tap levels agree.
+    """
+    depth = 1 << row_bits
+    high_bits = abits - row_bits
+    arrays = [build_ram(name, depth, width, 4, init[k * depth:(k + 1) * depth], high_bits, base + k) for k in range(banks)]
+    bank = arrays[0].footprint
+    north = _STACK_NORTH
+    south = _STACK_SOUTH
+    size = (bank.width + 1, bank.height + _BANK_PITCH * (banks - 1), north + bank.depth + south)
+    blocks: dict[Pos, BlockState] = {}
+    for k, array in enumerate(arrays):
+        for (x, y, z), block in array.blocks:
+            blocks[(x, y + _BANK_PITCH * k, z + north)] = block
+
+    def line(x: int, y: int, z: int, facing: str = "south") -> None:
+        blocks[(x, y, z)] = _repeater(facing)
+        blocks[(x, y - 1, z)] = _GLASS
+
+    def tower(x: int, z: int, bottom: int) -> None:
+        """Up from ``bottom`` through the last bank's level, in the state of an idle low signal."""
+        top = bottom + _BANK_PITCH * (banks - 1)
+        for y in range(bottom, top + 1, 2):
+            blocks[(x, y, z)] = _STONE
+            if y < top:
+                blocks[(x, y + 1, z)] = _torch((y - bottom) // 2 % 2 == 0)
+
+    pins: list[PinRef] = []
+    arcs_in = _TOWER_TICKS * banks
+    for pin in arrays[0].pins:
+        x, y = pin.offset[0], pin.offset[1]
+        if pin.direction == Direction.IN:
+            # Upper read pins' towers sit further out: a lower line reaches its pin under them. So does write enable's,
+            # whose tower would otherwise touch the first write address line.
+            z = north + bank.depth + (_STACK_SOUTH_UPPER if y > _Y_READ_ADDR or pin.name == "we" else _STACK_SOUTH_LOWER)
+            tower(x + 1, z, y)
+            for k in range(banks):
+                level = y + _BANK_PITCH * k
+                blocks[(x, level, z)] = _DUST
+                blocks[(x, level - 1, z)] = _GLASS
+                for approach in range(north + bank.depth, z):
+                    line(x, level, approach)
+            for out in range(z + 1, size[2]):
+                line(x + 1, y, out)
+            pins.append(PinRef(name=pin.name, direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(x + 1, y, 0)))
+        else:
+            upper = y > _Y_READ
+            # An upper line steps aside, as the lower line's tower passes its level. Mirrored, so that neighbouring
+            # bits' steps don't touch.
+            tower_x = x + (1 if pin.name[1] == "d" else -1) if upper else x
+            for k in range(banks):
+                level = y + _BANK_PITCH * k
+                if upper:
+                    blocks[(x, level, north - 1)] = _DUST
+                    blocks[(x, level - 1, north - 1)] = _GLASS
+                    blocks[(tower_x, level, north - 1)] = _DUST
+                    blocks[(tower_x, level - 1, north - 1)] = _GLASS
+                    line(tower_x, level, north - 2)
+                else:
+                    line(x, level, north - 1)
+                    line(x, level, north - 2)
+            tower(tower_x, north - 3, y)
+            top = y + _BANK_PITCH * (banks - 1)
+            line(tower_x, top, north - 4)
+            line(tower_x, top, north - 5)
+            pins.append(PinRef(name=pin.name, direction=Direction.OUT, side=CardinalDirection.NORTH,
+                               offset=(tower_x, top, size[2] - 1)))
+    arcs = {pin: {out: ticks + arcs_in for out, ticks in outs.items()} for pin, outs in arrays[0].arcs.items()}
+    return _opaque(name, size, blocks, pins, arcs, len(init) * width)
+
+
 _built: dict[str, Macro] = {}
 
 
@@ -315,14 +388,15 @@ def block_for_cell(cell_type: str, parameters: dict[str, str]) -> Macro:
         block = build_window()
     elif cell_type == DELAY_CELL:
         block = build_delay()
-    else:
+    elif cell_type == RAM_CELL:
         depth, width = int(parameters["DEPTH"], 2), int(parameters["WIDTH"], 2)
-        if cell_type == RAM_CELL:
-            block = build_ram(f"ram_{depth}x{width}", depth, width)
-        else:
-            # Written lsb last by yosys. An undefined bit powers up 0.
-            bits = parameters["INIT"].replace("x", "0").zfill(depth * width)[::-1]
-            init = [int(bits[k * width:(k + 1) * width][::-1], 2) for k in range(depth)]
-            digest = hashlib.sha256(bits.encode()).hexdigest()[:8]
-            block = build_ram(f"ram4_{depth}x{width}_{digest}", depth, width, 4, init, banked=True)
+        block = build_ram(f"ram_{depth}x{width}", depth, width)
+    else:
+        row_bits, banks, base, abits, width = (int(parameters[k], 2) for k in ("ROW_BITS", "BANKS", "BASE", "ABITS", "WIDTH"))
+        words = banks << row_bits
+        # Written lsb last by yosys. An undefined bit powers up 0.
+        bits = parameters["INIT"].replace("x", "0").zfill(words * width)[::-1]
+        init = [int(bits[k * width:(k + 1) * width][::-1], 2) for k in range(words)]
+        digest = hashlib.sha256(bits.encode()).hexdigest()[:8]
+        block = build_stack(f"stack_{words}x{width}_{base}_{abits}_{digest}", row_bits, banks, base, abits, width, init)
     return _built.setdefault(block.name, block)

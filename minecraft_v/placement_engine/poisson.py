@@ -693,6 +693,8 @@ def _long_macros(gates: list[Component]) -> list[int]:
 _BANK_LOG_EVERY = 200
 _BANK_SPOT_TRIES = (20000, 200000, 2000000)
 _BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
+_BANK_STACK_HEIGHT = 190  # worlds aren't tall enough for one stack of a big memory
+_BANK_COLUMN_GAP = 4
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
                             # spill onto later gates' targets and each search walks through all that's piled there
 
@@ -709,14 +711,22 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
 
     The domain is the box's footprint plus east_room in X, and as tall as the gates need.
     """
-    width = max(gates[i].footprint.width for i in banks)
     depth = max(gates[i].footprint.depth for i in banks)
     fixed: dict[int, np.ndarray] = {}
-    y = 0.0
+    y = x = top = 0.0
+    column_width = 0
     # Widest at the bottom: a wider bank above would overhang the pins on the east end of the one below.
     for i in sorted(banks, key=lambda i: -gates[i].footprint.width):
-        fixed[i] = np.array([0.0, y, float(channel)])
-        y += gates[i].footprint.height + _BANK_Y_GAP
+        fp = gates[i].footprint
+        if y and y + fp.height > _BANK_STACK_HEIGHT:  # a new stack, along X
+            x += column_width + _BANK_COLUMN_GAP
+            y, column_width = 0.0, 0
+        fixed[i] = np.array([x, y, float(channel)])
+        y += fp.height + _BANK_Y_GAP
+        top = max(top, y)
+        column_width = max(column_width, fp.width)
+    width = x + column_width
+    y = top
     box = (np.zeros(3), np.array([width + channel, y, depth + 2.0 * channel]))
     free = [i for i in range(len(gates)) if i not in fixed]
     volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
