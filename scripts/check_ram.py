@@ -26,19 +26,22 @@ NORMAL = {"east": (1, 0), "north": (0, -1), "south": (0, 1)}
 def array_script(depth: int, width: int, seed: int) -> str:
     rng = random.Random(seed)
     mask = (1 << width) - 1
+    abits = depth.bit_length() - 1
     words = [rng.randrange(mask + 1) for _ in range(depth)]
-    lines = [f"set {line}[{k}] 1" for k in range(depth) for line in ("lock", "nra", "nrb")] + [f"settle {ARRAY_SETTLE}"]
+
+    def address(pin: str, value: int) -> list[str]:
+        return [f"set {pin}[{b}] {value >> b & 1}" for b in range(abits)]
+
+    lines = ["set we 0"] + address("wa", 0) + address("aa", 0) + address("ab", 0) + [f"settle {ARRAY_SETTLE}"]
     for k, word in [(k, ~w & mask) for k, w in enumerate(words)] + list(enumerate(words)):
-        lines += [f"set wd[{i}] {word >> i & 1}" for i in range(width)]
-        lines += [f"settle {ARRAY_SETTLE}", f"set lock[{k}] 0", f"settle {ARRAY_SETTLE}", f"set lock[{k}] 1", f"settle {ARRAY_SETTLE}"]
+        lines += address("wa", k) + [f"set wd[{i}] {word >> i & 1}" for i in range(width)]
+        lines += [f"settle {ARRAY_SETTLE}", "set we 1", f"settle {ARRAY_SETTLE}", "set we 0", f"settle {ARRAY_SETTLE}"]
     lines += [f"set wd[{i}] 0" for i in range(width)] + [f"settle {ARRAY_SETTLE}"]
     for a in range(depth):
         b = depth - 1 - a
-        lines += [f"set nra[{a}] 0", f"set nrb[{b}] 0", f"settle {ARRAY_SETTLE}"]
+        lines += address("aa", a) + address("ab", b) + [f"settle {ARRAY_SETTLE}"]
         lines += [f"expect ra[{i}] {words[a] >> i & 1}" for i in range(width)]
         lines += [f"expect rb[{i}] {words[b] >> i & 1}" for i in range(width)]
-        lines += [f"set nra[{a}] 1", f"set nrb[{b}] 1", f"settle {ARRAY_SETTLE}"]
-        lines += [f"expect {port}[{i}] 0" for port in ("ra", "rb") for i in range(width)]
     return "\n".join(lines) + "\n"
 
 

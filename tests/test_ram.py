@@ -56,9 +56,14 @@ def test_pins_are_repeaters_on_their_faces(macro):
 
 def test_array_pins():
     pins = {p.name: p.direction for p in build_ram("ram", 4, 2).pins}
-    assert len(pins) == 3 * 4 + 3 * 2
-    assert pins["lock[3]"] == pins["nrb[0]"] == pins["wd[1]"] == Direction.IN
+    assert len(pins) == 3 * 2 + 1 + 3 * 2
+    assert pins["aa[1]"] == pins["ab[0]"] == pins["wa[1]"] == pins["we"] == pins["wd[1]"] == Direction.IN
     assert pins["ra[1]"] == pins["rb[0]"] == Direction.OUT
+
+
+def test_depth_must_be_a_power_of_two():
+    with pytest.raises(ValueError):
+        build_ram("ram", 3, 2)
 
 
 def test_blocks_fit_the_footprint():

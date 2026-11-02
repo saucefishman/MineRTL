@@ -1,7 +1,8 @@
 // Port directions of the tiled array, for yosys; the blocks come from placement_engine/ram.py.
 (* blackbox *)
-module ram_2r1w #(parameter DEPTH = 1, parameter WIDTH = 1) (
-    input [DEPTH-1:0] nra, nrb, lock,
+module ram_2r1w #(parameter DEPTH = 2, parameter ABITS = 1, parameter WIDTH = 1) (
+    input [ABITS-1:0] aa, ab, wa,
+    input we,
     input [WIDTH-1:0] wd,
     output [WIDTH-1:0] ra, rb);
 endmodule

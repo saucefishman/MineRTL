@@ -2,6 +2,7 @@
 
 No routing inside. Lines along X and lines along Z sit on different planes, so they never cross:
 
+    y 9  read address lines (Z), decoder only, on glass and the blocks of its taps
     y 7  read wordlines (X), on the row blocks of plane 6
     y 6  S, a comparator per read port, its side repeater, the block that drives the bitline
     y 5  read bitlines (Z), under those blocks; second torch
@@ -14,8 +15,9 @@ No routing inside. Lines along X and lines along Z sit on different planes, so t
 A read port's comparator subtracts its active-low wordline from S, so a selected row drives the bitline with its bit
 and any other row with nothing. Bitlines are wired ORs. Two torches carry the stored bit from F up to S.
 
-Pins are active low row lines and plain bitlines. Decoding stays in gates, see techmap/ram_2r1w.v, and writes take the
-self-closing pulse of build_window.
+East of the bits is the decoder: a NOR per row. Each address bit has a true and a complement line, and any line that
+mismatches a row holds it high through a torch. Write address and write enable lines run on plane 5, under the row blocks.
+Pins are addresses, write enable and bitlines. Writes take the self-closing pulse of build_window, see techmap/ram_2r1w.v.
 """
 from __future__ import annotations
 
@@ -31,7 +33,10 @@ _COLUMN_PITCH = 6
 _ROW_PITCH = 6
 _REPEAT_EVERY = 2  # rows or columns between line repeaters; dust from a repeater reaches 15 cells
 
-_Y_WRITE, _Y_STORE, _Y_LOCK, _Y_MIDDLE, _Y_READ, _Y_CELL, _Y_WORD = 1, 2, 3, 4, 5, 6, 7
+_Y_WRITE, _Y_STORE, _Y_LOCK, _Y_MIDDLE, _Y_READ, _Y_CELL, _Y_WORD, _Y_READ_ADDR = 1, 2, 3, 4, 5, 6, 7, 9
+_LINE_PITCH = 2      # X between decoder lines; each line's torches sit between it and the next
+_ADDR_PITCH = 4      # an address bit's true and complement lines
+_DECODER_REPEAT = 12 # X between repeaters on a row line in the decoder; on even X, under a line, never under a torch
 
 _GLASS = BlockState("minecraft:glass")
 _STONE = BlockState("minecraft:smooth_quartz")
@@ -103,9 +108,19 @@ def build_window() -> Macro:
 
 
 def build_ram(name: str, depth: int, width: int) -> Macro:
-    size_x = _COLUMN_PITCH * width + 1
-    size_z = _ROW_PITCH * depth + 1
-    size_y = _Y_WORD + 1
+    abits = depth.bit_length() - 1
+    if abits < 1 or depth != 1 << abits:
+        raise ValueError(f"{name}: depth {depth} is not a power of two above 1")
+    decoder_x = _COLUMN_PITCH * width + 2
+    read_a_x = decoder_x
+    read_b_x = read_a_x + _ADDR_PITCH * abits
+    write_x = decoder_x + _LINE_PITCH  # after the write enable line
+    size_x = read_b_x + _ADDR_PITCH * abits
+    # Past the last row: the complement torch, the stub to it, the pin.
+    last_row_gap = _ROW_PITCH * depth
+    size_z = last_row_gap + 4
+    stub_z = size_z - 2
+    size_y = _Y_READ_ADDR + 1
     blocks: dict[Pos, BlockState] = {}
     pins: list[PinRef] = []
 
@@ -119,36 +134,66 @@ def build_ram(name: str, depth: int, width: int) -> Macro:
         pins.append(PinRef(name=pin, direction=direction, side=side,
                            offset=(pos[0], pos[1], size_z - 1 - pos[2])))
 
-    def row_line(pin: str, y: int, z: int) -> None:
-        """Active low line along X on row blocks, from its pin at the east end."""
-        for x in range(size_x):
+    def row_line(y: int, z: int, end_x: int) -> None:
+        """Active low line along X on row blocks, driven by the decoder's torches at its east end."""
+        for x in range(end_x):
             blocks[(x, y - 1, z)] = _STONE
-            gap = x % _COLUMN_PITCH == 0
-            blocks[(x, y, z)] = _repeater("east") if gap and (x == size_x - 1 or x // _COLUMN_PITCH % _REPEAT_EVERY == 0) \
-                else _DUST
-        add_pin(pin, Direction.IN, CardinalDirection.EAST, (size_x - 1, y, z))
+            if x < decoder_x:
+                gap = x % _COLUMN_PITCH == 0
+                repeat = gap and (x == decoder_x - 2 or x // _COLUMN_PITCH % _REPEAT_EVERY == 0)
+            else:
+                repeat = (x - decoder_x) % _DECODER_REPEAT == 0
+            blocks[(x, y, z)] = _repeater("east") if repeat else _DUST
 
-    def bitline(x: int, y: int) -> None:
-        """Line along Z flowing north on glass. Repeaters sit in the gaps between rows."""
-        for z in range(size_z):
+    def bitline(x: int, y: int, end_z: int) -> None:
+        """Line along Z flowing north on glass. Repeaters sit in the gaps between rows, and its south end is one."""
+        for z in range(end_z + 1):
             blocks[(x, y - 1, z)] = _GLASS
-            gap = z % _ROW_PITCH == 0
-            blocks[(x, y, z)] = _repeater("south") if gap and (z in (0, size_z - 1) or z // _ROW_PITCH % _REPEAT_EVERY == 0) \
-                else _DUST
+            repeat = z in (0, end_z) or (z <= last_row_gap and z % _ROW_PITCH == 0 and z // _ROW_PITCH % _REPEAT_EVERY == 0)
+            blocks[(x, y, z)] = _repeater("south") if repeat else _DUST
 
+    def tap(x: int, y: int, z: int) -> None:
+        """Row line at y - 2 high while line x at y is low: the line powers a block, whose torch sits over the row."""
+        blocks[(x, y - 1, z)] = _STONE
+        blocks[(x + 1, y - 1, z)] = BlockState("minecraft:redstone_wall_torch", facing="east", lit="true")
+
+    def address_lines(x: int, y: int, pin: str, rows: list[tuple[int, int]], bit: int) -> None:
+        """A bit's true line at x and complement at x + 2; each (row number, row line z) mismatching taps one of them."""
+        bitline(x, y, size_z - 1)
+        add_pin(pin, Direction.IN, CardinalDirection.SOUTH, (x, y, size_z - 1))
+        bitline(x + 2, y, stub_z - 2)
+        blocks[(x + 1, y - 1, stub_z)] = _GLASS
+        blocks[(x + 1, y, stub_z)] = _DUST
+        blocks[(x + 2, y - 1, stub_z)] = _GLASS
+        blocks[(x + 2, y, stub_z)] = _STONE
+        blocks[(x + 2, y, stub_z - 1)] = BlockState("minecraft:redstone_wall_torch", facing="north", lit="true")
+        for k, z in rows:
+            tap(x if k >> bit & 1 else x + 2, y, z)
+
+    read_a_rows = [(k, row_z(k) - 2) for k in range(depth)]
+    read_b_rows = [(k, row_z(k) + 2) for k in range(depth)]
+    lock_rows = [(k, row_z(k) - 2) for k in range(depth)]
+    write_end = write_x + _ADDR_PITCH * abits
     for k in range(depth):
-        z = row_z(k)
-        row_line(f"nra[{k}]", _Y_WORD, z - 2)
-        row_line(f"nrb[{k}]", _Y_WORD, z + 2)
-        row_line(f"lock[{k}]", _Y_LOCK, z - 2)
+        row_line(_Y_WORD, read_a_rows[k][1], read_b_x)
+        row_line(_Y_WORD, read_b_rows[k][1], size_x)
+        row_line(_Y_LOCK, lock_rows[k][1], write_end)
+    for bit in range(abits):
+        address_lines(read_a_x + _ADDR_PITCH * bit, _Y_READ_ADDR, f"aa[{bit}]", read_a_rows, bit)
+        address_lines(read_b_x + _ADDR_PITCH * bit, _Y_READ_ADDR, f"ab[{bit}]", read_b_rows, bit)
+        address_lines(write_x + _ADDR_PITCH * bit, _Y_READ, f"wa[{bit}]", lock_rows, bit)
+    bitline(decoder_x, _Y_READ, size_z - 1)
+    add_pin("we", Direction.IN, CardinalDirection.SOUTH, (decoder_x, _Y_READ, size_z - 1))
+    for _, z in lock_rows:
+        tap(decoder_x, _Y_READ, z)
 
     for i in range(width):
         sx = column_x(i)
-        bitline(sx - 3, _Y_WRITE)
+        bitline(sx - 3, _Y_WRITE, size_z - 1)
         add_pin(f"wd[{i}]", Direction.IN, CardinalDirection.SOUTH, (sx - 3, _Y_WRITE, size_z - 1))
-        bitline(sx + 2, _Y_READ)
+        bitline(sx + 2, _Y_READ, last_row_gap)
         add_pin(f"ra[{i}]", Direction.OUT, CardinalDirection.NORTH, (sx + 2, _Y_READ, 0))
-        bitline(sx - 2, _Y_READ)
+        bitline(sx - 2, _Y_READ, last_row_gap)
         add_pin(f"rb[{i}]", Direction.OUT, CardinalDirection.NORTH, (sx - 2, _Y_READ, 0))
         for k in range(depth):
             z = row_z(k)
@@ -177,16 +222,19 @@ def build_ram(name: str, depth: int, width: int) -> Macro:
                 blocks[(out_x, _Y_CELL, z)] = _STONE
 
     # Worst paths, in repeater ticks. A written bit goes through its latch and both torches before the read tap.
-    along_row = 1 + width // _REPEAT_EVERY + 1
+    along_decoder = 1 + (size_x - decoder_x) // _DECODER_REPEAT
+    along_row = along_decoder + 1 + width // _REPEAT_EVERY
     along_column = 1 + depth // _REPEAT_EVERY + 1
-    tap = 2  # side repeater or torch, then comparator
-    read = along_row + tap + along_column
+    decode = 1 + depth // _REPEAT_EVERY + 2  # along the address line, complement torch, tap torch
+    tap_ticks = 2  # side repeater or torch, then comparator
+    read = decode + along_row + tap_ticks + along_column
     written = 4 + along_column
     arcs: dict[str, dict[str, int]] = {}
-    for k in range(depth):
-        arcs[f"nra[{k}]"] = {f"ra[{i}]": read for i in range(width)}
-        arcs[f"nrb[{k}]"] = {f"rb[{i}]": read for i in range(width)}
-        arcs[f"lock[{k}]"] = {f"{p}[{i}]": along_row + written for p in ("ra", "rb") for i in range(width)}
+    for bit in range(abits):
+        arcs[f"aa[{bit}]"] = {f"ra[{i}]": read for i in range(width)}
+        arcs[f"ab[{bit}]"] = {f"rb[{i}]": read for i in range(width)}
+        arcs[f"wa[{bit}]"] = {f"{p}[{i}]": decode + along_row + written for p in ("ra", "rb") for i in range(width)}
+    arcs["we"] = {f"{p}[{i}]": decode + along_row + written for p in ("ra", "rb") for i in range(width)}
     for i in range(width):
         arcs[f"wd[{i}]"] = {f"{p}[{i}]": along_column + written for p in ("ra", "rb")}
     return _opaque(name, (size_x, size_y, size_z), blocks, pins, arcs, depth * width)
