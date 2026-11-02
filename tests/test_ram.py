@@ -5,8 +5,17 @@ from pathlib import Path
 
 import pytest
 
+from dataclasses import replace
+
+import numpy as np
+from litemapy import BlockState, Region
+
+from minecraft_v.placement_engine.block_utils import BulkRegion
+from minecraft_v.placement_engine.cosmetics import apply_dust_shapes
 from minecraft_v.placement_engine.ir import Direction
-from minecraft_v.placement_engine.ram import build_ram, build_window
+from minecraft_v.placement_engine.propagate import comparator_entity, settle
+from minecraft_v.placement_engine.ram import (StackSpec, build_group, build_ram, build_stack, build_window, group_block,
+                                              set_block_cache, settled_block)
 
 ROOT = Path(__file__).parent.parent
 
@@ -70,3 +79,94 @@ def test_blocks_fit_the_footprint():
     macro = build_ram("ram", 2, 2)
     size = macro.footprint.width, macro.footprint.height, macro.footprint.depth
     assert all(0 <= p[a] < size[a] for p, _ in macro.blocks for a in range(3))
+
+
+def _spec(words: int = 8) -> StackSpec:
+    init = [(i * 5 + 3) % 8 for i in range(words)]
+    nets = {f"{port}[{i}]": f"{port}{i}" for port in ("aa", "ab", "ac", "ad", "wa") for i in range(3)}
+    nets.update({f"wd[{i}]": f"wd{i}" for i in range(3)})
+    nets["we"] = "we"
+    return StackSpec(3, 1, 0, 3, 3, init, nets)
+
+
+def _world(block, cells_of, high: list[str], margin: int = 6) -> BulkRegion:
+    """The block in a larger region, with a lever-driven block on the given pins. cells_of: its blocks, as a BlockArrays."""
+    fp = block.footprint
+    region = BulkRegion(0, 0, 0, fp.width + 2 * margin, fp.height + 2 * margin, fp.depth + 2 * margin)
+    region.paste(cells_of.xs + margin, cells_of.ys + margin, cells_of.zs + margin, cells_of.ids, cells_of.palette)
+    region.tile_entities.extend(comparator_entity((x + margin, y + margin, z + margin), level) for (x, y, z), level in cells_of.comparators)
+    pins = {pin.name: pin for pin in block.pins}
+    high = [f"s0_{name}" for name in high]
+    for name in high:
+        x, y, z = block.terminals[f"tile:{name}"]
+        x, y, z = x + margin, y + margin, z + margin
+        region[x, y, z + 1] = BlockState("minecraft:stone")
+        region[x, y + 1, z + 1] = BlockState("minecraft:lever", face="floor", facing="north", powered="true")
+    assert all(pins[name].direction == Direction.IN for name in high)
+    return region
+
+
+def _cells(region: BulkRegion) -> dict:
+    blocks, palette = region._Region__blocks, region._Region__palette
+    props = {}
+    for x, y, z in np.argwhere(blocks != 0).tolist():
+        props[x, y, z] = palette[blocks[x, y, z]]
+    return props
+
+
+@pytest.mark.parametrize("high", [
+    [],
+    ["aa[0]", "ab[2]"],  # another row read
+    ["aa[0]", "aa[1]", "aa[2]", "ab[0]", "ac[1]", "ad[2]"],
+    ["we"],  # a write held open: row 0 takes wd
+    ["we", "wd[0]", "wd[2]", "wa[1]"],
+])
+def test_settled_block_with_wire_on_it_settles_like_the_whole_thing(high):
+    block, _, _ = build_group("g", [_spec(), replace(_spec(), base=0, nets={})])
+    whole = _world(block, block.arrays_oriented(False, False), high)
+    apply_dust_shapes(whole)
+    settle(whole)
+    alone = settled_block(block)
+    fp = block.footprint
+    box = ((6, 6, 6), (6 + fp.width, 6 + fp.height, 6 + fp.depth))
+    region = _world(alone, alone.settled, high)
+    apply_dust_shapes(region, [box])
+    settle(region, [box])
+    assert _cells(region) == _cells(whole)
+    saved = lambda r: sorted((e.position, int(e.to_nbt()["OutputSignal"])) for e in r.tile_entities)
+    assert saved(region) == saved(whole)
+
+
+def test_block_cache_returns_the_same_block(tmp_path):
+    set_block_cache(tmp_path)
+    try:
+        specs = [_spec(), replace(_spec(), init=[1] * 8)]
+        made, own, lanes = group_block(specs)
+        again, own_again, lanes_again = group_block([replace(s, nets={p: f"other_{n}" for p, n in s.nets.items()}) for s in specs])
+    finally:
+        set_block_cache(None)
+    assert len(list(tmp_path.iterdir())) == 1
+    assert own == own_again and {f"other_{n}": pin for n, pin in lanes.items()} == lanes_again
+    assert made.footprint == again.footprint and made.pins == again.pins
+    assert made.settled.palette == again.settled.palette and made.settled.comparators == again.settled.comparators
+    assert np.array_equal(made.settled.ids, again.settled.ids) and np.array_equal(made.settled.xs, again.settled.xs)
+
+
+def test_preload_survives_settling_and_comparators_keep_their_signal():
+    spec = _spec()
+    block = settled_block(build_stack("s", spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init))
+    # Row 0 is read at rest, holding 3 = 011: two bits on each of four read ports.
+    assert sorted(level for _, level in block.settled.comparators) == [15] * 8
+
+
+def test_bulk_region_saves_what_region_saves():
+    rng = np.random.default_rng(1)
+    for size, kinds in (((5, 3, 4), 3), ((17, 9, 11), 30), ((64, 2, 3), 2)):
+        plain, bulk = Region(0, 0, 0, *size), BulkRegion(0, 0, 0, *size)
+        palette = [BlockState("minecraft:air")] + [BlockState(f"minecraft:b{i}") for i in range(kinds)]
+        for pos, pick in zip(np.ndindex(size), rng.integers(0, kinds + 1, np.prod(size)).tolist()):
+            plain[pos] = palette[pick]
+            bulk[pos] = palette[pick]
+        ours, theirs = bulk.to_nbt(), plain.to_nbt()
+        assert np.array_equal(np.asarray(ours["BlockStates"]), np.asarray(theirs["BlockStates"]))
+        assert ours.keys() == theirs.keys() and ours["BlockStatePalette"] == theirs["BlockStatePalette"]
