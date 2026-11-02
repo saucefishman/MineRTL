@@ -13,6 +13,7 @@ just outside the gates (_io_rows).
 """
 from __future__ import annotations
 
+import os
 import heapq
 import math
 import time
@@ -685,7 +686,8 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
             # so they go past its east end, not in front of its pins.
             output_z = max(pos_all[i, 2] + netlist.comps[i].footprint.depth for i in blocks) + _SOUTH_PINS_OUTPUT_Z
             east = max(pos_all[i, 0] + netlist.comps[i].footprint.width for i in blocks) + _IO_COLUMN_CLEAR
-            pos_all[outputs, 0] += east - pos_all[outputs, 0].min()
+            order = sorted(outputs, key=lambda i: pos_all[i, 0])
+            pos_all[order, 0] = east + _SOUTH_PINS_OUTPUT_PITCH * np.arange(len(order))
     pos_all[outputs, 2] = output_z
 
 
@@ -703,7 +705,8 @@ _BANK_Y_GAP = 4  # banks in a stack; too small for wire to get lost in
 _BANK_STACK_HEIGHT = 190  # worlds aren't tall enough for one stack of a big memory
 _BANK_COLUMN_GAP = 4
 _SOUTH_PINS_CLEAR = 24  # Z past a south_pins block's face, for the output row and wire to its pins
-_SOUTH_PINS_DENSITY = 0.3
+_SOUTH_PINS_DENSITY = float(os.environ.get("RAM_GATE_DENSITY", 0.3))
+_SOUTH_PINS_OUTPUT_PITCH = 4
 _SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
                             # spill onto later gates' targets and each search walks through all that's piled there

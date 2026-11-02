@@ -39,3 +39,4 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Open: a preloaded group with one stack's read address not shared with the other (a0 = m[~addr0] in examples/preload) reads a0 and a2 stuck, same on old code. Not looked into.
 - Acceptance: scripts/check_floweypu.py <lit> <pins> <half> (PYTHONPATH=scripts). Fanout-first (ROUTE_FIRST_FANOUT) experiment: scratchpad f64, f16.
 - Native sample: 83% of router in A*, half of that _Cells_load via Python set probes. Agent astar-speed working on it. STACK_DUMP_EVERY's watchdog spins a core: don't use. f64 no faster than baseline by 30 min; failures a bit fewer.
+- Density: RAM_GATE_DENSITY 0.15 reaches rank 15036 in under 15 min vs 35 at 0.3. Testing 0.10, 0.07.
