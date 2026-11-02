@@ -12,6 +12,9 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Heartbeat every 5 minutes: check nothing is frozen.
 - World height 376, can be optimised later. Server clock lever, no generated clock.
 
+- Stay faithful to the original; adjust only for legitimate impossibilities in synthesis.
+- Test program: prints ASCII characters one at a time: 1, 2, 3, H, I (user said "counts down", but gave this order; order as given). Output on the CPU's character ports (e0/d0, e1/d1).
+
 ## State
 - Branch at beef260: main merged. RAM work in minecraft_v/placement_engine/ram.py, techmap/ram_*.v, flag --tiled-ram.
 - All stacks in a design become one `ram_group` block: lanes for shared nets, pins all on south face, gates south of it.
