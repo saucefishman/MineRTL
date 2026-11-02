@@ -1294,15 +1294,32 @@ cdef class _Cells:
         return 0
 
 
-cdef inline bint dominated(FlatMap[NodeInfo]* nodes, long long node, double g):
-    cdef int d = (node >> SIG_SHIFT) & 15, k
+cdef extern from *:
+    "#define count_trailing_zeros(x) __builtin_ctz(x)"
+    int count_trailing_zeros(unsigned int x) nogil
+
+
+cdef inline bint dominated(FlatMap[NodeInfo]* nodes, FlatMap[unsigned int]* depths, long long node, double g):
+    """Whether a node with less signal depth, otherwise the same, is known at no more cost.
+    depths: which signal depths exist per node with its depth cleared, so only those are looked up."""
+    cdef int d = (node >> SIG_SHIFT) & 15
+    if d == 0:
+        return False
     cdef long long base = node & ~(<long long>15 << SIG_SHIFT)
-    cdef NodeInfo* other
-    for k in range(d):
-        other = nodes.find(base | (<long long>k << SIG_SHIFT))
-        if other != NULL and other.g <= g:
+    cdef unsigned int* present = depths.find(base)
+    if present == NULL:
+        return False
+    cdef unsigned int bits = present[0] & ((1u << d) - 1)
+    while bits:
+        if nodes.find(base | (<long long>count_trailing_zeros(bits) << SIG_SHIFT)).g <= g:
             return True
+        bits &= bits - 1
     return False
+
+
+cdef inline void note_depth(FlatMap[unsigned int]* depths, long long node) noexcept:
+    cdef int ins
+    depths.get(node & ~(<long long>15 << SIG_SHIFT), &ins)[0] |= 1u << ((node >> SIG_SHIFT) & 15)
 
 
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
@@ -1320,6 +1337,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef _Cells cells = _Cells()
     cdef CameFrom came_from = CameFrom()
     cdef FlatMap[NodeInfo]* nodes = &came_from.nodes
+    cdef FlatMap[unsigned int] depths_store
+    cdef FlatMap[unsigned int]* depths = &depths_store
     cdef vector[HeapEntry] heap
     cdef vector[long long] gbest = group_best_h
     cdef vector[double] gmax = group_max_f
@@ -1365,6 +1384,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         np.g = 0
         np.parent = -1
         np.expanded = False
+        note_depth(depths, node)
         h = cells.h[node >> NODE_SHIFT]
         e.f = weight * h
         e.neg_h = -h
@@ -1399,7 +1419,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             continue
         # Dominance: the same state with less signal depth at no more cost reaches everything
         # this one can (it is expanded first, or was dominated in turn).
-        if not ni.expanded and dominated(nodes, e.node, e.g):
+        if not ni.expanded and dominated(nodes, depths, e.node, e.g):
             continue
         cid = <int>(e.node >> NODE_SHIFT)
         h = cells.h[cid]
@@ -1520,7 +1540,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                                      cells.m4_cells[i + 2] - m.dz)
             nkey = ((<long long>m.dest << NODE_SHIFT) | m.arrive | snap
                     | (<long long>(ndepth | (ncand << 4)) << SIG_SHIFT))
-            if dominated(nodes, nkey, new_g):
+            if dominated(nodes, depths, nkey, new_g):
                 continue
             np = nodes.find(nkey)
             if np != NULL:
@@ -1534,6 +1554,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 np.g = new_g
                 np.parent = -1
                 np.expanded = False
+                note_depth(depths, nkey)
             if m.h <= h_limit or m.near:
                 ne.f = new_g + weight * m.h
                 ne.neg_h = -m.h
