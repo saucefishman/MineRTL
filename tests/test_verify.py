@@ -455,3 +455,37 @@ def test_torch_drop_going_on_is_not_a_latch():
     _wire(region, owner, "a", _line_x(4, 7, 3, 8))
     violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 8)])}, owner)
     assert not any(v.kind == "latch" for v in violations)
+
+
+def test_repeater_across_a_pin_cell_is_open():
+    """hf3's net_2367 and three nets on h1: wire ran past a gate's pin with a repeater on the pin's cell, and the gate
+    never switched."""
+    region, owner = _region(), {}
+    _wire(region, owner, "a", _line_x(2, 3, 3, 5) + _line_x(5, 6, 3, 5))
+    region[4, 3, 5] = _repeater((-1, 0))
+    region[4, 2, 5] = STONE
+    region[4, 3, 4] = _repeater((0, 1))  # the gate's input, hidden from verify
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 5), (6, 3, 5)])}, owner, blocked=frozenset({(4, 3, 4)}))
+    assert [v.pos for v in violations if v.kind == "open"] == [(4, 3, 5)]
+
+
+def test_repeater_across_a_pin_cell_is_open_with_the_input_in_view():
+    """Compact gates leave their input repeater outside the footprint, so verify sees it, unfed."""
+    region, owner = _region(), {}
+    _wire(region, owner, "a", _line_x(2, 3, 3, 5) + _line_x(5, 6, 3, 5))
+    region[4, 3, 5] = _repeater((-1, 0))
+    region[4, 2, 5] = STONE
+    region[4, 3, 4] = _repeater((0, 1))
+    region[4, 2, 4] = STONE
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 5), (6, 3, 5)])}, owner)
+    assert [v.pos for v in violations if v.kind == "open"] == [(4, 3, 5)]
+
+
+def test_repeater_into_a_pin_is_not_open():
+    region, owner = _region(), {}
+    _wire(region, owner, "a", _line_z(6, 7, 3, 4))
+    region[4, 3, 5] = _repeater((0, 1))
+    region[4, 2, 5] = STONE
+    region[4, 3, 4] = _repeater((0, 1))
+    violations = verify_signals(region, {"a": ((4, 3, 7), [(4, 3, 5)])}, owner, blocked=frozenset({(4, 3, 4)}))
+    assert not violations

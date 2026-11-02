@@ -1085,7 +1085,7 @@ class _GreedyRouter:
         world = _World(self.region, frozenset(), frozenset())
         latch = find_latch(self.region, job.src, stop, world)
         if latch and all(self.dust_owner.get(cell, job.net_id) == job.net_id for cell in latch):
-            raise LayConflict(f"Net '{job.net_id}': wire past a repeater feeds back into it (latch)", tuple(latch))
+            raise LayConflict(f"Net '{job.net_id}': wire past a repeater or torch feeds back into it (latch)", tuple(latch))
         # The search only sees its own path's last few cells, and a tower or drop can land beside wire laid earlier.
         own_cells = frozenset(e[2] for e in rec.journals[job.key] if e[0] == "block")
         inverted = find_inverted_contacts(self.region, job.src, job.sinks, stop,

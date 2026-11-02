@@ -175,6 +175,17 @@ class _World:
     def is_torch(self, p: Pos) -> bool:
         return self.kind(p) in (_TORCH, _WALL_TORCH)
 
+    def passes_by(self, terminal: Pos) -> bool:
+        """A repeater on a pin's wire cell that sends its signal along the wire: the gate's input beside it gets none."""
+        if self.kind(terminal) != _REPEATER:
+            return False
+        out = self.repeater_output(terminal)
+        if out in self.blocked or (self.kind(out) == _REPEATER and self.repeater_input(out) == terminal):
+            return False
+        x, y, z = terminal
+        beside = [(x + dx, y, z + dz) for dx, dz in _HORIZ_DIRS]
+        return any(q in self.blocked or (self.kind(q) == _REPEATER and self.repeater_input(q) == terminal) for q in beside)
+
     def dust_links(self, p: Pos) -> list[Pos]:
         """Dust cells p is wired to (same Y, slope up, slope down)."""
         x, y, z = p
@@ -317,13 +328,13 @@ def _strengths(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
 
 
 def find_latch(region: Region, source: Pos, stop: frozenset[Pos], world: _World | None = None) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any. world: one to reuse, with nothing hidden."""
-    return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop, torches=True)
+    """The cells of a signal cycle from source through a repeater or torch, if any. world: one to reuse, with nothing hidden."""
+    return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop)
 
 
-def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos], torches: bool = False) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any: it holds itself on. torches: through a torch
-    too, as when a drop's two torches feed back into the wire that drives them."""
+def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
+    """The cells of a signal cycle from source through a repeater or torch, if any: it holds itself on, as when a
+    drop's two torches feed back into the wire that drives them."""
     start: tuple[Pos, str] = (source, _STRONG if world.kind(source) == _OPAQUE else "")
     ids = {start: 0}
     nodes = [start]
@@ -343,14 +354,13 @@ def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos], torches: bool
                 queue.append(nxt)
             tails.append(tail)
             heads.append(head)
-    kinds = (_REPEATER, _TORCH, _WALL_TORCH) if torches else (_REPEATER,)
-    repeaters = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) in kinds]
-    if not repeaters:
+    drivers = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) in (_REPEATER, _TORCH, _WALL_TORCH)]
+    if not drivers:
         return []
     graph = csr_matrix((np.ones(len(tails), dtype=np.int8), (tails, heads)), shape=(len(nodes), len(nodes)))
     _, labels = connected_components(graph, directed=True, connection="strong")
     sizes = np.bincount(labels)
-    for label in sorted({labels[i] for i in repeaters if sizes[labels[i]] > 1}):
+    for label in sorted({labels[i] for i in drivers if sizes[labels[i]] > 1}):
         return sorted({nodes[i][0] for i in np.flatnonzero(labels == label).tolist()})
     return []
 
@@ -439,13 +449,13 @@ def verify_signals(
         stop = Excluding(terminals, own)
         reached = _reach(world, source, stop)
         for sink in sinks:
-            if sink not in reached:
+            if sink not in reached or world.passes_by(sink):
                 violations.append(Violation("open", frozenset({net_id}), sink))
         strong_enough = _strengths(world, source, stop)
         for sink in sinks:
             if sink in reached and sink not in strong_enough:
                 violations.append(Violation("weak", frozenset({net_id}), sink))
-        latch = _latch_cycle(world, source, stop, torches=True)
+        latch = _latch_cycle(world, source, stop)
         if latch:
             violations.append(Violation("latch", frozenset({net_id}), latch[0]))
         for pos in _inverted_contacts(world, source, frozenset(sinks), stop)[:1]:
