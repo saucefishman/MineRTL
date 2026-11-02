@@ -43,6 +43,9 @@ _STACK_SOUTH_LOWER = 1  # Z past a bank's input pins of the tower of a pin on a 
 _STACK_SOUTH_UPPER = 4  # and of a pin on the upper read address plane
 _STACK_SOUTH = 7
 _TOWER_TICKS = 8     # torches per bank
+_LANE_PITCH = 2      # Y between a group's lanes
+_LANE_REPEAT = 12    # X between a lane's repeaters
+_LANE_PIN_PITCH = 6  # least X between a group's input pins
 _READ_PLANES = 4     # Y from one pair of read ports to the next
 _LINE_PITCH = 2      # X between decoder lines; each line's torches sit between it and the next
 _ADDR_PITCH = int(os.environ.get("RAM_ADDR_PITCH", 4))  # an address bit's true and complement lines; also the pins' X pitch
@@ -62,7 +65,8 @@ _DELAY_TAPS = {12: "t0", 24: "t1", 84: "t2", 96: "t3"}
 _DELAY_CELLS = 97
 WINDOW_CELL = "ram_window"
 WINDOW_MACRO = "ram_window"
-BLOCK_CELLS = (RAM_CELL, RAM4_CELL, WINDOW_CELL, DELAY_CELL)
+GROUP_CELL = "ram_group"
+BLOCK_CELLS = (RAM_CELL, RAM4_CELL, WINDOW_CELL, DELAY_CELL, GROUP_CELL)
 
 
 def _repeater(facing: str) -> BlockState:
@@ -302,11 +306,13 @@ def build_delay(name: str = "ram_delay") -> Macro:
     return _opaque(name, size, blocks, pins, {"clk": arcs}, 1)
 
 
-def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, width: int, init: list[int]) -> Macro:
+def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, width: int, init: list[int],
+                towers: dict[str, tuple[int, int, int]] | None = None) -> Macro:
     """``banks`` 4-read arrays one above the other, as one block, holding bank numbers ``base`` up. Every input pin feeds a
     torch tower beside its line; each bank's line taps the tower. Each output has a tower too, which every bank's bitline
     powers at its own level, so the top of the tower is the OR of the banks. Lines near towers are repeaters, which ignore
-    them. A tower inverts twice per 4 blocks, so its tap levels agree.
+    them. A tower inverts twice per 4 blocks, so its tap levels agree. With ``towers``, input pins get no way out to the
+    south face: it collects each pin's tower base (x, y, z) instead, for build_group to feed.
     """
     depth = 1 << row_bits
     high_bits = abits - row_bits
@@ -347,6 +353,9 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
                 blocks[(x, level - 1, z)] = _GLASS
                 for approach in range(north + bank.depth, z):
                     line(x, level, approach)
+            if towers is not None:
+                towers[pin.name] = (x + 1, y, z)
+                continue
             for out in range(z + 1, size[2]):
                 line(x + 1, y, out)
             pins.append(PinRef(name=pin.name, direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(x + 1, y, 0)))
@@ -376,6 +385,104 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
     return _opaque(name, size, blocks, pins, arcs, len(init) * width)
 
 
+def build_group(name: str, row_bits: int, banks: int, stacks: int, abits: int, width: int) -> Macro:
+    """``stacks`` stacks side by side sharing every input, on prebuilt lanes below them. Bank numbers run on up the stacks.
+
+    Each input's lane has its own Y, at one Z, so no lane meets another. Stack towers reach down to their lanes. A tower
+    inverts every 2 blocks, so a lane an odd number of steps down carries the inverted signal, from a torch at its pin.
+    TODO: contents, and stacks of different memories.
+    """
+    words = banks << row_bits
+    towers: list[dict[str, tuple[int, int, int]]] = [{} for _ in range(stacks)]
+    built = [build_stack(name, row_bits, banks, k * banks, abits, width, [0] * words, towers[k]) for k in range(stacks)]
+    stack = built[0].footprint
+    inputs = sorted(towers[0], key=lambda n: (towers[0][n][1], towers[0][n][0]))
+    lift = _LANE_PITCH * len(inputs) + 2
+    pitch = stack.width + 1
+    lane_z = stack.depth + 1
+    size = (pitch * stacks, lift + stack.height, lane_z + 4)
+    blocks: dict[Pos, BlockState] = {}
+    pins: list[PinRef] = []
+    for k, sub in enumerate(built):
+        for (x, y, z), block in sub.blocks:
+            blocks[(x + k * pitch, y + lift, z)] = block
+        for pin in sub.pins:
+            if pin.direction == Direction.OUT:
+                name_part, index = pin.name[:-1].split("[")
+                pins.append(PinRef(name=f"{name_part}[{k * width + int(index)}]", direction=Direction.OUT,
+                                   side=CardinalDirection.NORTH,
+                                   offset=(pin.offset[0] + k * pitch, pin.offset[1] + lift, size[2] - 1)))
+
+    def floor(x: int, y: int, z: int) -> None:
+        blocks.setdefault((x, y - 1, z), _GLASS)
+
+    def dust(x: int, y: int, z: int) -> None:
+        blocks[(x, y, z)] = _DUST
+        floor(x, y, z)
+
+    pin_step = max(_LANE_PIN_PITCH, size[0] // max(len(inputs), 1))
+    for n, pin_name in enumerate(inputs):
+        y = 1 + _LANE_PITCH * n
+        inverted = False
+        taps: list[int] = []
+        for k in range(stacks):
+            x, pin_y, z = towers[k][pin_name]
+            x += k * pitch
+            steps = (pin_y + lift - y) // 2
+            inverted = steps % 2 == 1
+            # Up the tower: a block every 2, idle state set from the top, where an idle pin is low.
+            for level in range(y, pin_y + lift + 1, 2):
+                powered = (pin_y + lift - level) // 2 % 2 == 1
+                blocks[(x, level, z)] = _STONE
+                if level < pin_y + lift:
+                    blocks[(x, level + 1, z)] = _torch(not powered)
+            # A read pin sharing its column with the upper read pin's further tower goes around it, on x + 2.
+            around = pin_name[:2] in ("aa", "ab")
+            tap_x = x + 2 if around else x
+            if around:
+                blocks[(x + 1, y, z)] = _repeater("east")
+                floor(x + 1, y, z)
+                dust(tap_x, y, z)
+            for cell_z in range(z + 1, lane_z - 1):
+                dust(tap_x, y, cell_z)
+            blocks[(tap_x, y, lane_z - 1)] = _repeater("south")  # the lane may have little signal left here
+            floor(tap_x, y, lane_z - 1)
+            taps.append(tap_x)
+        entry = min(n * pin_step + 1, size[0] - 1)
+        def lay(x: int, repeat: bool, facing: str = "east") -> None:
+            if repeat:
+                blocks[(x, y, lane_z)] = BlockState("minecraft:repeater", facing=facing, delay="1", locked="false",
+                                                    powered="true" if inverted else "false")
+            else:
+                blocks[(x, y, lane_z)] = BlockState("minecraft:redstone_wire", power="14") if inverted else _DUST
+            floor(x, y, lane_z)
+
+        lay(entry, False)
+        for step, facing in ((-1, "east"), (1, "west")):
+            since = 0
+            x = entry + step
+            while 0 <= x < size[0]:
+                repeat = since >= _LANE_REPEAT and x not in taps
+                lay(x, repeat, facing)
+                since = 0 if repeat else since + 1
+                x += step
+        pin_z = lane_z + 3
+        if inverted:
+            blocks[(entry, y, lane_z + 1)] = BlockState("minecraft:redstone_wall_torch", facing="north", lit="true")
+            blocks[(entry, y, lane_z + 2)] = _STONE
+        else:
+            for z in (lane_z + 1, lane_z + 2):
+                blocks[(entry, y, z)] = _repeater("south")
+                floor(entry, y, z)
+        blocks[(entry, y, pin_z)] = _repeater("south")
+        floor(entry, y, pin_z)
+        pins.append(PinRef(name=pin_name, direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(entry, y, 0)))
+    along = size[0] // _LANE_REPEAT + lift // 2
+    arcs = {pin: {f"{o[:2]}[{k * width + int(o[3:-1])}]": ticks + along for k in range(stacks) for o, ticks in outs.items()}
+            for pin, outs in built[0].arcs.items()}
+    return _opaque(name, size, blocks, pins, arcs, stacks * words * width)
+
+
 _built: dict[str, Macro] = {}
 
 
@@ -389,6 +496,9 @@ def block_for_cell(cell_type: str, parameters: dict[str, str]) -> Macro:
         block = build_window()
     elif cell_type == DELAY_CELL:
         block = build_delay()
+    elif cell_type == GROUP_CELL:
+        row_bits, banks, stacks, abits, width = (int(parameters[k], 2) for k in ("ROW_BITS", "BANKS", "STACKS", "ABITS", "WIDTH"))
+        block = build_group(f"group_{stacks}x{banks}x{row_bits}x{width}_{abits}", row_bits, banks, stacks, abits, width)
     elif cell_type == RAM_CELL:
         depth, width = int(parameters["DEPTH"], 2), int(parameters["WIDTH"], 2)
         block = build_ram(f"ram_{depth}x{width}", depth, width)

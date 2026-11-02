@@ -12,7 +12,7 @@ from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro
 from minecraft_v.placement_engine.macro import extract_macros
-from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block
+from minecraft_v.placement_engine.ram import BLOCK_CELLS, GROUP_CELL, RAM4_CELL, block_for_cell, built_block
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX
 from minecraft_v.placement_engine.resume import ResumeStore
@@ -99,7 +99,7 @@ def module_to_component_list(module: Module) -> ComponentList:
                     pins.append(pin)
                     bit_endpoints[bit].append((cell_name, pin.name, pin.direction))
             components.append(Component(id=cell_name, type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
-                                        metadata={"macro": block.name, **({"bank": True} if cell.type == RAM4_CELL else {})}))
+                                        metadata={"macro": block.name, **({"bank": True} if cell.type in (RAM4_CELL, GROUP_CELL) else {})}))
             continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))

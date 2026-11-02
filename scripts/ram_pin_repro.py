@@ -1,6 +1,6 @@
 """Pin-face repro: n short RAM blocks sharing address, write and data pins, one gate. 12 blocks, 11 address bits fails in minutes.
 
-Usage: ram_pin_repro.py <out> <n> <abits> <seed> [limit_s]. Env: ROW, W, RAM_ADDR_PITCH (even only), RAM_CHANNEL.
+Usage: ram_pin_repro.py <out> <n> <abits> <seed> [limit_s]. Env: GROUP, ROW, W, RAM_ADDR_PITCH (even only), RAM_CHANNEL.
 """
 import json, os, re, subprocess, sys, time
 out, n, ab, seed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
@@ -15,7 +15,14 @@ def port(name, width, d):
 sh = {p: port(p, ab, "input") for p in ("aa", "ab", "ac", "ad", "wa")}
 sh["we"] = port("we", 1, "input"); sh["wd"] = port("wd", W, "input")
 cells = {}
-for k in range(n):
+if os.environ.get("GROUP"):  # one block with lanes, in place of n blocks
+    conn = dict(sh)
+    for r in ("ra", "rb", "rc", "rd"):
+        conn[r] = port(r, n * W, "output")
+    cells["group"] = {"hide_name": 0, "type": "ram_group", "parameters": {
+        "ROW_BITS": format(ROW, "032b"), "BANKS": format(1, "032b"), "STACKS": format(n, "032b"), "ABITS": format(ab, "032b"),
+        "WIDTH": format(W, "032b")}, "connections": conn}
+for k in range(0 if os.environ.get("GROUP") else n):
     conn = dict(sh)
     for r in ("ra", "rb", "rc", "rd"):
         conn[r] = port(f"m{k}{r}", W, "output")
@@ -34,4 +41,4 @@ except subprocess.TimeoutExpired as e:
     rc, log = "timeout", ((e.stdout or b"").decode() + (e.stderr or b"").decode())
 open(out + "/log", "w").write(log)
 wk = re.findall(r"workspace (\S+)", log); err = re.findall(r"^RuntimeError: (.{0,70})|^ValueError: (.{0,70})", log, re.M)
-print(f"channel={os.environ.get('RAM_CHANNEL',24)} row={ROW} w={W} pitch={os.environ.get('RAM_ADDR_PITCH', 4)} n={n} ab={ab} seed={seed} rc={rc} {time.time()-t:.0f}s {wk[-1] if wk else '?'} searches_failed={len(re.findall(r'^.wire. net_', log, re.M))} {''.join(err[-1]) if err else ''}", flush=True)
+print(f"group={os.environ.get('GROUP', 0)} channel={os.environ.get('RAM_CHANNEL',24)} row={ROW} w={W} pitch={os.environ.get('RAM_ADDR_PITCH', 4)} n={n} ab={ab} seed={seed} rc={rc} {time.time()-t:.0f}s {wk[-1] if wk else '?'} searches_failed={len(re.findall(r'^.wire. net_', log, re.M))} {''.join(err[-1]) if err else ''}", flush=True)
