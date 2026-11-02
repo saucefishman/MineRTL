@@ -3,7 +3,7 @@ from scipy import fft
 
 import minecraft_v.placement_engine.poisson as poisson
 from minecraft_v.placement_engine.builder import _io_barrier
-from minecraft_v.placement_engine.ir import Component, ComponentType
+from minecraft_v.placement_engine.ir import Component, ComponentType, Footprint
 from minecraft_v.placement_engine.layout import _io_base_name
 from tests.test_anneal import _KW, _setup
 
@@ -173,3 +173,23 @@ def test_legalize_separates_stacked_boxes():
     for i in range(20):
         for j in range(i + 1, 20):
             assert any(out[i, a] + sizes[i, a] <= out[j, a] or out[j, a] + sizes[j, a] <= out[i, a] for a in range(3))
+
+
+def _bank(height: int, **metadata) -> Component:
+    return Component(id=f"bank{height}", type=ComponentType.CUSTOM, pins=[], footprint=Footprint(width=300, height=height, depth=100),
+                     metadata={"bank": True, **metadata})
+
+
+def test_routed_banks_stay_in_one_stack():
+    """examples/cpu's banks: a second stack doubled the width and walled nets off from pins on the banks' faces."""
+    gates = [_bank(h) for h in (67, 67, 41, 41)]
+    fixed, width, height = poisson._stack_banks(gates, list(range(4)), 24)
+    assert {origin[0] for origin in fixed.values()} == {0.0}
+    assert width == 300 and height == 67 + 67 + 41 + 41 + 4 * poisson._BANK_Y_GAP
+
+
+def test_ram_blocks_start_a_new_stack():
+    gates = [_bank(150, south_pins=True), _bank(151, south_pins=True)]
+    fixed, width, _ = poisson._stack_banks(gates, [0, 1], 24)
+    assert sorted(origin[0] for origin in fixed.values()) == [0.0, 300.0 + poisson._BANK_COLUMN_GAP]
+    assert width == 600 + poisson._BANK_COLUMN_GAP

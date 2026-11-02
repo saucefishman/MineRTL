@@ -11,7 +11,7 @@ import numpy as np
 from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
-from .wire import LayConflict
+from .wire import LayConflict, _foot_repeaters
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
     _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
@@ -66,6 +66,15 @@ def _snap_shift_tables(d: tuple[int, int, int]) -> tuple[tuple[int, ...], tuple[
     return tables
 
 
+def set_foot_repeaters(on: bool) -> None:
+    """Allow repeaters at a slope's foot. They can read a glass or powered block under the slope, which verify and repair
+    catch, but without them a design of routed banks can't find routes: examples/cpu fails on every seed tried. Off for
+    designs with RAM blocks, where nearly every net has to be right first time."""
+    _foot_repeaters[0] = on
+    if _astar is not None:
+        _astar.set_foot_repeaters(on)
+
+
 def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, int]:
     """Signal state after move d from a cell with (depth, cand); the kernel's rule.
 
@@ -82,7 +91,7 @@ def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, i
     step = abs(dx) + abs(dz)
     if cand and dy == 0 and step == 1 and _HORIZ_DIRS[cand - 1] == (dx, dz):
         depth = 0
-    unit = step == 1 and dy == 0
+    unit = step == 1 and (dy == 0 or (_foot_repeaters[0] and dy == -1))
     return depth + step, (_HORIZ_DIRS.index((dx, dz)) + 1) if unit else 0
 
 
@@ -867,8 +876,12 @@ def _find_wire_path(
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
         error = RouteTimeout if early_stop_reason and early_stop_reason.startswith("timeout") else ValueError
         raise error(f"No route for net {net_id} from {start} to {goal} (closest reached: {node_str(best_node)}{reason}; h_radius_pruned={h_radius_pruned})")
-    if walkable(goal) and pos_list[reached >> _NODE_SHIFT] != goal:
-        raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {node_str(reached)}")
+    def pos_of(cid: int) -> tuple[int, int, int]:
+        """A successful kernel search leaves the cells it made in its own vectors, not pos_list."""
+        return pos_list[cid] if cid < len(pos_list) else _astar.cell_pos(cid)
+
+    if walkable(goal) and pos_of(reached >> _NODE_SHIFT) != goal:
+        raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {pos_of(reached >> _NODE_SHIFT)}")
 
     path: list[tuple[int, int, int]] = []
     back_visited = set()
@@ -876,7 +889,7 @@ def _find_wire_path(
     while cur != _NO_PARENT:
         if cur in back_visited:
             raise ValueError("Path tracing resulted in loop")
-        cur_pos = pos_list[cur >> _NODE_SHIFT]
+        cur_pos = pos_of(cur >> _NODE_SHIFT)
         path.append(cur_pos)
         back_visited.add(cur)
         cur = came_from[cur]

@@ -346,6 +346,7 @@ def main():
             for c in component_list.components if c.type == ComponentType.CUSTOM}
     if rams:
         macros = rams
+    pathfinding.set_foot_repeaters(not rams)
     if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
