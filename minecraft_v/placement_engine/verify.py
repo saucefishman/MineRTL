@@ -5,7 +5,7 @@ structures the router builds) and searches from each net's source:
 - open:  a sink of the net that its source can't reach;
 - short: a cell reached from two nets' sources, or a cell owned by another net;
 - weak: a sink the source reaches, but with no signal strength left;
-- latch: a repeater whose own output reaches its input, so that it holds itself on;
+- latch: a repeater or torch whose own output reaches its input, so that it holds itself on;
 - inverted: wire fed by both the net's signal and its opposite (a tower's middle blocks, the
   inverted stage of a powered drop), or a sink that only gets the opposite.
 `verify_support` separately flags dust/repeaters/torches with nothing to stand on.
@@ -321,8 +321,9 @@ def find_latch(region: Region, source: Pos, stop: frozenset[Pos], world: _World 
     return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop)
 
 
-def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any: it holds itself on."""
+def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos], torches: bool = False) -> list[Pos]:
+    """The cells of a signal cycle from source through a repeater, if any: it holds itself on. torches: through a torch
+    too, as when a drop's two torches feed back into the wire that drives them."""
     start: tuple[Pos, str] = (source, _STRONG if world.kind(source) == _OPAQUE else "")
     ids = {start: 0}
     nodes = [start]
@@ -342,7 +343,8 @@ def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
                 queue.append(nxt)
             tails.append(tail)
             heads.append(head)
-    repeaters = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) == _REPEATER]
+    kinds = (_REPEATER, _TORCH, _WALL_TORCH) if torches else (_REPEATER,)
+    repeaters = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) in kinds]
     if not repeaters:
         return []
     graph = csr_matrix((np.ones(len(tails), dtype=np.int8), (tails, heads)), shape=(len(nodes), len(nodes)))
@@ -443,7 +445,7 @@ def verify_signals(
         for sink in sinks:
             if sink in reached and sink not in strong_enough:
                 violations.append(Violation("weak", frozenset({net_id}), sink))
-        latch = _latch_cycle(world, source, stop)
+        latch = _latch_cycle(world, source, stop, torches=True)
         if latch:
             violations.append(Violation("latch", frozenset({net_id}), latch[0]))
         for pos in _inverted_contacts(world, source, frozenset(sinks), stop)[:1]:
