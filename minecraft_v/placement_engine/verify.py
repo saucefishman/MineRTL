@@ -175,6 +175,17 @@ class _World:
     def is_torch(self, p: Pos) -> bool:
         return self.kind(p) in (_TORCH, _WALL_TORCH)
 
+    def passes_by(self, terminal: Pos) -> bool:
+        """A repeater on a pin's wire cell that sends its signal along the wire: the gate's input beside it gets none."""
+        if self.kind(terminal) != _REPEATER:
+            return False
+        out = self.repeater_output(terminal)
+        if out in self.blocked or (self.kind(out) == _REPEATER and self.repeater_input(out) == terminal):
+            return False
+        x, y, z = terminal
+        beside = [(x + dx, y, z + dz) for dx, dz in _HORIZ_DIRS]
+        return any(q in self.blocked or (self.kind(q) == _REPEATER and self.repeater_input(q) == terminal) for q in beside)
+
     def dust_links(self, p: Pos) -> list[Pos]:
         """Dust cells p is wired to (same Y, slope up, slope down)."""
         x, y, z = p
@@ -438,7 +449,7 @@ def verify_signals(
         stop = Excluding(terminals, own)
         reached = _reach(world, source, stop)
         for sink in sinks:
-            if sink not in reached:
+            if sink not in reached or world.passes_by(sink):
                 violations.append(Violation("open", frozenset({net_id}), sink))
         strong_enough = _strengths(world, source, stop)
         for sink in sinks:
