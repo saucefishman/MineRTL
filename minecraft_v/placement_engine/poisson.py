@@ -707,6 +707,7 @@ _BANK_COLUMN_GAP = 4
 _SOUTH_PINS_CLEAR = 24  # Z past a south_pins block's face, for the output row and wire to its pins
 _SOUTH_PINS_DENSITY = float(os.environ.get("RAM_GATE_DENSITY", 0.3))
 _SOUTH_PINS_OUTPUT_PITCH = 4
+_SOUTH_PINS_WIDTH = float(os.environ.get("RAM_GATE_WIDTH", 1.0))  # share of the block's width
 _SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
                             # spill onto later gates' targets and each search walks through all that's piled there
@@ -741,18 +742,26 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     width = x + column_width
     y = top
     free = [i for i in range(len(gates)) if i not in fixed]
+    gate_shift = 0.0
     if all(gates[i].metadata.get("south_pins") for i in banks):
         # Every pin is on the south face and a net can't cross a block: all gates go south, past room for outputs and wire.
         box = (np.zeros(3), np.array([width, y, channel + depth + _SOUTH_PINS_CLEAR]))
-        gate_depth = float(np.prod(sizes[free], axis=1).sum()) / _SOUTH_PINS_DENSITY / (width * y)
-        dims = np.array([width, y, box[1][2] + gate_depth + float(sizes[free, 2].max())])
+        # Gates in the middle of the block's width, not stretched along it: long thin bands make long nets.
+        gate_width = width * _SOUTH_PINS_WIDTH
+        gate_depth = float(np.prod(sizes[free], axis=1).sum()) / _SOUTH_PINS_DENSITY / (gate_width * y)
+        gate_shift = (width - gate_width) // 2
+        repel = (np.zeros(3), np.array([gate_width, y, box[1][2]]))
+        dims = np.array([gate_width, y, box[1][2] + gate_depth + float(sizes[free, 2].max())])
     else:
         box = (np.zeros(3), np.array([width + channel, y, depth + 2.0 * channel]))
         volume = float(np.prod(sizes[free], axis=1).sum()) / _TARGET_DENSITY + float(np.prod(box[1]))
         dims = np.array([width + channel + east_room, 0.0, depth + 2.0 * channel])
         dims[1] = max(volume / (dims[0] * dims[2]), y + float(sizes[free, 1].max()))
+        repel = box
     log(f"[place] poisson: around banks, domain {tuple(int(v) for v in dims)}")
-    pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, fixed, box))
+    held = {i: origin - np.array([gate_shift, 0.0, 0.0]) for i, origin in fixed.items()}
+    pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, held, repel))
+    pos[free, 0] += gate_shift
     occ = _Occupancy(np.vstack([sizes, box[1]]))
     occ.add(len(gates), (0, 0, 0))
     for i in fixed:
