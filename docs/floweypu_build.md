@@ -55,3 +55,4 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Mac slept about 70 min, API errors killed agents; keep-awake requested. Load hit 36: final timing needs a quiet machine.
 - hf3 fully explained: net_1820 torch latch and net_2367 repeater across a gate pin cell (pass-by open), both real, verify now reports both, router retries latch. scripts/compare_gate_rtl.py compares gates with netlist and RTL: use it, stronger than acceptance. Low-phase samples: 0 mismatches netlist vs RTL on h1, hf1-3. Open: full adder outputs net_1485, net_1515, net_15224 in hf1, hf2.
 - Bar: 1-reset acceptance plus clean scripts/compare_gate_rtl.py (low-phase samples) in redstone. hf3's 2-reset pass is NOT clean: net_1820 stays stuck on 110 sinks; first reset clock leaves net_25 wrong, second clears it. h1 also has net_1533 latch and net_1069 short.
+- Cold RAM cache: 491s -> 52-86s, per-bank cache, RAM_WORKERS fork pool, same cells.
