@@ -879,13 +879,19 @@ class _GreedyRouter:
         if kept:
             vias, leads, sinks = kept.vias, kept.leads, kept.sinks
         else:
-            vias = [v for v in (self._open_via(v, job) for v in job.via) if v is not None]
-            leads = [v for v in (self._open_via(v, job) for v in job.lead) if v is not None]
+            def open_waypoint(wanted: Pos) -> Pos | None:
+                find = lambda: self._open_via(wanted, job)
+                return self.resume.waypoint_cell(job.key, wanted, find) if self.resume else find()
+
+            vias = [v for v in map(open_waypoint, job.via) if v is not None]
+            leads = [v for v in map(open_waypoint, job.lead) if v is not None]
             # Nearest first; a lead comes before its pin, which is further on the same line.
             sinks = sorted([*job.sinks, *leads],
                            key=lambda p: abs(p[0] - job.src[0]) + abs(p[1] - job.src[1]) + abs(p[2] - job.src[2]))
             sinks = [*first, *(p for p in sinks if p not in first)]
         targets = [*vias, *sinks]
+        if self.resume and not kept:
+            targets = self.resume.targets_in_saved_order(job.key, targets)
         for dst_index, dst in enumerate(targets):
             if kept and dst_index < kept.next_target:
                 continue
@@ -1120,6 +1126,8 @@ class _GreedyRouter:
         on_done(i, job): called after each job's attempt, i its 1-based position in jobs.
         """
         self.rips_blockers = rip_blockers
+        if self.resume:
+            jobs = self.resume.in_saved_order(jobs)
         failures: list[tuple[str, Exception]] = []
         keys = {job.key for job in jobs}
         by_key = {job.key: job for job in jobs}
@@ -1153,6 +1161,8 @@ class _GreedyRouter:
                 try:
                     with self.rec.recording(job.key):
                         self.route_job_retrying(job)
+                    if self.resume:
+                        self.resume.finished(job.key)
                     if time.monotonic() - job_started >= _LOG_SLOW_JOB_SECONDS:
                         debug(f"{label} {job.key}: {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                 except Exception as e:
