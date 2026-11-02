@@ -11,8 +11,10 @@ macro can end up with different delays.
 from __future__ import annotations
 
 import heapq
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Collection
+from dataclasses import dataclass, field
+from math import ceil
 
 import numpy as np
 from litemapy import BlockState, Region
@@ -30,6 +32,34 @@ _HOLD_MARGIN = 6        # ticks data must arrive after the clock pin: a flip-flo
 _FASTEST_GATE = 1       # ticks through any cell's fastest path; the library's delay is its slowest, too late for hold
 _ROUNDS = 40            # passes over the failing pins; each one pads every failing path
 _UNREACHED = 1 << 30
+_SETUP_TICKS = 1        # data settled at a flip-flop before its clock rises
+
+# An arrival, per what launched it and which way the signal went: rising clock edge falling, rising; falling clock edge ...
+_RISE_DOWN, _RISE_UP, _FALL_DOWN, _FALL_UP = range(4)
+_NONE = -1
+_POSITIVE = (ComponentType.AND, ComponentType.OR)
+_NEGATIVE = (ComponentType.NOT,)
+
+
+@dataclass
+class ClockRequirement:
+    """The least half period, from static timing. Times are ticks after the launching edge enters the clock pin.
+
+    full: paths launched and captured by the same edge, which get a whole period.
+    half_cycle: paths between opposite edges, which get half of one: the clock itself used as data falling, as RAM write
+    windows are, or a flip-flop on an inverted clock.
+    write_floor: a RAM write window launched by the falling edge has to have closed by the next rising edge.
+    unclocked: flip-flops no input pin clocks, which this doesn't cover."""
+    full: int = 0
+    half_cycle: int = 0
+    write_floor: int = 0
+    unclocked: int = 0
+    worst: dict[str, str] = field(default_factory=dict)
+    paths: dict[str, str] = field(default_factory=dict)  # per kind: the worst path, cell by cell, with arrival ticks
+
+    @property
+    def half_period(self) -> int:
+        return max(ceil(self.full / 2), self.half_cycle, self.write_floor)
 
 
 def repeater_delay(block: BlockState) -> int:
@@ -171,6 +201,227 @@ class _HoldTiming:
                 if s.pin_name != "C" and t >= 0 and d is not None:
                     worst = max(worst, t + d - capture)
         return max([worst, *(out_time(cid) for cid in probed)])
+
+    def clock_requirement(self, macros: dict | None = None, probed: Collection[str] = ()) -> ClockRequirement:
+        """Static timing of the flat netlist: every path from a launching edge to a capturing one, per clock edge and per
+        direction, so that a path a cell can't pass isn't counted, like a write window opening from the rising edge.
+        Each flip-flop has its own clock arrival, so skew counts path by path rather than the worst everywhere.
+        Inputs change as the clock rises, and outputs and prints are read as it rises next."""
+        macros = macros or {}
+        by_id = self.by_id
+        macro_of = {cid: macros[c.metadata["macro"]] for cid, c in by_id.items()
+                    if c.type == ComponentType.CUSTOM and c.metadata.get("macro") in macros}
+        seq = {cid for cid, c in by_id.items() if c.type in _SEQUENTIAL}
+        out_pin = {cid for cid, c in by_id.items() if c.type == ComponentType.OUTPUT_PIN}
+
+        def source_node(n) -> object:
+            cid = n.source.component_id
+            return (cid, n.source.pin_name) if cid in macro_of else cid
+
+        def sink_node(s) -> object:
+            cid = s.component_id
+            return (cid, s.pin_name) if cid in macro_of or cid in seq else cid
+
+        # Wire edges, and a macro's arcs: (ticks, sink, input up or None for any, output up).
+        wires: dict[object, list[tuple[int, object]]] = defaultdict(list)
+        fed: dict[object, int] = defaultdict(int)
+        for n in self.nets.values():
+            src = source_node(n)
+            fed[src] += 0
+            for s in n.sinks:
+                ticks = self.wire_ticks(n, s)
+                if ticks is None:
+                    continue
+                sink = sink_node(s)
+                wires[src].append((ticks, sink))
+                fed[sink] += 1
+        arcs: dict[object, list[tuple[object, dict]]] = defaultdict(list)
+        for cid, macro in macro_of.items():
+            for pin, outs in macro.edges.items():
+                for out, edges in outs.items():
+                    if (cid, out) in fed or (cid, out) in wires:
+                        arcs[cid, pin].append(((cid, out), edges))
+                        fed[cid, out] += 1
+                        fed[cid, pin] += 0
+        order: list[object] = []
+        left = dict(fed)
+        queue = deque(node for node, count in left.items() if count == 0)
+        while queue:
+            node = queue.popleft()
+            order.append(node)
+            for _, sink in wires.get(node, ()):
+                left[sink] -= 1
+                if left[sink] == 0:
+                    queue.append(sink)
+            for sink, _ in arcs.get(node, ()):
+                left[sink] -= 1
+                if left[sink] == 0:
+                    queue.append(sink)
+        looped = len(left) - len(order)
+        if looped:
+            print(f"[timing] WARNING: {looped} cells on combinational loops; paths through them aren't counted")
+
+        came: dict[tuple[object, int], object] = {}
+
+        def trace(node: object, launch: int) -> str:
+            """Back from a node along the latest arrivals of an edge's launch."""
+            steps = []
+            for _ in range(10000):
+                times = data.get(node)
+                if times is None:
+                    break
+                k = launch + (times[launch + 1] >= times[launch])
+                steps.append(f"{node[0]}.{node[1]}@{times[k]}" if isinstance(node, tuple) else f"{node}@{times[k]}")
+                node = came.get((node, k))
+                if node is None:
+                    break
+            return " <- ".join(steps)
+
+        def gate_out(cid: object, at: list[int]) -> list[int]:
+            c = by_id.get(cid)
+            if c is None or c.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN):
+                return at
+            d = self.gate(cid)
+            out = [_NONE] * 4
+            for launch in (0, 2):
+                down, up = at[launch], at[launch + 1]
+                if c.type in _POSITIVE:
+                    pair = down, up
+                elif c.type in _NEGATIVE:
+                    pair = up, down
+                else:
+                    pair = (max(down, up),) * 2
+                out[launch] = pair[0] + d if pair[0] >= 0 else _NONE
+                out[launch + 1] = pair[1] + d if pair[1] >= 0 else _NONE
+            return out
+
+        def arrivals(starts: dict[object, list[int]]) -> dict[object, list[int]]:
+            at: dict[object, list[int]] = {}
+
+            def reach(node: object, times: list[int], source: object = None) -> None:
+                have = at.setdefault(node, [_NONE] * 4)
+                for k in range(4):
+                    if times[k] > have[k]:
+                        have[k] = times[k]
+                        came[node, k] = source
+
+            for node, times in starts.items():
+                reach(node, times)
+            for node in order:
+                here = at.get(node)
+                if here is None:
+                    continue
+                if node in seq:
+                    out = here
+                else:
+                    out = gate_out(node, here) if not isinstance(node, tuple) else here
+                for ticks, sink in wires.get(node, ()):
+                    reach(sink, [t + ticks if t >= 0 else _NONE for t in out], node)
+                for sink, edges in arcs.get(node, ()):
+                    times = [_NONE] * 4
+                    for launch in (0, 2):
+                        for (in_up, out_up), arc in edges.items():
+                            t = here[launch + in_up]
+                            if t >= 0:
+                                k = launch + out_up
+                                times[k] = max(times[k], t + arc)
+                    reach(sink, times, node)
+            return at
+
+        # Which input pins are clocks: those a flip-flop's clock pin leads back to.
+        back: dict[object, list[object]] = defaultdict(list)
+        for src, sinks in wires.items():
+            for _, sink in sinks:
+                back[sink].append(src)
+        roots: set[str] = set()
+        stack = [(cid, "C") for cid in seq]
+        seen: set = set(stack)
+        while stack:
+            for src in back.get(stack.pop(), ()):
+                if src in seen or src in seq:
+                    continue
+                seen.add(src)
+                if src in by_id and by_id[src].type == ComponentType.INPUT_PIN:
+                    roots.add(src)
+                else:
+                    stack.append(src)
+        result = ClockRequirement()
+        edge = {cid: [_NONE, 1, 1, _NONE] for cid in roots}  # 1: through the input's own repeater
+        clock_at = arrivals(edge)
+        came.clear()
+        capture: dict[str, list[tuple[int, int]]] = {}
+        starts: dict[object, list[int]] = dict(edge)
+        for cid, c in by_id.items():
+            if c.type == ComponentType.INPUT_PIN and cid not in roots:
+                starts[cid] = [1, 1, _NONE, _NONE]
+        for cid in seq:
+            at = clock_at.get((cid, "C"))
+            rising = [(launch, at[launch + 1]) for launch in (0, 2) if at is not None and at[launch + 1] >= 0]
+            if not rising:
+                result.unclocked += 1
+                continue
+            capture[cid] = rising
+            q = [_NONE] * 4
+            for launch, t in rising:
+                q[launch] = q[launch + 1] = t + self.gate(cid)
+            starts[cid] = q
+        data = arrivals(starts)
+
+        def check(name: str, times: list[int], captures: list[tuple[int, int]], setup: int, node: object = None) -> None:
+            for launch in (0, 2):
+                latest = max(times[launch], times[launch + 1])
+                if latest < 0:
+                    continue
+                for edge_launch, at in captures:
+                    need = latest - at + setup
+                    kind = "full" if edge_launch == launch else "half_cycle"
+                    if need > getattr(result, kind):
+                        setattr(result, kind, need)
+                        result.worst[kind] = name
+                        if node is not None:
+                            result.paths[kind] = trace(node, launch)
+
+        for cid, rising in capture.items():
+            for pin in ("D", "E"):
+                if (cid, pin) in data:
+                    check(f"{cid}.{pin}", data[cid, pin], rising, _SETUP_TICKS, (cid, pin))
+        at_rise = [(0, 0)]
+        for cid in out_pin:
+            if cid in data:
+                # The pin is read past its exit repeater, which the wire stops short of.
+                check(cid, [t + 1 if t >= 0 else _NONE for t in data[cid]], at_rise, 0, cid)
+        for cid in probed:
+            if cid in seq:
+                times = starts.get(cid)
+            else:
+                times = gate_out(cid, data[cid]) if cid in data and cid in by_id else None
+            if times is not None:
+                check(f"print {cid}", times, at_rise, 0)
+        # A write the falling edge opened has to be over before what it writes changes, after the next rising edge.
+        soonest: dict[object, int] = {cid: 1 for cid in starts if cid in by_id and by_id[cid].type == ComponentType.INPUT_PIN}
+        for cid, rising in capture.items():
+            soonest[cid] = min(t for _, t in rising) + _FASTEST_GATE
+        for node in order:
+            t = soonest.get(node)
+            if t is None:
+                continue
+            out = t + _FASTEST_GATE if node in by_id and node not in seq and by_id[node].type != ComponentType.INPUT_PIN else t
+            for ticks, sink in wires.get(node, ()):
+                soonest[sink] = min(soonest.get(sink, _UNREACHED), out + ticks)
+            for sink, edges in arcs.get(node, ()):
+                soonest[sink] = min(soonest.get(sink, _UNREACHED), t + min(edges.values()))
+        for cid, macro in macro_of.items():
+            for pin, still in macro.closing.items():
+                times = data.get((cid, pin))
+                if times is None or times[_FALL_DOWN] < 0:
+                    continue
+                changes = min((soonest[cid, p] for p in macro.guarded.get(pin, ()) if (cid, p) in soonest), default=0)
+                need = times[_FALL_DOWN] + still - changes
+                if need > result.write_floor:
+                    result.write_floor = need
+                    result.worst["write_floor"] = f"{cid}.{pin}"
+                    result.paths["write_floor"] = trace((cid, pin), 2)
+        return result
 
     def path_nets(self, pin: tuple[str, str], via: dict) -> list[tuple[str, Pos]]:
         """The earliest data path into a pin, as (net, sink cell), from the pin back to the launching flip-flop."""
@@ -367,9 +618,11 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
 
 
 def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str],
-             probed: Collection[str] = (), opaque: Collection[Box] = ()) -> int:
-    """Pad every data path that beats its flip-flop's clock; returns the slowest safe clock period. comp is the flat
-    netlist, terminals its gate pins' cells, probed the cells prints read, opaque boxes that net searches stop at."""
+             probed: Collection[str] = (), opaque: Collection[Box] = (), macros: dict | None = None,
+             requirement: list[ClockRequirement] | None = None) -> int:
+    """Pad every data path that beats its flip-flop's clock; returns the slowest flip-flop to flip-flop time. comp is the
+    flat netlist, terminals its gate pins' cells, probed the cells prints read, opaque boxes that net searches stop at.
+    `requirement` gets what the clock has to be, from the wire as padded: macros time the blocks in the netlist."""
     if not any(c.type in _SEQUENTIAL for c in comp.components):
         return 0
     protected = frozenset(terminals.values())
@@ -417,6 +670,14 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
         print(f"[hold] still short: {pin} margin {m}")
     period = timing.min_period(clock, probed)
     print(f"[hold] slowest flip-flop to flip-flop or print path {period} ticks")
+    if requirement is not None:
+        found = timing.clock_requirement(macros, probed)
+        requirement.append(found)
+        print(f"[timing] half period {found.half_period}: paths of a whole period {found.full}, half a period {found.half_cycle}, "
+              f"RAM writes closing {found.write_floor}; worst {found.worst}"
+              + (f"; {found.unclocked} flip-flops on clocks made by logic not counted" if found.unclocked else ""))
+        for kind, route in found.paths.items():
+            print(f"[timing] {kind} path: {route}")
     return period
 
 
