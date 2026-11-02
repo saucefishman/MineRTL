@@ -14,12 +14,14 @@ import heapq
 from collections import defaultdict
 from collections.abc import Callable, Collection
 
+import numpy as np
 from litemapy import BlockState, Region
 
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from .block_utils import Box
 from .ir import ComponentList, ComponentType
-from .verify import Excluding, HiddenBoxes, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH, _WALL_TORCH, _World
+from .verify import (Excluding, HiddenBoxes, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH,
+                     _WALL_TORCH, _World, _signals, cell_byte, signal_grid)
 
 Pos = tuple[int, int, int]
 _SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
@@ -78,6 +80,13 @@ class _HoldTiming:
         self.clock_net_ids = {n.net_id for n in clock_nets}
         self.roots = {n.source.component_id for n in clock_nets
                       if self.by_id[n.source.component_id].type == ComponentType.INPUT_PIN}
+
+    def forget(self, net_id: str) -> None:
+        """A net's wire changed. Other nets keep what they found until they change too."""
+        self.cache.pop(net_id, None)
+
+    def wire_ticks(self, n, s) -> int | None:
+        return self.net_search(n.net_id)[0].get(self.terminals[s.component_id, s.pin_name])
 
     def gate(self, cid: str) -> int:
         c = self.by_id[cid]
@@ -139,8 +148,7 @@ class _HoldTiming:
             for s in n.sinks:
                 inputs[s.component_id].append((n, s))
 
-        def wire(n, s) -> int | None:
-            return self.net_search(n.net_id)[0].get(self.terminals[s.component_id, s.pin_name])
+        wire = self.wire_ticks
 
         memo: dict[str, int] = {}
 
@@ -184,6 +192,106 @@ class _HoldTiming:
         while node in parent:
             node = parent[node]
             cells.append(node[0])
+        return list(dict.fromkeys(cells[:-1]))
+
+
+class _GridWorld(_World):
+    """A _World whose writes reach the kernel's grid too."""
+    grid = None
+
+    def changed(self, p: Pos) -> None:
+        super().changed(p)
+        self.grid.set_byte(p, cell_byte(self.block(p)))
+
+
+class _KernelTiming(_HoldTiming):
+    """_HoldTiming on the kernel, which does what its Python does: margins are worked out after every padded pin."""
+
+    def __init__(self, world: _GridWorld, comp: ComponentList, terminals: dict[tuple[str, str], Pos], skip: set[str]):
+        super().__init__(world, comp, terminals, skip)
+        self.grid = world.grid
+        ids = {c for c in self.by_id} | {e.component_id for n in self.nets.values() for e in (n.source, *n.sinks)}
+        self.gate_ids = sorted(ids)
+        self.gate_of = {cid: i for i, cid in enumerate(self.gate_ids)}
+        self.net_list = list(self.nets.values())
+        self.net_of = {n.net_id: i for i, n in enumerate(self.net_list)}
+        self.pin_keys: list[tuple[str, str]] = []
+        self.pin_of: dict[tuple[str, str], int] = {}
+        self.sink_of: dict[tuple[str, str, str], int] = {}
+        net_sinks = []
+        for n in self.net_list:
+            sinks = []
+            for index, s in enumerate(n.sinks):
+                self.sink_of.setdefault((n.net_id, s.component_id, s.pin_name), index)
+                kind = self.by_id[s.component_id].type
+                klass = 0 if kind in _SEQUENTIAL else 1 if kind == ComponentType.OUTPUT_PIN else 2
+                pin = -1
+                if klass == 0:
+                    pin = self.pin_of.setdefault((s.component_id, s.pin_name), len(self.pin_keys))
+                    if pin == len(self.pin_keys):
+                        self.pin_keys.append((s.component_id, s.pin_name))
+                sinks.append((self.gate_of[s.component_id], pin, klass))
+            net_sinks.append(sinks)
+        gates_from = [[self.net_of[n.net_id] for n in self.nets_from.get(cid, ())] for cid in self.gate_ids]
+        self.kernel = _signals.HoldKernel(net_sinks, gates_from, len(self.gate_ids), len(self.pin_keys), self._search)
+        self.real_delay = np.array([self.gate(cid) if cid in self.by_id else 0 for cid in self.gate_ids], dtype=np.intc)
+        self.fast_delay = np.full(len(self.gate_ids), _FASTEST_GATE, dtype=np.intc)
+
+    def _search(self, index: int) -> list[int]:
+        n = self.net_list[index]
+        src = self.terminals[n.source.component_id, n.source.pin_name]
+        ends = [self.terminals[s.component_id, s.pin_name] for s in n.sinks]
+        keys, parents, ticks = self.grid.search(src, {*ends, src}, ends)
+        self.cache[n.net_id] = (keys, parents)
+        return ticks
+
+    def forget(self, net_id: str) -> None:
+        super().forget(net_id)
+        self.kernel.forget(self.net_of[net_id])
+
+    def wire_ticks(self, n, s) -> int | None:
+        t = self.kernel.arrival(self.net_of[n.net_id], self.sink_of[n.net_id, s.component_id, s.pin_name])
+        return None if t < 0 else t
+
+    def _pins(self, starts: dict[str, int], delays: np.ndarray) -> dict[tuple[str, str], int]:
+        found = self.kernel.propagate([(self.gate_of[cid], t) for cid, t in starts.items()], delays)
+        return {self.pin_keys[pin]: t for pin, t in found}
+
+    def margins(self) -> tuple[dict[str, int], dict[tuple[str, str], int], dict]:
+        pins = self._pins({cid: 1 for cid in self.roots}, self.real_delay)
+        clock = {cid: t for (cid, pin), t in pins.items() if pin == "C"}
+        launches = {cid: t + _FASTEST_GATE for cid, t in clock.items()}
+        data = self._pins(launches, self.fast_delay)
+        margins = {(c, p): t - clock[c] for (c, p), t in data.items() if c in clock and p != "C"}
+        return clock, margins, {}  # path_nets reads the kernel's last run
+
+    def path_nets(self, pin: tuple[str, str], via: dict) -> list[tuple[str, Pos]]:
+        out = []
+        step = self.kernel.via_of_pin(self.pin_of[pin])
+        while step is not None:
+            net, driver, sink = step
+            n = self.net_list[net]
+            s = n.sinks[sink]
+            out.append((n.net_id, self.terminals[s.component_id, s.pin_name]))
+            cid = self.gate_ids[driver]
+            if self.by_id[cid].type in _SEQUENTIAL:
+                break
+            step = self.kernel.via_of_gate(driver)
+        return out
+
+    def cells_back(self, net_id: str, sink: Pos) -> list[Pos]:
+        self.kernel.ensure(self.net_of[net_id])
+        keys, parents = self.cache[net_id]
+        at = None
+        for mode in range(3):  # "", strong, weak, as _HoldTiming tries them
+            found = np.flatnonzero(keys == self.grid.node_key(sink, mode))
+            if len(found) and parents[found[0]] >= 0:
+                at = int(found[0])
+                break
+        cells = []
+        while at is not None and parents[at] >= 0:
+            at = int(parents[at])
+            cells.append(self.grid.pos_of_key(int(keys[at])))
         return list(dict.fromkeys(cells[:-1]))
 
 
@@ -254,7 +362,7 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
         added += ticks
         counts["new"] += 1
     if added:
-        timing.cache.pop(net_id, None)
+        timing.forget(net_id)
     return added
 
 
@@ -264,9 +372,16 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
     netlist, terminals its gate pins' cells, probed the cells prints read, opaque boxes that net searches stop at."""
     if not any(c.type in _SEQUENTIAL for c in comp.components):
         return 0
-    world = _World(workspace, HiddenBoxes(frozenset(), opaque), frozenset(terminals.values()))
-    timing = _HoldTiming(world, comp, terminals, failed)
     protected = frozenset(terminals.values())
+    blocked = HiddenBoxes(frozenset(), opaque)
+    grid = signal_grid(workspace, blocked, protected)
+    if grid is None:
+        world = _World(workspace, blocked, protected)
+        timing = _HoldTiming(world, comp, terminals, failed)
+    else:
+        world = _GridWorld(workspace, blocked, protected)
+        world.grid = grid
+        timing = _KernelTiming(world, comp, terminals, failed)
     counts = {"raised": 0, "new": 0}
     clock, margins, via = timing.margins()
     if not clock:

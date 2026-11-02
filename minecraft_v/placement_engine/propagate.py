@@ -20,7 +20,12 @@ from nbtlib.tag import Compound, Int, String
 
 from minecraft_v.progress import log
 
-from .block_utils import Box, cells_around_boxes, palette_writer
+from .block_utils import Box, cells_in_boxes_near, palette_writer
+
+try:
+    from . import _signals
+except ImportError:
+    _signals = None  # not built: _Propagation does the same, slower
 
 Pos = tuple[int, int, int]
 
@@ -415,23 +420,23 @@ class _Propagation:
                         buckets[level - 1].append(q)
         return levels
 
-    def _starting_cells(self) -> list[Pos]:
+    def _starting_cells(self) -> np.ndarray:
         """Redstone outside the boxes, and redstone in them that something outside could feed."""
         table = np.array([k >= 0 for k in self.kind_id])
         mask = table[self.blocks]
         for lo, hi in self.opaque:
             mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
-        cells = [(x, y, z) for x, y, z in np.argwhere(mask).tolist()]
+        cells = np.argwhere(mask)
         del mask
-        near = {_add(p, d) for p in cells_around_boxes(self.region, self.opaque, 2) for d in _REACH_TWO}
-        cells += sorted(p for p in near if self._is_in_box(p) and self.kind_id[self._id(p)] >= 0)
-        return cells
+        near = cells_in_boxes_near(self.region, self.opaque, 2, _REACH_TWO)
+        near = near[table[self.blocks[near[:, 0], near[:, 1], near[:, 2]]]]
+        return np.concatenate((cells, near))
 
     def run(self) -> None:
         power = self.power
         queue: deque[int] = deque()
         steppers: list[int] = []
-        for p in self._starting_cells():
+        for p in map(tuple, self._starting_cells().tolist()):
             i = self._at(p)
             if self.kind[i] == _DUST:
                 number = self._run(i)
@@ -495,11 +500,62 @@ class _Propagation:
         return lines
 
 
+def _run_kernel(region: Region, opaque: Collection[Box]):
+    """The kernel, run to the end, or None where only _Propagation can: no kernel, an odd array, or redstone as palette
+    entry 0, which is also what's read outside the region."""
+    propagation = _Propagation(region, opaque)
+    palette, blocks = propagation.palette, propagation.blocks
+    if _signals is None or blocks.dtype != np.uint32 or propagation.kind_id[0] >= 0:
+        return None
+    kinds = propagation.kind_id
+    index = {d: i for i, d in enumerate(_FACES)}
+
+    def attach(block: BlockState) -> int:
+        face = _property(block, "face", "wall")
+        return 0 if face == "floor" else 1 if face == "ceiling" else index[_FACING[_property(block, "facing", "north")]]
+
+    tables = {
+        "solid": propagation.solid_id,
+        "transparent": propagation.transparent_id,
+        "kind": kinds,
+        "facing": [index[_FACING[_property(b, "facing", "north")]] if k in (_REPEATER, _COMPARATOR, _WALL_TORCH) else 0
+                   for b, k in zip(palette, kinds)],
+        "level": [_Propagation._saved_power(b, k) for b, k in zip(palette, kinds)],
+        "attach": [attach(b) if k == _LEVER else 0 for b, k in zip(palette, kinds)],
+        "locked": [_property(b, "locked", "false") == "true" for b in palette],
+        "subtract": [_property(b, "mode", "compare") == "subtract" if k == _COMPARATOR else False
+                     for b, k in zip(palette, kinds)],
+        "dot": [all(_property(b, name, "none") == "none" for name in _SIDE_PROPERTY.values()) for b in palette],
+    }
+    settler = _signals.Settler(blocks, tables, propagation.opaque, _REACH_TWO, propagation.comparator_signal)
+    settler.run(propagation._starting_cells().astype(np.int32), _MAX_STEPS_PER_ITEM, _MAX_STEPS_PER_CELL)
+    if settler.oscillated:
+        log("[settle] signal never went still, is there an oscillator? Saving the states as they are.")
+    last_run.update(steps=settler.steps, cells=settler.cell_count)
+    return settler
+
+
+last_run: dict[str, int] = {}  # steps taken and redstone cells visited by the kernel's last settle
+
+
 def propagate_states(region: Region, opaque: Collection[Box] = ()) -> list[str]:
     """Settled states of region's blocks."""
-    propagation = _Propagation(region, opaque)
-    propagation.run()
-    return propagation.states()
+    settler = _run_kernel(region, opaque)
+    if settler is None:
+        propagation = _Propagation(region, opaque)
+        propagation.run()
+        return propagation.states()
+    lines = []
+    for (x, y, z), state, power, locked in zip(*(a.tolist() for a in settler.results())):
+        if state == 0:
+            lines.append(f"{x} {y} {z} powered {int(power > 0)} {int(locked)}")
+        elif state == 1:
+            lines.append(f"{x} {y} {z} power {power}")
+        elif state == 2:
+            lines.append(f"{x} {y} {z} lit {int(power > 0)}")
+        else:
+            lines.append(f"{x} {y} {z} output {power}")
+    return lines
 
 
 def comparator_entity(pos: Pos, level: int) -> TileEntity:
@@ -550,4 +606,46 @@ def settle(region: Region, opaque: Collection[Box] = ()) -> None:
 
     opaque: boxes already settled on their own with nothing driving them, whose insides are only visited if signal
     reaches them."""
-    apply_states(region, propagate_states(region, opaque))
+    settler = _run_kernel(region, opaque)
+    if settler is None:
+        apply_states(region, propagate_states(region, opaque))
+    else:
+        _apply_results(region, *settler.results())
+
+
+def _apply_results(region: Region, pos: np.ndarray, state: np.ndarray, power: np.ndarray, locked: np.ndarray) -> None:
+    """apply_states for the kernel's results, in bulk. New blocks join the palette in the same order."""
+    write = palette_writer(region)
+    palette, blocks = region._Region__palette, region._Region__blocks
+    xs, ys, zs = pos[:, 0], pos[:, 1], pos[:, 2]
+    on = power > 0
+    value = np.where(state == 1, power, on.astype(np.int32))
+    value = np.where(state == 0, on.astype(np.int32) | locked.astype(np.int32) << 1, value)
+    keys = blocks[xs, ys, zs].astype(np.int64) << 8 | value
+    unique, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    ids = np.empty(len(unique), dtype=blocks.dtype)
+    flag = lambda v: "true" if v else "false"
+    for u in np.argsort(first).tolist():
+        row = int(first[u])
+        p = (int(xs[row]), int(ys[row]), int(zs[row]))
+        kind, level = int(state[row]), int(power[row])
+        if kind == 0:
+            props = {"powered": flag(level > 0), "locked": flag(locked[row])}
+        elif kind == 1:
+            props = {"power": str(level)}
+        elif kind == 2:
+            props = {"lit": flag(level > 0)}
+        else:
+            props = {"powered": flag(level > 0)}
+        write(p, palette[int(unique[u]) >> 8].with_properties(**props))
+        ids[u] = blocks[p]
+    blocks[xs, ys, zs] = ids[inverse.ravel()]
+    entities = {entity.position: entity for entity in region.tile_entities}
+    for row in np.flatnonzero(state == 3).tolist():
+        p = (int(xs[row]), int(ys[row]), int(zs[row]))
+        old = entities.pop(p, None)
+        if old is not None:
+            region.tile_entities.remove(old)
+        if power[row]:
+            entities[p] = comparator_entity(p, int(power[row]))
+            region.tile_entities.append(entities[p])
