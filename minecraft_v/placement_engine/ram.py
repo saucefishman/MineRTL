@@ -428,7 +428,8 @@ def build_group(name: str, specs: list[StackSpec]) -> tuple[Macro, dict[str, tup
     for k, spec in enumerate(specs):
         for bit in range(spec.abits):  # the upper pin's tower reaches down its lane through the lower pin's line out
             for lower, upper in (("aa", "ac"), ("ab", "ad")):
-                if len(users[spec.nets[f"{lower}[{bit}]"]]) == 1 and len(users[spec.nets[f"{upper}[{bit}]"]]) > 1:
+                alone, above = spec.nets.get(f"{lower}[{bit}]"), spec.nets.get(f"{upper}[{bit}]")
+                if alone is not None and above is not None and len(users[alone]) == 1 and len(users[above]) > 1:
                     raise ValueError(f"{name}: stack {k} has {lower}[{bit}] alone but {upper}[{bit}] shared")
     lane_pins = {net: f"lane{n}" for n, net in enumerate(shared)}
     towers: list[dict[str, tuple[int, int, int]]] = [{} for _ in specs]
