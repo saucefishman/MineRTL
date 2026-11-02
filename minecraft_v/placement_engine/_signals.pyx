@@ -216,11 +216,12 @@ cdef extern from *:
         }
     }
 
-    // Whether _latch_cycle would find anything: a repeater on a cycle of more than one node.
+    // Whether _latch_cycle would find anything: a repeater or torch on a cycle of more than one node.
+    static bool driver(int k) { return k == K_REPEATER || SignalGrid::torch(k); }
     static bool has_latch(const SignalGrid& grid, const NetGraph& G) {
         int n = (int)G.node.size();
         bool any = false;
-        for (int i = 0; i < n && !any; i++) any = (grid.g[G.node[i] / 3] & 7) == K_REPEATER;
+        for (int i = 0; i < n && !any; i++) any = driver(grid.g[G.node[i] / 3] & 7);
         if (!any) return false;
         std::vector<int> index(n, -1), low(n, 0), stack, frames, next_edge(n, 0);
         std::vector<uint8_t> on(n, 0);
@@ -241,13 +242,13 @@ cdef extern from *:
                     frames.pop_back();
                     if (!frames.empty()) low[frames.back()] = std::min(low[frames.back()], low[a]);
                     if (low[a] == index[a]) {
-                        int size = 0; bool repeater = false;
+                        int size = 0; bool has_driver = false;
                         for (;;) {
                             int b = stack.back(); stack.pop_back(); on[b] = 0; size++;
-                            if ((grid.g[G.node[b] / 3] & 7) == K_REPEATER) repeater = true;
+                            if (driver(grid.g[G.node[b] / 3] & 7)) has_driver = true;
                             if (b == a) break;
                         }
-                        if (size > 1 && repeater) return true;
+                        if (size > 1 && has_driver) return true;
                     }
                 }
             }
