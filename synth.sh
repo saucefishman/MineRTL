@@ -146,9 +146,24 @@ if [[ "$debug_prints" == false ]]; then
 fi
 map_tiled_ram=""
 if [[ "$tiled_ram" == true ]]; then
-    map_tiled_ram="opt
+    # Index and width rewrites first: they remove most barrel shifters from register arrays.
+    map_tiled_ram="wreduce
+opt_expr -fine
+opt_clean
+peepopt
+opt -full -purge
+wreduce
+opt_expr -fine
+opt_clean
+peepopt
+opt -full -purge
 memory_collect
 techmap -map techmap/ram_2r1w.v -map techmap/ram_4r2w.v t:\$mem_v2"
+fi
+abc_step=""
+if [[ "$tiled_ram" == true ]]; then
+    abc_step="abc -g AND,OR,XOR,MUX
+opt_clean"
 fi
 yosys_status=0
 yosys -q -l "$yosys_log" -p "
@@ -172,6 +187,7 @@ opt -nosdff
 techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
 techmap -map techmap/dffe_pn_decompose.v
 opt_clean
+${abc_step}
 write_json ${artifacts_dir}/netlist.json
 stat
 " > "$yosys_err" 2>&1 || yosys_status=$?
