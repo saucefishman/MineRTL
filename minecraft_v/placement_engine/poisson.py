@@ -706,7 +706,9 @@ _BANK_STACK_HEIGHT = 190  # worlds aren't tall enough for one stack of a big mem
 _BANK_COLUMN_GAP = 4
 _SOUTH_PINS_CLEAR = 24  # Z past a south_pins block's face, for the output row and wire to its pins
 _SOUTH_PINS_DENSITY = float(os.environ.get("RAM_GATE_DENSITY", 0.15))
-_SOUTH_PINS_OUTPUT_PITCH = 4
+_SOUTH_PINS_OUTPUT_PITCH = int(os.environ.get("RAM_OUTPUT_PITCH", 2))  # outputs differ in Y, so columns can be tight
+_channel = os.environ.get("RAM_GATE_CHANNEL")
+_SOUTH_PINS_CHANNEL = float(_channel) if _channel else None  # Z from the block's clearance to the gates; None leaves the void
 _SOUTH_PINS_WIDTH = float(os.environ.get("RAM_GATE_WIDTH", 0.35))  # share of the block's width
 _SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
@@ -762,6 +764,11 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     held = {i: origin - np.array([gate_shift, 0.0, 0.0]) for i, origin in fixed.items()}
     pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, held, repel))
     pos[free, 0] += gate_shift
+    if all(gates[i].metadata.get("south_pins") for i in banks) and _SOUTH_PINS_CHANNEL is not None:
+        # The block's charge presses gates to the far end of the domain, leaving a void: close it to the channel wanted.
+        # Moved as one, so global placement's density and legalization time don't change, as a shorter domain's would.
+        near = float(np.percentile(pos[free, 2], 2))
+        pos[free, 2] = np.maximum(pos[free, 2] - max(0.0, near - box[1][2] - _SOUTH_PINS_CHANNEL), box[1][2])
     occ = _Occupancy(np.vstack([sizes, box[1]]))
     occ.add(len(gates), (0, 0, 0))
     for i in fixed:
