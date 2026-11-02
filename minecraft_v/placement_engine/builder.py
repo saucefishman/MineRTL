@@ -49,7 +49,7 @@ from .template import (
 from .hold import fix_hold, flat_terminals, repeater_delay
 from .macro import Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, Excluding, _World, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -85,6 +85,7 @@ def _place_gate_templates(
     ref_lm_version = 6
     ref_lm_sub = 1
     oriented_blocks: dict[tuple[str, bool, bool], list] = {}
+    refs: dict[str, Schematic] = {}
     for item in placed:
         c = item.component
         if c.type == ComponentType.CUSTOM:
@@ -97,7 +98,9 @@ def _place_gate_templates(
             raise ValueError(f"No schematic template for {c.type}")
         info = SCHEMATIC_MAP[c.type]
         template = _load_template_region(schematics_dir, info.file_prefix)
-        ref = Schematic.load(str(schematics_dir / f"{info.file_prefix}.litematic"))
+        ref = refs.get(info.file_prefix)
+        if ref is None:
+            ref = refs[info.file_prefix] = Schematic.load(str(schematics_dir / f"{info.file_prefix}.litematic"))
         ref_mc_version = int(ref.mc_version)
         ref_lm_version = int(ref.lm_version)
         ref_lm_sub = int(ref.lm_subversion)
@@ -705,6 +708,7 @@ _RIP_ROUNDS = 3  # per job: rip-and-retry rounds, each for a sink that hasn't ha
 _ESCALATE_RADIUS = 6  # a job out of retries gets this wider ring ripped, once, even nets ripped before
 _ESCALATE_MAX = 8
 _REPAIR_ROUNDS = 3  # re-routes of nets verify still finds fault with
+_NEAREST_SEEDS = 256  # a sink search starts from this many of the net's wire cells, nearest first
 
 Pos = tuple[int, int, int]
 
@@ -746,14 +750,37 @@ _LOG_SLOW_SEARCH_SECONDS = 5.0
 _LOG_SLOW_JOB_SECONDS = 10.0
 
 
+class _TreeCells:
+    """A net's wire cells, for picking those nearest a sink without walking them all."""
+
+    def __init__(self) -> None:
+        self.cells = np.empty((1024, 3), dtype=np.int32)
+        self.n = 0
+
+    def add(self, cells: list[Pos]) -> None:
+        if not cells:
+            return
+        while self.n + len(cells) > len(self.cells):
+            self.cells = np.concatenate((self.cells, np.empty_like(self.cells)))
+        self.cells[self.n:self.n + len(cells)] = cells
+        self.n += len(cells)
+
+    def nearest(self, goal: Pos, k: int) -> list[Pos]:
+        """The k cells with the lowest search heuristic for goal."""
+        cells = self.cells[:self.n]
+        d = np.abs(cells - np.array(goal, dtype=np.int32)) * np.array((1, 4, 1), dtype=np.int32)
+        h = d.sum(axis=1)
+        return [tuple(c) for c in cells[np.argpartition(h, k)[:k]].tolist()]
+
+
 class _GreedyRouter:
     """Greedy, journaled routing of _RouteJobs with the retry layers that make it robust:
 
     - per sink: a path the search accepted can still fail to lay when it crosses its own
       earlier cells/supports outside the search's local snapshot (LayConflict). Undo that
       sink's partial path and search again without the conflicting cell.
-    - per job: no repeater slot on a stretch (all slopes/turns): undo the job and route it
-      again with that stretch blocked, keeping clear of the job's terminals.
+    - per job: no repeater slot on a stretch (all slopes/turns): rip the branch at its end and
+      route those sinks again with the stretch blocked, keeping clear of the job's terminals.
     - per job: a sink can be walled in by the job's own earlier wire: route it again with that
       sink first.
     - per sink: a sink search that fails is usually walled in by jobs routed earlier. Keep the
@@ -892,12 +919,16 @@ class _GreedyRouter:
         targets = [*vias, *sinks]
         if self.resume and not kept:
             targets = self.resume.targets_in_saved_order(job.key, targets)
+        all_seeds: list[Pos] = net_seeds + [pos for path in paths for pos in path]
+        tree = _TreeCells()
+        tree.add(all_seeds)
+        depths = _signal_depths((self.net_paths(job.net_id) if net_seeds else []) + paths)
         for dst_index, dst in enumerate(targets):
             if kept and dst_index < kept.next_target:
                 continue
             status(f"{job.key} target {dst_index + 1}/{len(targets)}")
             pending = frozenset(job.sinks) & frozenset(sinks[max(0, dst_index - len(vias)):])
-            tree_seeds = net_seeds + [pos for path in paths for pos in path]
+            tree_seeds = all_seeds
             start = job.src
             far_via = next((v for v in reached_vias if (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
             trunk: frozenset[Pos] = frozenset()
@@ -907,7 +938,7 @@ class _GreedyRouter:
                 near = [c for c in tree_seeds if (c[2] - far_via[2]) * (job.src[2] - far_via[2]) >= 0 and c != far_via]
                 trunk = frozenset(near)
                 tree_seeds = [far_via, *(c for c in tree_seeds if c not in trunk and c != far_via)]
-            seed_depths = _signal_depths((self.net_paths(job.net_id) if net_seeds else []) + paths)
+            seed_depths = depths
             self.failed_goal[job.key] = dst  # cleared when the sink is laid
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
             ends = {job.src, dst}
@@ -919,14 +950,23 @@ class _GreedyRouter:
                 try:
                     try:
                         def search(stagnation: int = -1) -> list[Pos]:
+                            wide = stagnation < 0 and job.key in self.wide_budget  # a last try: no holding back
+                            if tree_seeds is all_seeds and tree.n > _NEAREST_SEEDS and not wide:
+                                try:
+                                    return search_from(tree.nearest(dst, _NEAREST_SEEDS), stagnation)
+                                except ValueError:
+                                    rollback(rec, job.key, mark)  # a failed search marks its way with lamps
+                            return search_from(tree_seeds, stagnation)
+
+                        def search_from(seeds: list[Pos], stagnation: int) -> list[Pos]:
                             return _find_wire_path(
                                 ws, self.solid, self.dust_owner,
                                 start, dst, job.net_id,
                                 job.bounds, self.max_bridge_y,
-                                tree_seeds=tree_seeds,
+                                tree_seeds=seeds,
                                 protected=job.protected,
                                 footprint_blocked=self.footprint_blocked,
-                                inverted_cells=frozenset(self.inverted_cells),
+                                inverted_cells=self.inverted_cells,
                                 terminal_positions=self.terminal_positions,
                                 blocked=frozenset(blocked | trunk),
                                 seed_depths=seed_depths,
@@ -955,7 +995,7 @@ class _GreedyRouter:
                                 if start == job.src:
                                     raise
                                 start, trunk = job.src, frozenset()  # past the via there's no way on: from the whole tree
-                                tree_seeds = net_seeds + [pos for p in paths for pos in p]
+                                tree_seeds = all_seeds
                                 rollback(rec, job.key, mark)
                                 path = search_tight_first()
                     finally:
@@ -966,7 +1006,7 @@ class _GreedyRouter:
                     if beside_start and path[0][0] == start[0] and path[0][2] == start[2]:
                         # Began right above or below the via: no move links that, so search from the tree instead.
                         start, trunk = job.src, frozenset()
-                        tree_seeds = net_seeds + [pos for p in paths for pos in p]
+                        tree_seeds = all_seeds
                         continue
                     if beside_start:
                         # A search may begin beside its start. Past a via, the repeater walk needs
@@ -1017,27 +1057,32 @@ class _GreedyRouter:
             if dst in vias:
                 reached_vias.append(dst)
             paths.append(path)
+            all_seeds.extend(path)
+            tree.add(path)
+            _signal_depths([path], depths, in_place=True)
             path_targets.append(dst)
             path_cells.append(self._cells_since(job.key, mark))
+        # For route_job_retrying to keep, if a check below fails.
+        self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
         _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
         # Wire branches off the net's own sinks, so signal has to be followed through those.
-        latch = find_latch(self.region, job.src, self.terminal_positions - {job.src, *job.sinks})
+        stop = Excluding(self.terminal_positions, {job.src, *job.sinks})
+        world = _World(self.region, frozenset(), frozenset())
+        latch = find_latch(self.region, job.src, stop, world)
         if latch and all(self.dust_owner.get(cell, job.net_id) == job.net_id for cell in latch):
             raise LayConflict(f"Net '{job.net_id}': wire past a repeater feeds back into it (latch)", tuple(latch))
         # The search only sees its own path's last few cells, and a tower or drop can land beside wire laid earlier.
         own_cells = frozenset(e[2] for e in rec.journals[job.key] if e[0] == "block")
-        inverted = find_inverted_contacts(self.region, job.src, job.sinks,
-                                          self.terminal_positions - {job.src, *job.sinks},
-                                          self.footprint_blocked, self.terminal_positions | own_cells)
+        inverted = find_inverted_contacts(self.region, job.src, job.sinks, stop,
+                                          self.footprint_blocked, Either(self.terminal_positions, own_cells))
         if inverted:
             raise LayConflict(f"Net '{job.net_id}': wire touches its own inverted signal at {inverted[:4]} (inverted)", tuple(inverted))
-        touching = find_gate_contacts(self.region, own_cells, self.gate_cells)
+        touching = find_gate_contacts(self.region, own_cells, self.gate_cells, world)
         if touching:
             raise LayConflict(f"Net '{job.net_id}': wire powers a gate's block at {touching[:4]} (gate contact)", tuple(touching))
         self.paths[job.key] = (job.net_id, paths)
-        self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         self.has_kept_wire.discard(job.key)
 
     def _via_open(self, via: Pos, job: _RouteJob) -> bool:
@@ -1077,9 +1122,16 @@ class _GreedyRouter:
             except LayConflict as e:
                 stretch = frozenset(e.cells) - near_terminal - job_blocked
                 lay_attempts += 1
-                if lay_attempts > _NET_RETRIES or not stretch or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)")):
+                # Kept wire can hold the fault, with nothing new to block: starting over clears it.
+                if (lay_attempts > _NET_RETRIES or (not stretch and job.key not in self.has_kept_wire)
+                        or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)"))):
                     raise
-                self._undo_job(job.key, mark)
+                if stretch and "cannot place repeater" in str(e) and lay_attempts == 1:
+                    # Every sink is laid by now: only the branch at the fault has to go. The stretch can
+                    # run back up the wire feeding that branch, whose last cells are where it ran out.
+                    self.rip_branch(job, list(e.cells[-1:]))
+                else:  # a contact can involve any two branches, and a second fault means this branch wasn't all of it
+                    self._undo_job(job.key, mark)
                 job_blocked |= stretch
             except ValueError:
                 goal = self.failed_goal.get(job.key)
@@ -1365,8 +1417,10 @@ def _route_all_nets(
             safe_id = job.key.replace("/", "_").replace("\\", "_")
             save_schematic_artifact(f"net_{i:03d}_{safe_id}.litematic", workspace, snapshot_dir)
 
+    started = time.monotonic()
     failures = router.run(jobs, "[wire]", deadline=deadline, fail_fast=fail_fast, on_done=snapshot)
-    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed)")
+    wire = sum(len(path) for _, net_paths in router.paths.values() for path in net_paths)
+    log(f"[wire] done ({len(jobs)} nets, {len(failures)} failed) {time.monotonic() - started:.1f}s, {wire} path cells")
     if not macros:
         failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
                                         frozenset(_component_interior(placed)), deadline)
@@ -1850,9 +1904,9 @@ def _net_wire_ticks(
         src = _pin_for_endpoint(pin_terminal, n.source.component_id, n.source.pin_name)
         depth: dict[tuple[int, int, int], int] = {}
         floor = 0
+        by_distance = iter(sorted(net, key=lambda p: abs(p[0] - src[0]) + abs(p[1] - src[1]) + abs(p[2] - src[2])))
         while len(depth) < len(net):  # wire not joined to the rest (a hop the neighbours miss) continues from the deepest
-            start = min((p for p in net if p not in depth),
-                        key=lambda p: abs(p[0] - src[0]) + abs(p[1] - src[1]) + abs(p[2] - src[2]))
+            start = next(p for p in by_distance if p not in depth)
             depth[start] = floor + net[start]
             queue = deque([start])
             while queue:

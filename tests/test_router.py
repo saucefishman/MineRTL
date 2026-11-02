@@ -340,6 +340,34 @@ def test_sink_failing_again_while_first_is_final():
         router.route_job_retrying(job)
 
 
+def test_no_repeater_slot_reroutes_only_the_branch_at_the_fault(monkeypatch):
+    router, *_ = _router()
+    job = _job("n", (1, 1, 1), [(3, 1, 3), (9, 1, 1)])
+    searches = []
+    find = builder._find_wire_path
+
+    def counting_find(ws, solid, owner, start, dst, *args, **kwargs):
+        searches.append(dst)
+        return find(ws, solid, owner, start, dst, *args, **kwargs)
+
+    place = builder._place_repeaters_for_net
+    calls = []
+
+    def failing_once(ws, dust_owner, net_id, paths):
+        calls.append(paths)
+        if len(calls) == 1:
+            raise LayConflict("Net 'n': cannot place repeater to extend signal", tuple(paths[-1][1:]))
+        place(ws, dust_owner, net_id, paths)
+
+    monkeypatch.setattr(builder, "_find_wire_path", counting_find)
+    monkeypatch.setattr(builder, "_place_repeaters_for_net", failing_once)
+    with router.rec.recording(job.key):
+        router.route_job_retrying(job)
+    assert searches == [(3, 1, 3), (9, 1, 1), (9, 1, 1)]
+    assert [path[-1] for path in router.paths["n"][1]] == [(3, 1, 3), (9, 1, 1)]
+    assert "n" not in router.has_kept_wire
+
+
 def test_failed_sink_keeps_the_jobs_branches_and_rips_only_blockers(monkeypatch):
     router, *_ = _router()
     blocker = _job("blocker", (1, 1, 10), [(9, 1, 10)])

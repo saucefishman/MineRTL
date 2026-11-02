@@ -12,6 +12,7 @@ from litemapy import BlockState, Region
 from litemapy.minecraft import TileEntity
 from nbtlib.tag import Byte, Compound, List, String
 
+from .block_utils import palette_writer
 from .verify import _World
 
 Pos = tuple[int, int, int]
@@ -39,8 +40,9 @@ def apply_dust_shapes(region: Region) -> int:
             for d, name in _DIR_NAME.items()
         }))
     # Write after computing all shapes; the world's block cache must not see half-updated dust.
+    write = palette_writer(region)
     for p, props in shapes:
-        region[p] = region[p].with_properties(**props)
+        write(p, region[p].with_properties(**props))
     return len(shapes)
 
 

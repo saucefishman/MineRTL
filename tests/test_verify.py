@@ -410,3 +410,19 @@ def test_hold_keeps_dust_that_powers_a_torch_below():
     world = _World(region, frozenset(), frozenset())
     assert _straight_run(world, (2, 3, 1)) is None
     assert set(_straight_run(world, (2, 3, 4))) == {(1, 3, 4), (3, 3, 4)}
+
+
+def test_world_successors_follow_a_changed_block():
+    from minecraft_v.placement_engine.verify import _World
+    region = Region(0, 0, 0, 5, 3, 3)
+    for x in range(5):
+        region[x, 0, 1] = BlockState("minecraft:stone")
+        region[x, 1, 1] = BlockState("minecraft:redstone_wire")
+    world = _World(region, frozenset(), frozenset())
+    assert ((3, 1, 1), "") in world.successors(((2, 1, 1), ""))
+    assert ((1, 1, 1), "") in world.successors(((2, 1, 1), ""))
+
+    region[2, 1, 1] = BlockState("minecraft:repeater", facing=_DELTA_TO_FACING[(-1, 0)], delay="1")
+    world.changed((2, 1, 1))
+    assert world.successors(((2, 1, 1), "")) == [((3, 1, 1), "")]
+    assert ((2, 1, 1), "") not in world.successors(((3, 1, 1), ""))

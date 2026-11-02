@@ -25,10 +25,12 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 
-import networkx as nx
 import numpy as np
 from litemapy import BlockState, Region
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
 
@@ -49,19 +51,60 @@ class Violation:
     pos: Pos
 
 
+@lru_cache(maxsize=None)
+def _block_kind(bid: str) -> int:
+    if bid in ("minecraft:air", "minecraft:cave_air"):
+        return _AIR
+    if bid == "minecraft:redstone_wire":
+        return _DUST
+    if bid == "minecraft:repeater":
+        return _REPEATER
+    if bid == "minecraft:redstone_torch":
+        return _TORCH
+    if bid == "minecraft:redstone_wall_torch":
+        return _WALL_TORCH
+    return _OTHER if any(m in bid for m in _NON_OPAQUE_MARKERS) else _OPAQUE
+
+
+class Excluding:
+    """Cells of a set, less a few: copying a whole design's terminals per net adds up."""
+
+    def __init__(self, cells, excluded):
+        self.cells, self.excluded = cells, excluded
+
+    def __contains__(self, p) -> bool:
+        return p in self.cells and p not in self.excluded
+
+
+class Either:
+    """Cells of either of two sets."""
+
+    def __init__(self, a, b):
+        self.a, self.b = a, b
+
+    def __contains__(self, p) -> bool:
+        return p in self.a or p in self.b
+
+
 class _World:
     def __init__(self, region: Region, blocked: frozenset[Pos], terminals: frozenset[Pos]):
         self.region = region
         self.blocked = blocked
         self.terminals = terminals
         self._kind: dict[Pos, tuple[int, BlockState | None]] = {}
+        self._successors: dict[tuple[Pos, str], list[tuple[Pos, str]]] = {}
+        self._size = (region.width, region.height, region.length)
+        self._palette = getattr(region, "_Region__palette", None)  # straight there, this is read so often
+        self._blocks = getattr(region, "_Region__blocks", None)
 
-    def _in_region(self, p: Pos) -> bool:
-        r = self.region
-        return 0 <= p[0] < r.width and 0 <= p[1] < r.height and 0 <= p[2] < r.length
+    def changed(self, p: Pos) -> None:
+        """The block at p was written. Neighbours' successors depend on it too, so they all go."""
+        self._kind.pop(p, None)
+        self._successors.clear()
 
     def kind(self, p: Pos) -> int:
-        return self._lookup(p)[0]
+        cached = self._kind.get(p)
+        return cached[0] if cached is not None else self._lookup(p)[0]
 
     def block(self, p: Pos) -> BlockState | None:
         return self._lookup(p)[1]
@@ -70,26 +113,13 @@ class _World:
         cached = self._kind.get(p)
         if cached is not None:
             return cached
-        if not self._in_region(p) or (p in self.blocked and p not in self.terminals):
+        x, y, z = p
+        w, h, l = self._size
+        if not (0 <= x < w and 0 <= y < h and 0 <= z < l) or (p in self.blocked and p not in self.terminals):
             result = (_AIR, None)  # component internals are invisible
         else:
-            b = self.region[p]
-            bid = b.id
-            if bid in ("minecraft:air", "minecraft:cave_air"):
-                k = _AIR
-            elif bid == "minecraft:redstone_wire":
-                k = _DUST
-            elif bid == "minecraft:repeater":
-                k = _REPEATER
-            elif bid == "minecraft:redstone_torch":
-                k = _TORCH
-            elif bid == "minecraft:redstone_wall_torch":
-                k = _WALL_TORCH
-            elif any(m in bid for m in _NON_OPAQUE_MARKERS):
-                k = _OTHER
-            else:
-                k = _OPAQUE
-            result = (k, b)
+            b = self._palette[self._blocks[p]] if self._blocks is not None else self.region[p]
+            result = (_block_kind(b.id), b)
         self._kind[p] = result
         return result
 
@@ -154,6 +184,12 @@ class _World:
     # ---- the powers relation: node = (pos, mode); mode only matters for opaque blocks
 
     def successors(self, node: tuple[Pos, str]) -> list[tuple[Pos, str]]:
+        out = self._successors.get(node)
+        if out is None:
+            out = self._successors[node] = self._find_successors(node)
+        return out
+
+    def _find_successors(self, node: tuple[Pos, str]) -> list[tuple[Pos, str]]:
         p, mode = node
         k = self.kind(p)
         out: list[tuple[Pos, str]] = []
@@ -247,36 +283,48 @@ def _strengths(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
     return {pos for pos, _ in best}
 
 
-def find_latch(region: Region, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any."""
-    return _latch_cycle(_World(region, frozenset(), frozenset()), source, stop)
+def find_latch(region: Region, source: Pos, stop: frozenset[Pos], world: _World | None = None) -> list[Pos]:
+    """The cells of a signal cycle from source through a repeater, if any. world: one to reuse, with nothing hidden."""
+    return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop)
 
 
 def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
     """The cells of a signal cycle from source through a repeater, if any: it holds itself on."""
-    graph = nx.DiGraph()
     start: tuple[Pos, str] = (source, _STRONG if world.kind(source) == _OPAQUE else "")
-    seen = {start}
+    ids = {start: 0}
+    nodes = [start]
+    tails: list[int] = []
+    heads: list[int] = []
     queue = deque([start])
     while queue:
         node = queue.popleft()
         if node[0] in stop and node[0] != source:
             continue
+        tail = ids[node]
         for nxt in world.successors(node):
-            graph.add_edge(node, nxt)
-            if nxt not in seen:
-                seen.add(nxt)
+            head = ids.get(nxt)
+            if head is None:
+                head = ids[nxt] = len(nodes)
+                nodes.append(nxt)
                 queue.append(nxt)
-    for component in nx.strongly_connected_components(graph):
-        if len(component) > 1 and any(world.kind(pos) == _REPEATER for pos, _ in component):
-            return sorted({pos for pos, _ in component})
+            tails.append(tail)
+            heads.append(head)
+    repeaters = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) == _REPEATER]
+    if not repeaters:
+        return []
+    graph = csr_matrix((np.ones(len(tails), dtype=np.int8), (tails, heads)), shape=(len(nodes), len(nodes)))
+    _, labels = connected_components(graph, directed=True, connection="strong")
+    sizes = np.bincount(labels)
+    for label in sorted({labels[i] for i in repeaters if sizes[labels[i]] > 1}):
+        return sorted({nodes[i][0] for i in np.flatnonzero(labels == label).tolist()})
     return []
 
 
-def find_gate_contacts(region: Region, cells: frozenset[Pos], gate_cells: frozenset[Pos]) -> list[Pos]:
+def find_gate_contacts(region: Region, cells: frozenset[Pos], gate_cells: frozenset[Pos],
+                       world: _World | None = None) -> list[Pos]:
     """Dust among cells that powers a solid block inside a gate. That block can carry the gate's torch, which then
     switches on this wire. Verify can't see it: gate interiors are hidden from it."""
-    world = _World(region, frozenset(), frozenset())
+    world = world or _World(region, frozenset(), frozenset())
     hits = []
     for p in cells:
         if world.kind(p) != _DUST:
@@ -353,7 +401,7 @@ def verify_signals(
         # Stop at other nets' terminals (their pins lead into components); past this net's
         # own sinks there is only component interior, which `blocked` already hides.
         own = {source, *sinks}
-        stop = frozenset(t for t in terminals if t not in own)
+        stop = Excluding(terminals, own)
         reached = _reach(world, source, stop)
         for sink in sinks:
             if sink not in reached:
