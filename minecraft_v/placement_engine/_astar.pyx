@@ -961,11 +961,12 @@ cdef inline bint dominated(FlatMap[NodeInfo]* nodes, long long node, double g):
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False,
-           double h_radius_factor=-1, int stagnation=-1):
+           double h_radius_factor=-1, int stagnation=-1, int budget=1):
     """See pathfinding._search_py. With world, cells' static moves are generated here instead of
     by expand(); verify additionally checks each against expand(). stagnation: this search's limit
     (negative: _ROUTE_STAGNATION). h_radius_factor: the h-radius
-    cull for this search (0: off; negative: _H_RADIUS_FACTOR)."""
+    cull for this search (0: off; negative: _H_RADIUS_FACTOR). budget: multiplies the stagnation,
+    position and expansion limits."""
     global STAT_SEARCHES, STAT_POPS, STAT_PUSHES, STAT_CELLS, STAT_LOAD_TIME
     if not _init_done:
         raise RuntimeError("_astar.init() was not called")
@@ -1000,7 +1001,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef double deadline = 0
     early_stop_reason = None
     cdef double radius = H_RADIUS_FACTOR if h_radius_factor < 0 else h_radius_factor
-    cdef int stagnation_limit = STAGNATION if stagnation < 0 else stagnation
+    cdef long long stagnation_limit = budget * (STAGNATION if stagnation < 0 else stagnation)
+    cdef long long max_nodes = budget * MAX_NODES, max_expansions = budget * MAX_EXPANSIONS
     py_max_f = max(group_max_f)
     max_f = py_max_f
 
@@ -1073,8 +1075,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 if n_exp - last_new_pos > max_gap:
                     max_gap = n_exp - last_new_pos
                 last_new_pos = n_exp
-            if n_explored_xyz >= MAX_NODES:
-                early_stop_reason = f"node cap ({MAX_NODES} unique positions)"
+            if n_explored_xyz >= max_nodes:
+                early_stop_reason = f"node cap ({max_nodes} unique positions)"
                 break
         if cid < <int>is_goal.size() and is_goal[cid]:
             reached = e.node
@@ -1085,8 +1087,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if n_exp - last_new_pos >= stagnation_limit:
             early_stop_reason = f"stagnated ({stagnation_limit} expansions without a new position)"
             break
-        if n_exp >= MAX_EXPANSIONS:
-            early_stop_reason = f"expansion cap ({MAX_EXPANSIONS})"
+        if n_exp >= max_expansions:
+            early_stop_reason = f"expansion cap ({max_expansions})"
             break
 
         cur_snap = e.node & SNAP_MASK

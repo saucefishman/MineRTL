@@ -200,6 +200,23 @@ def test_router_breaks_long_descent_for_repeaters(drop, horiz):
     assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
 
 
+def test_router_gets_past_a_wall_on_a_wider_budget():
+    # cpu net_104: source and sink at either X end of a memory bank. A clear route exists, but the search
+    # spends a normal budget on states along the near face.
+    bounds = (0, 0, 0, 29, 44, 104)
+    rec = Recorder()
+    region = Region(0, 0, 0, bounds[3] + 1, bounds[4] + 1, bounds[5] + 1)
+    solid, dust_owner = JournaledSet(rec, name="solid"), JournaledDict(rec)
+    wall = frozenset((x, y, z) for x in (14, 15) for y in range(23) for z in range(4, 101))
+    router = _GreedyRouter(region, rec, solid, dust_owner, JournaledSet(rec, name="inverted"),
+                           wall, bounds[4], frozenset())
+    src, sink = (8, 17, 76), (21, 11, 76)
+    job = _RouteJob(key="n", net_id="n", src=src, sinks=[sink], bounds=bounds, protected=frozenset(),
+                    terminals={src, sink})
+    assert router.run([job], "[test]") == []
+    assert not verify_signals(region, {"n": (src, [sink])}, dust_owner)
+
+
 def test_slope_notch_checked_when_cell_starts_a_longer_move():
     """A cell that a 1-step slope lands on can also start a 2x slope; the notch check still applies."""
     workspace = Region(0, 0, 0, 12, 16, 12)
@@ -321,6 +338,34 @@ def test_sink_failing_again_while_first_is_final():
     router.route_job = route_job
     with pytest.raises(ValueError):
         router.route_job_retrying(job)
+
+
+def test_no_repeater_slot_reroutes_only_the_branch_at_the_fault(monkeypatch):
+    router, *_ = _router()
+    job = _job("n", (1, 1, 1), [(3, 1, 3), (9, 1, 1)])
+    searches = []
+    find = builder._find_wire_path
+
+    def counting_find(ws, solid, owner, start, dst, *args, **kwargs):
+        searches.append(dst)
+        return find(ws, solid, owner, start, dst, *args, **kwargs)
+
+    place = builder._place_repeaters_for_net
+    calls = []
+
+    def failing_once(ws, dust_owner, net_id, paths):
+        calls.append(paths)
+        if len(calls) == 1:
+            raise LayConflict("Net 'n': cannot place repeater to extend signal", tuple(paths[-1][1:]))
+        place(ws, dust_owner, net_id, paths)
+
+    monkeypatch.setattr(builder, "_find_wire_path", counting_find)
+    monkeypatch.setattr(builder, "_place_repeaters_for_net", failing_once)
+    with router.rec.recording(job.key):
+        router.route_job_retrying(job)
+    assert searches == [(3, 1, 3), (9, 1, 1), (9, 1, 1)]
+    assert [path[-1] for path in router.paths["n"][1]] == [(3, 1, 3), (9, 1, 1)]
+    assert "n" not in router.has_kept_wire
 
 
 def test_failed_sink_keeps_the_jobs_branches_and_rips_only_blockers(monkeypatch):

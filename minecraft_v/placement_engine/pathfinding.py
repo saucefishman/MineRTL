@@ -10,7 +10,7 @@ from typing import Callable
 import numpy as np
 from litemapy import BlockState, Region
 
-from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire
+from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
 from .wire import LayConflict
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
     _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
@@ -89,13 +89,15 @@ def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, i
 def _signal_depths(
         paths: list[list[tuple[int, int, int]]],
         known: dict[tuple[int, int, int], int] | None = None,
+        in_place: bool = False,
 ) -> dict[tuple[int, int, int], int]:
     """Signal depth (_signal_step) at each cell of a net's ordered paths, for tree seeds.
 
     Each path starts at the source (depth 0) or at a cell of an earlier path or of known
     (depths of the net's wire routed before). A branch start is never a repeater slot.
+    in_place: add to known instead of copying it.
     """
-    depths: dict[tuple[int, int, int], int] = dict(known or {})
+    depths: dict[tuple[int, int, int], int] = known if in_place else dict(known or {})
     for path in paths:
         depth, cand = depths.get(path[0], 0), 0
         depths.setdefault(path[0], depth)
@@ -194,6 +196,7 @@ class IndexedWorkspace:
     def __init__(self, region: Region):
         self.region = region
         self._index = _BlockIndex(region)
+        self._write = palette_writer(region)
 
     def __getitem__(self, pos) -> BlockState:
         return self.region[pos]
@@ -201,7 +204,7 @@ class IndexedWorkspace:
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
         self._index.update(pos, self.region[pos], block)
-        self.region[pos] = block
+        self._write(pos, block)
 
     def __getattr__(self, name):
         return getattr(self.region, name)
@@ -303,7 +306,7 @@ def _find_wire_path(
         footprint_blocked: frozenset[tuple[int, int, int]] = frozenset(),
         inverted_cells: frozenset[tuple[int, int, int]] = frozenset(),
         terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
-        weight: float = 1.5,
+        weight: float = 1.75,
         limit_exclusions=False,
         x_h_factor=1,
         congestion_cost: Callable[[tuple[int, int, int]], float] | None = None,
@@ -312,10 +315,13 @@ def _find_wire_path(
         seed_depths: dict[tuple[int, int, int], int] | None = None,
         pending_sinks: frozenset[tuple[int, int, int]] = frozenset(),
         stagnation: int = -1,
+        budget: int = 1,
 ) -> list[tuple[int, int, int]]:
     """A* wire route from start to goal.
 
     stagnation: this search's stagnation limit (negative: _ROUTE_STAGNATION). Kernel only.
+
+    budget: multiplies the search's stagnation, position and expansion limits. Kernel only.
 
     seed_depths: signal depth (_signal_depths) of tree seeds; missing seeds count as 0.
 
@@ -816,13 +822,13 @@ def _find_wire_path(
             terminal_positions, workspace, GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
             pos_ids, pos_list, h_list, move_cache, pending_sinks)
 
-    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world, stagnation=stagnation)
+    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world, stagnation=stagnation, budget=budget)
     if reached is None and early_stop_reason is None and h_radius_pruned:
         # The open list ran dry only because the h-radius cull discarded detours (typically a
         # blocked approach close to the goal): search again without the cull.
         group_best_h[:] = initial_group_best_h
         reached, best_node, _, early_stop_reason, came_from = _run_search(
-            search_args, net_id, make_world, h_radius_factor=0, stagnation=stagnation)
+            search_args, net_id, make_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -1086,13 +1092,14 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1):
+def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,
+                budget: int = 1):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
     if _astar is None or _ASTAR_MODE == "py":
         return _search_py(*args)
     world = make_world()
     if _ASTAR_MODE == "kernel":
-        return _astar.search(*args, world, h_radius_factor=h_radius_factor, stagnation=stagnation)
+        return _astar.search(*args, world, h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget)
     # check: both loops from the same start state (group_best_h is updated in place).
     group_best_h = args[3]
     t0 = time.perf_counter()

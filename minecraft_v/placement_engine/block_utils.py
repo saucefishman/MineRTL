@@ -1,6 +1,29 @@
 from __future__ import annotations
+from collections.abc import Callable
+
 from litemapy import BlockState, Region
 from .constants import STONE
+
+
+def palette_writer(region: Region) -> Callable[[tuple[int, int, int], BlockState], None]:
+    """region[pos] = block without Region's linear search of its palette, which a big build pays per block."""
+    palette, blocks = region._Region__palette, region._Region__blocks
+    ids = {block: i for i, block in reversed(list(enumerate(palette)))}
+    known = len(palette)
+
+    def write(pos: tuple[int, int, int], block: BlockState) -> None:
+        nonlocal known
+        if len(palette) != known:  # written to directly since
+            ids.update((b, i) for i, b in enumerate(palette[known:], known))
+            known = len(palette)
+        i = ids.get(block)
+        if i is None:
+            palette.append(block)
+            i = ids[block] = known
+            known += 1
+        blocks[pos] = i
+
+    return write
 
 
 def _block_str(block: BlockState) -> str:

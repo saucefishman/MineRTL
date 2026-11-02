@@ -18,7 +18,7 @@ from litemapy import BlockState, Region
 
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from .ir import ComponentList, ComponentType
-from .verify import _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _World
+from .verify import Excluding, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH, _WALL_TORCH, _World
 
 Pos = tuple[int, int, int]
 _SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
@@ -87,7 +87,7 @@ class _HoldTiming:
             n = self.nets[net_id]
             src = self.terminals[n.source.component_id, n.source.pin_name]
             sinks = {self.terminals[s.component_id, s.pin_name] for s in n.sinks}
-            self.cache[net_id] = wire_arrivals(self.world, src, self.all_terminals - sinks - {src})
+            self.cache[net_id] = wire_arrivals(self.world, src, Excluding(self.all_terminals, sinks | {src}))
         return self.cache[net_id]
 
     def propagate(self, starts: dict[str, int], gate: Callable[[str], int]) -> tuple[dict, dict]:
@@ -186,11 +186,23 @@ class _HoldTiming:
         return list(dict.fromkeys(cells[:-1]))
 
 
+def _powers_torch_below(world: _World, p: Pos) -> bool:
+    """Whether dust at p drives a torch on the block under it, as a powered -4 drop does. A repeater wouldn't power that block."""
+    x, y, z = p
+    if world.kind((x, y - 2, z)) == _TORCH:
+        return True
+    for (dx, dz), facing in _DELTA_TO_FACING.items():
+        q = (x + dx, y - 1, z + dz)
+        if world.kind(q) == _WALL_TORCH and world.block(q)["facing"] == facing:
+            return True
+    return False
+
+
 def _straight_run(world: _World, p: Pos) -> tuple[Pos, Pos] | None:
     """A level dust cell with wire on exactly two opposite sides and nothing else touching: (one side, the other)."""
     x, y, z = p
     links = world.dust_links(p)
-    if len(links) > 2:
+    if len(links) > 2 or _powers_torch_below(world, p):
         return None
     ends = []
     for dx, dz in _HORIZ_DIRS:
@@ -222,7 +234,7 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
         if world.kind(p) == _REPEATER and repeater_delay(world.block(p)) < _MAX_DELAY:
             ticks = min(_MAX_DELAY - repeater_delay(world.block(p)), need - added)
             region[p] = world.block(p).with_properties(delay=str(repeater_delay(world.block(p)) + ticks))
-            world._kind.pop(p, None)
+            world.changed(p)
             added += ticks
             counts["raised"] += 1
     for i, p in enumerate(cells):
@@ -237,7 +249,7 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
         delta = (upstream[0] - p[0], upstream[2] - p[2])
         ticks = min(_MAX_DELAY, need - added)
         region[p] = BlockState("minecraft:repeater", facing=_DELTA_TO_FACING[delta], delay=str(ticks))
-        world._kind.pop(p, None)
+        world.changed(p)
         added += ticks
         counts["new"] += 1
     if added:

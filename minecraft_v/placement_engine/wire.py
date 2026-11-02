@@ -386,8 +386,10 @@ def _signal_returns(
         else:
             nexts = [(x + dx, y + dy, z + dz) for dx, dz in _HORIZ_DIRS for dy in (-1, 0, 1)]
         for nxt in nexts:
+            if nxt in seen:
+                continue
             other = block_at(nxt)
-            if nxt in seen or other is None:
+            if other is None:
                 continue
             if _is_redstone_wire(other):
                 follows = dust_owner.get(nxt) == net_id
