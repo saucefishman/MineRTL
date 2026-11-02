@@ -13,7 +13,7 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - World height 376, can be optimised later. Server clock lever, no generated clock.
 
 - Stay faithful to the original; adjust only for legitimate impossibilities in synthesis.
-- Test program: prints ASCII characters one at a time: 1, 2, 3, H, I (user said "counts down", but gave this order; order as given). Output on the CPU's character ports (e0/d0, e1/d1).
+- Test program: prints 1, 2, 3 one at a time, then "hi" together, lowercase, on one clock. Output on the CPU's character ports (e0/d0, e1/d1).
 
 ## State
 - Branch at beef260: main merged. RAM work in minecraft_v/placement_engine/ram.py, techmap/ram_*.v, flag --tiled-ram.
@@ -22,5 +22,5 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Repros: scripts/ram_pin_repro.py (pin faces). Scratch model tests: bpcheck.py, histcheck.py in scratchpad.
 - CPU memory is external (ra0/rv0...): test program needs a memory wrapper or a driven bus. Register file is 16x16, 4R2W.
 - Rebuild A* after merges touching _astar.pyx: `.venv/bin/python setup.py build_ext --inplace`.
-- examples/floweypu_hi = CPU + ROM (main.v copied from floweypu/test/main_rom.v; cpu.v a symlink). Test bench `sh examples/floweypu/test/run.sh` passes in RTL. Program pads slot 1 with nops: one character per clock on e0/d0. rst needs at least one clock high (sync); no-reset power-up doesn't work. rv(t+2)=mem[ra(t)].
+- examples/floweypu_hi = CPU + ROM (main.v copied from floweypu/test/main_rom.v; cpu.v a symlink). Test bench `sh examples/floweypu/test/run.sh` passes in RTL. Program pads slot 1 with nops for 1 2 3 on e0/d0; h on e0 and i on e1 share a clock. rst needs at least one clock high (sync); no-reset power-up doesn't work. rv(t+2)=mem[ra(t)].
 - Fixed: macro classes whose instance outputs feed another instance's input crashed check_equivalent; now skipped (_chains_within).
