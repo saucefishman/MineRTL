@@ -22,3 +22,5 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Repros: scripts/ram_pin_repro.py (pin faces). Scratch model tests: bpcheck.py, histcheck.py in scratchpad.
 - CPU memory is external (ra0/rv0...): test program needs a memory wrapper or a driven bus. Register file is 16x16, 4R2W.
 - Rebuild A* after merges touching _astar.pyx: `.venv/bin/python setup.py build_ext --inplace`.
+- examples/floweypu_hi = CPU + ROM (main.v copied from floweypu/test/main_rom.v; cpu.v a symlink). Test bench `sh examples/floweypu/test/run.sh` passes in RTL. Program pads slot 1 with nops: one character per clock on e0/d0. rst needs at least one clock high (sync); no-reset power-up doesn't work. rv(t+2)=mem[ra(t)].
+- Fixed: macro classes whose instance outputs feed another instance's input crashed check_equivalent; now skipped (_chains_within).

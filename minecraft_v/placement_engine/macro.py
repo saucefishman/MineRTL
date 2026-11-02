@@ -667,6 +667,13 @@ def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
     return max(1, math.ceil(math.sqrt(n_pins * column_gap / y_gap)))
 
 
+def _chains_within(cls: RepeatedClass) -> bool:
+    """An instance's output is another's input: a bank or array can't yet hold both ends of one net as its pins."""
+    inputs = {m[n] for m in cls.instances for n, label in cls.nets.items() if label == "input"}
+    outputs = {m[n] for m in cls.instances for n, label in cls.nets.items() if label not in ("input", "internal")}
+    return bool(inputs & outputs)
+
+
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
                    max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, min_instances: int = 2, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
@@ -679,7 +686,8 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
     pin_rows: list[tuple[str, str, str, Direction]] = []
 
     # Small repeats route worse as macros than as gates.
-    classes = [cls for cls in find_repeated(comp, max_fanout, min_cells) if len(cls.instances) >= min_instances]
+    classes = [cls for cls in find_repeated(comp, max_fanout, min_cells) if len(cls.instances) >= min_instances
+               and not _chains_within(cls)]
     for cls in classes:
         banked = bank_columns > 0 and len(cls.instances) >= 2 * bank_columns
         sub, ports = macro_netlist(cls, comp, back_unique=banked)
