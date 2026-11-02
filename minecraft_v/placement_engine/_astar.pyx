@@ -123,6 +123,7 @@ cdef extern from *:
             k *= 0x9e3779b97f4a7c15ULL;
             return (size_t)(k >> 32);
         }
+        inline void prefetch(unsigned long long k) const { __builtin_prefetch(&slots[mix(k) & mask]); }
         V* find(unsigned long long k) {
             size_t i = mix(k) & mask;
             while (slots[i].key != EMPTY) {
@@ -170,6 +171,7 @@ cdef extern from *:
         HeapEntry pop()
         bint empty()
     cdef cppclass FlatMap[V]:
+        void prefetch(unsigned long long k)
         V* find(unsigned long long k)
         V* get(unsigned long long k, int* inserted)
         void reset(size_t cap)
@@ -181,6 +183,7 @@ cdef struct NodeInfo:
 
 
 cdef enum:
+    MAX_CELL_MOVES = 64  # more than _static_moves' (flat, slopes, 2x slopes, +1, towers, -4)
     NOT_EXPANDED = -2   # NodeInfo.parent; -1 is a seed's
     UNREACHED = -3      # a slot get() made for a cost past the limit
 
@@ -1565,6 +1568,11 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef bint has_in_dir, came_from_tower, has_reached = False
     cdef long long reached = 0
     cdef double max_f, f_wire, h_limit, new_g, new_g_wire, cost, t_load
+    cdef int next_move[MAX_CELL_MOVES]
+    cdef long long next_key[MAX_CELL_MOVES]
+    cdef double next_g[MAX_CELL_MOVES]
+    cdef double next_g_wire[MAX_CELL_MOVES]
+    cdef int n_next
     cdef uint32_t snap, cb0, cb1, cb2
     cdef bint has_deadline = time_limit is not None
     cdef double deadline = 0
@@ -1701,6 +1709,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if m4_side >= 0:
             taken.push_back(cmv.m4_move)
         last = <int>taken.size() - 1
+        n_next = 0
         for k in range(<int>taken.size()):
             m = &cells.moves[taken[k]]
             # Signal state (pathfinding._signal_step): prune moves that would leave a stretch
@@ -1741,6 +1750,22 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                                      cells.m4_cells[i + 2] - m.dz)
             nkey = ((<long long>m.dest << NODE_SHIFT) | (TOWER_FLAG if m.arrive else 0) | snap
                     | (<long long>(ndepth | (ncand << 4)) << SIG_SHIFT))
+            next_move[n_next] = taken[k]
+            next_key[n_next] = nkey
+            next_g[n_next] = new_g
+            next_g_wire[n_next] = new_g_wire
+            n_next += 1
+            nodes.prefetch(nkey)
+            depths.prefetch(nkey & ~(<long long>15 << SIG_SHIFT))
+        # The tables are big and these are scattered: asking for them all first saves waiting for each in turn.
+        for k in range(n_next):
+            m = &cells.moves[next_move[k]]
+            nkey, new_g, new_g_wire = next_key[k], next_g[k], next_g_wire[k]
+            # Most moves lead to a state already known at no more cost. Either test only skips the move, so the
+            # one probe goes first, ahead of dominated's several.
+            np = nodes.find(nkey)
+            if np != NULL and np.parent != UNREACHED and not new_g < np.g:
+                continue
             if dominated(nodes, depths, nkey, new_g):
                 continue
             np = nodes.get(nkey, &ins)
