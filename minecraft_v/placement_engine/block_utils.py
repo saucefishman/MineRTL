@@ -1,12 +1,26 @@
 from __future__ import annotations
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from math import ceil, log
+import struct
+import time
+import zlib
 
+import nbtlib
 import numpy as np
-from litemapy import BlockState, Region
+from litemapy import BlockState, Region, Schematic
 from nbtlib.tag import Compound, Int, List, LongArray
 
 from .constants import STONE
+
+try:
+    from . import _signals
+except ImportError:
+    _signals = None  # not built: numpy does the same, slower
+
+_GZIP_CHUNK = 1 << 25
+_GZIP_THREADS = 8
 
 Box = tuple[tuple[int, int, int], tuple[int, int, int]]  # lowest cell, one past the highest
 
@@ -36,6 +50,9 @@ def _pack_states(blocks: np.ndarray, nbits: int) -> LongArray:
     """Palette ids as Litematica's bit array: y, then z, then x, lowest bits first, values crossing long boundaries."""
     n_x, n_y, n_z = blocks.shape
     out = np.zeros(ceil(n_x * n_y * n_z * nbits / 64), dtype="<u8")
+    if _signals is not None and blocks.dtype == np.uint32 and blocks.size and blocks.flags.c_contiguous:
+        _signals.pack_states(blocks, nbits, out)
+        return LongArray(out.astype("<i8"))
     done = 0  # longs written
     held = np.zeros(0, dtype=np.uint8)  # bits short of a whole long
     for y in range(n_y):
@@ -51,6 +68,33 @@ def _pack_states(blocks: np.ndarray, nbits: int) -> LongArray:
         out[done] = np.frombuffer(np.packbits(np.concatenate((held, np.zeros(64 - held.size, np.uint8))),
                                               bitorder="little").tobytes(), dtype="<u8")[0]
     return LongArray(out.astype("<i8"))
+
+
+def _gzip_threaded(data: memoryview, path: str) -> None:
+    """One gzip member, deflated in pieces on threads, each piece ending on a byte boundary as pigz does."""
+    pieces = [data[i:i + _GZIP_CHUNK] for i in range(0, len(data), _GZIP_CHUNK)] or [data]
+
+    def deflate(index: int) -> bytes:
+        c = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+        last = index == len(pieces) - 1
+        return c.compress(pieces[index]) + c.flush(zlib.Z_FINISH if last else zlib.Z_SYNC_FLUSH)
+
+    with ThreadPoolExecutor(_GZIP_THREADS) as pool, open(path, "wb") as out:
+        out.write(struct.pack("<BBBBIBB", 0x1f, 0x8b, 8, 0, int(time.time()), 2, 255))
+        for piece in pool.map(deflate, range(len(pieces))):
+            out.write(piece)
+        out.write(struct.pack("<II", zlib.crc32(data), len(data) & 0xffffffff))
+        for piece in pieces:
+            piece.release()
+
+
+def save_schematic(schematic: Schematic, path: str) -> None:
+    """Schematic.save, the same NBT, but compressed on several threads."""
+    schematic.update_metadata()
+    buffer = BytesIO()
+    nbtlib.File(schematic.to_nbt(save_soft=True), gzipped=True, byteorder="big").write(buffer, "big")
+    with buffer.getbuffer() as data:
+        _gzip_threaded(data, path)
 
 
 class BulkRegion(Region):
@@ -71,14 +115,21 @@ class BulkRegion(Region):
 
     def _optimize_palette(self) -> None:
         palette, blocks = self._Region__palette, self._Region__blocks
-        used = np.zeros(len(palette), dtype=bool)
-        used[np.unique(blocks)] = True
+        kernel = _signals is not None and blocks.dtype == np.uint32 and blocks.size and blocks.flags.c_contiguous
+        if kernel:
+            used = _signals.used_ids(blocks, len(palette))
+        else:
+            used = np.zeros(len(palette), dtype=bool)
+            used[np.unique(blocks)] = True
         used[0] = True  # air stays at 0
         kept: dict[BlockState, int] = {}
         table = np.empty(len(palette), dtype=blocks.dtype)
         for i in np.flatnonzero(used).tolist():
             table[i] = kept.setdefault(palette[i], len(kept))
-        blocks[...] = table[blocks]
+        if kernel:
+            _signals.remap_ids(blocks, table)
+        else:
+            blocks[...] = table[blocks]
         self._Region__palette = list(kept)
 
     def to_nbt(self) -> Compound:

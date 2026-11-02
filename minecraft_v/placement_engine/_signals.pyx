@@ -5,7 +5,7 @@ The Python in verify.py and hold.py stays the definition of what these compute (
 it exactly, ties and all: a node's key sorts as its (pos, mode) tuple does, successors come in the same order, and
 dust_directions' Python set order is read from a table of real sets, since it depends on insertion order.
 """
-from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t, uint64_t
 from libcpp.vector cimport vector
 import itertools
 import numpy as np
@@ -1227,3 +1227,46 @@ cdef class Settler:
             locked[row] = self.cells[i].locked
         order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
         return pos[order], state[order], power[order], locked[order]
+
+
+def used_ids(uint32_t[:, :, :] blocks, int n):
+    """Which of n palette entries blocks use, as a bool array."""
+    used = np.zeros(n, dtype=np.uint8)
+    cdef uint8_t[:] u = used
+    cdef uint32_t* p = &blocks[0, 0, 0]
+    cdef Py_ssize_t i, size = blocks.shape[0] * blocks.shape[1] * blocks.shape[2]
+    for i in range(size):
+        u[p[i]] = 1
+    return used.astype(bool)
+
+
+def remap_ids(uint32_t[:, :, :] blocks, uint32_t[:] table):
+    """blocks[...] = table[blocks], without the copy."""
+    cdef uint32_t* p = &blocks[0, 0, 0]
+    cdef Py_ssize_t i, size = blocks.shape[0] * blocks.shape[1] * blocks.shape[2]
+    for i in range(size):
+        p[i] = table[p[i]]
+
+
+def pack_states(uint32_t[:, :, :] blocks, int nbits, out):
+    """block_utils._pack_states' bits, written to out, a uint64 array: y, then z, then x, lowest bits first."""
+    cdef uint64_t[:] o = out
+    cdef int n_x = blocks.shape[0], n_y = blocks.shape[1], n_z = blocks.shape[2], x, y, z, pos = 0
+    cdef uint64_t held = 0, v, mask = (<uint64_t>1 << nbits) - 1
+    cdef Py_ssize_t done = 0, step = n_y * n_z, at
+    cdef uint32_t* p = &blocks[0, 0, 0]
+    for y in range(n_y):
+        for z in range(n_z):
+            at = y * n_z + z
+            for x in range(n_x):
+                v = p[at] & mask
+                at += step
+                held |= v << pos
+                pos += nbits
+                if pos >= 64:
+                    o[done] = held
+                    done += 1
+                    pos -= 64
+                    held = v >> (nbits - pos) if pos else 0
+    if pos:
+        o[done] = held

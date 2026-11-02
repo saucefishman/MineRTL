@@ -28,7 +28,7 @@ from minecraft_v.placement_engine.ir import (
     ComponentType,
     NetConnection,
 )
-from .block_utils import Box, BulkRegion, _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
+from .block_utils import Box, BulkRegion, save_schematic, _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
     _ROUTE_STAGNATION_FIRST, _ROUTE_RETRY_BUDGET, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
@@ -2486,7 +2486,7 @@ def build_litematic_from_component_list(
     schematic.lm_subversion = ref_lm_sub
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with phase("[write] saving litematic"):
-        schematic.save(str(out_path))
+        save_schematic(schematic, str(out_path))
     return out_path
 
 

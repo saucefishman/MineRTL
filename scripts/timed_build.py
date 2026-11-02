@@ -3,7 +3,6 @@ import os, sys, time, atexit, resource
 T0 = time.monotonic()
 d = sys.argv[1]
 os.environ["MINECRAFT_V_ARTIFACTS_DIR"] = d
-from litemapy import Schematic
 from minecraft_v import main as M
 from minecraft_v.placement_engine import builder as B
 times = {}
@@ -22,7 +21,7 @@ def wrap(mod, name, label=None):
 wrap(M, "group_block"); wrap(M, "module_to_component_list")
 for n in ("_place_gate_templates", "_route_all_nets", "fix_hold", "_report_flat_violations", "_report_unsupported_blocks", "_compute_critical_path", "apply_dust_shapes", "settle_blocks", "_hidden_cells", "_poisson_placement"):
     wrap(B, n)
-wrap(Schematic, "save")
+wrap(B, "save_schematic")
 place_io = B._place_io_repeaters; signs = []
 def capture(*a, **k):
     r = place_io(*a, **k); signs[:] = r[2]; return r
