@@ -133,18 +133,12 @@ class _BlockIndex:
     read); _wire_walkable does ~40 reads per call. Valid only while the workspace is
     unchanged, i.e. for the duration of one A* search.
     """
-    __slots__ = ("non_air", "wire", "torch", "repeater")
+    __slots__ = ("non_air", "wire", "torch", "repeater", "grid", "grid_bits")
 
     def __init__(self, region: Region):
         # Positive-size regions store blocks at region coordinates directly.
         assert region.width > 0 and region.height > 0 and region.length > 0
-        blocks = region._Region__blocks
-        kinds = np.array([
-            (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
-            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
-            for b in region._Region__palette
-        ], dtype=np.uint8)
-        k = kinds[blocks]
+        k = self.kinds(region)
 
         def cells(mask: int) -> set[tuple[int, int, int]]:
             return set(map(tuple, np.argwhere(k & mask).tolist()))
@@ -153,6 +147,17 @@ class _BlockIndex:
         self.wire = cells(2)
         self.torch = cells(4)
         self.repeater = cells(8)
+        self.grid = None  # _astar.CellGrid mirroring these sets; update keeps it current
+
+    @staticmethod
+    def kinds(region: Region) -> np.ndarray:
+        """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater."""
+        kinds = np.array([
+            (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
+            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
+            for b in region._Region__palette
+        ], dtype=np.uint8)
+        return kinds[region._Region__blocks]
 
     @classmethod
     def layered(cls, base: _BlockIndex, overlay: dict[tuple[int, int, int], BlockState]) -> _BlockIndex:
@@ -162,6 +167,7 @@ class _BlockIndex:
         idx.wire = set(base.wire)
         idx.torch = set(base.torch)
         idx.repeater = set(base.repeater)
+        idx.grid = None
         for pos, b in overlay.items():
             if _is_air(b):
                 continue
@@ -176,13 +182,18 @@ class _BlockIndex:
 
     def update(self, pos: tuple[int, int, int], old: BlockState, new: BlockState) -> None:
         """Reflect one block write (old → new); same classification as __init__."""
-        for cells, test in ((self.non_air, lambda b: not _is_air(b)), (self.wire, _is_redstone_wire),
-                            (self.torch, _is_torch), (self.repeater, _is_repeater)):
+        grid = self.grid
+        for i, (cells, test) in enumerate(((self.non_air, lambda b: not _is_air(b)), (self.wire, _is_redstone_wire),
+                                           (self.torch, _is_torch), (self.repeater, _is_repeater))):
             was, now = test(old), test(new)
             if was and not now:
                 cells.discard(pos)
+                if grid is not None:
+                    grid.put(pos, self.grid_bits[i], False)
             elif now and not was:
                 cells.add(pos)
+                if grid is not None:
+                    grid.put(pos, self.grid_bits[i], True)
 
 
 class IndexedWorkspace:
@@ -211,6 +222,17 @@ class IndexedWorkspace:
 
     def block_index(self) -> _BlockIndex:
         return self._index
+
+    def attach_grid(self, solid, dust_owner, inverted_cells, footprint_blocked, terminal_positions) -> None:
+        """Have searches over this workspace read an _astar.CellGrid of these containers, which
+        from here on keep it current. Containers that don't (plain sets) leave searches reading
+        them directly. MINECRAFT_V_ASTAR_GRID: 0 no grid, check compares every cell's moves."""
+        if (_astar is None or _ASTAR_MODE != "kernel" or _ASTAR_GRID == "0"
+                or not all(hasattr(c, "_grid") for c in (solid, dust_owner, inverted_cells))):
+            return
+        region = self.region
+        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._index, solid, dust_owner,
+                        inverted_cells, footprint_blocked, terminal_positions)
 
 
 def _wire_walkable(
@@ -820,7 +842,8 @@ def _find_wire_path(
             ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
             goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,
             terminal_positions, workspace, GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
-            pos_ids, pos_list, h_list, move_cache, pending_sinks)
+            pos_ids, pos_list, h_list, move_cache, pending_sinks,
+            getattr(block_index, "grid", None), _ASTAR_GRID == "check")
 
     reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world, stagnation=stagnation, budget=budget)
     if reached is None and early_stop_reason is None and h_radius_pruned:
@@ -1044,6 +1067,7 @@ if _ASTAR_MODE not in ("kernel", "py", "check"):
 if _ASTAR_MODE != "kernel":
     print(f"[astar] MINECRAFT_V_ASTAR={_ASTAR_MODE} is deprecated: the Python A* is no longer "
           "maintained and may differ from the kernel", file=sys.stderr)
+_ASTAR_GRID = os.environ.get("MINECRAFT_V_ASTAR_GRID", "1")
 try:
     from . import _astar
 except ImportError as exc:
