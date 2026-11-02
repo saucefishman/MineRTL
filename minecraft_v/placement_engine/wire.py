@@ -433,9 +433,13 @@ def _place_repeaters_for_net(
         cell for cell, succs in successors.items() if len(succs) > 1
     }
 
+    sinks = {path[-1] for path in ordered_paths}  # a later branch can run on through a sink's pin cell
+
     def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
         if j <= 0 or j >= len(path) - 1:
             return False
+        if path[j] in sinks:
+            return False  # a repeater across the pin cell hides the wire from the gate
         x, y, z = path[j]
         px, py, pz = path[j - 1]
         nx, ny, nz = path[j + 1]

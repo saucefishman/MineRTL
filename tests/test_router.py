@@ -557,3 +557,18 @@ def test_no_repeater_at_a_slopes_foot():
     _place_repeaters_for_net(region, {p: "n" for p in path}, "n", [path])
     assert region[3, 2, 1].id == "minecraft:redstone_wire"
     assert any(region[p].id == "minecraft:repeater" for p in path)
+
+
+def test_no_repeater_at_a_sinks_pin_cell():
+    # floweypu net_2367: a later branch leaves from a sink's pin cell and runs straight on, and the repeater search
+    # picked that cell, so the gate read the repeater's output side and never switched.
+    sink = (_REPEATER_INTERVAL - 1, 2, 1)
+    first = [(x, 2, 1) for x in range(0, sink[0] + 1)]
+    second = [(x, 2, 1) for x in range(sink[0], 2 * _REPEATER_INTERVAL + 4)]
+    region = Region(0, 0, 0, 60, 6, 3)
+    for x, y, z in first + second:
+        region[x, y, z] = BlockState("minecraft:redstone_wire")
+        region[x, y - 1, z] = STONE
+    _place_repeaters_for_net(region, {p: "n" for p in first + second}, "n", [first, second])
+    assert region[sink].id == "minecraft:redstone_wire"
+    assert any(region[p].id == "minecraft:repeater" for p in second)
