@@ -14,6 +14,7 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 
 - Stay faithful to the original; adjust only for legitimate impossibilities in synthesis.
 - Test program: prints 1, 2, 3 one at a time, then "hi" together, lowercase, on one clock. Output on the CPU's character ports (e0/d0, e1/d1).
+- Footprint should be closer to square, not as wide (baseline 2965x380x499).
 
 ## State
 - Branch at beef260: main merged. RAM work in minecraft_v/placement_engine/ram.py, techmap/ram_*.v, flag --tiled-ram.
@@ -24,3 +25,4 @@ Done means: routes with 0 failures, 0 verify violations, and a test program give
 - Rebuild A* after merges touching _astar.pyx: `.venv/bin/python setup.py build_ext --inplace`.
 - examples/floweypu_hi = CPU + ROM (main.v copied from floweypu/test/main_rom.v; cpu.v a symlink). Test bench `sh examples/floweypu/test/run.sh` passes in RTL. Program pads slot 1 with nops for 1 2 3 on e0/d0; h on e0 and i on e1 share a clock. rst needs at least one clock high (sync); no-reset power-up doesn't work. rv(t+2)=mem[ra(t)].
 - Fixed: macro classes whose instance outputs feed another instance's input crashed check_equivalent; now skipped (_chains_within).
+- Predictor on merged code: wire done 690 nets 0 failed in 1036s, 1.5s per net, far too slow per net; profile.
