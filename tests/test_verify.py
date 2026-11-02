@@ -426,3 +426,32 @@ def test_world_successors_follow_a_changed_block():
     world.changed((2, 1, 1))
     assert world.successors(((2, 1, 1), "")) == [((3, 1, 1), "")]
     assert ((2, 1, 1), "") not in world.successors(((3, 1, 1), ""))
+
+
+def _torch_drop(region: Region, owner: dict) -> None:
+    """Wire into a block, torch, wire into a block, torch: same polarity out as in. Output cell (7, 3, 8)."""
+    _wire(region, owner, "a", _line_x(2, 5, 3, 5))
+    region[6, 3, 5] = STONE
+    region[7, 3, 5] = BlockState("minecraft:redstone_wall_torch", facing="east", lit="true")
+    region[7, 2, 5] = STONE
+    _wire(region, owner, "a", _line_z(5, 6, 3, 8))
+    region[8, 3, 7] = STONE
+    region[8, 3, 8] = BlockState("minecraft:redstone_wall_torch", facing="south", lit="false")
+    region[8, 2, 8] = STONE
+
+
+def test_torch_drop_feeding_its_own_input_is_a_latch():
+    """hf3's net_1820: the wire after a drop joined the wire before it, and stuck high from power-up."""
+    region, owner = _region(), {}
+    _torch_drop(region, owner)
+    _wire(region, owner, "a", _line_x(2, 7, 3, 8) + _line_z(6, 7, 3, 2))
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 5)])}, owner)
+    assert any(v.kind == "latch" for v in violations)
+
+
+def test_torch_drop_going_on_is_not_a_latch():
+    region, owner = _region(), {}
+    _torch_drop(region, owner)
+    _wire(region, owner, "a", _line_x(4, 7, 3, 8))
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 8)])}, owner)
+    assert not any(v.kind == "latch" for v in violations)
