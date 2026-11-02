@@ -1135,7 +1135,7 @@ class _GreedyRouter:
                 lay_attempts += 1
                 # Kept wire can hold the fault, with nothing new to block: starting over clears it.
                 if (lay_attempts > _NET_RETRIES or (not stretch and job.key not in self.has_kept_wire)
-                        or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)"))):
+                        or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)", "(gate contact)"))):
                     raise
                 if stretch and "cannot place repeater" in str(e) and lay_attempts == 1:
                     # Every sink is laid by now: only the branch at the fault has to go. The stretch can
