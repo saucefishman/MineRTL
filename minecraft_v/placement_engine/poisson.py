@@ -718,6 +718,25 @@ def _stretch_above(ys: np.ndarray, floor: float, factor: float) -> np.ndarray:
     return np.where(ys > floor, np.rint(floor + (ys - floor) * factor), ys)
 
 
+def _stack_banks(gates: list[Component], banks: list[int], channel: int) -> tuple[dict[int, np.ndarray], float, float]:
+    """Origins of banks stacked at the origin, and the stack's width and height. Only RAM blocks start a new stack along X:
+    their pins all face south, so that keeps gates reachable. Routed banks have pin faces that a second stack would wall off."""
+    fixed: dict[int, np.ndarray] = {}
+    y = x = top = 0.0
+    column_width = 0
+    # Widest at the bottom: a wider bank above would overhang the pins on the east end of the one below.
+    for i in sorted(banks, key=lambda i: -gates[i].footprint.width):
+        fp = gates[i].footprint
+        if y and gates[i].metadata.get("south_pins") and y + fp.height > _BANK_STACK_HEIGHT:
+            x += column_width + _BANK_COLUMN_GAP
+            y, column_width = 0.0, 0
+        fixed[i] = np.array([x, y, float(channel)])
+        y += fp.height + _BANK_Y_GAP
+        top = max(top, y)
+        column_width = max(column_width, fp.width)
+    return fixed, x + column_width, top
+
+
 def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Component], banks: list[int], io: _IoPlacer,
                         seed: int, channel: int, east_room: float
                         ) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray]]:
@@ -726,21 +745,7 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     The domain is the box's footprint plus east_room in X, and as tall as the gates need.
     """
     depth = max(gates[i].footprint.depth for i in banks)
-    fixed: dict[int, np.ndarray] = {}
-    y = x = top = 0.0
-    column_width = 0
-    # Widest at the bottom: a wider bank above would overhang the pins on the east end of the one below.
-    for i in sorted(banks, key=lambda i: -gates[i].footprint.width):
-        fp = gates[i].footprint
-        if y and y + fp.height > _BANK_STACK_HEIGHT:  # a new stack, along X
-            x += column_width + _BANK_COLUMN_GAP
-            y, column_width = 0.0, 0
-        fixed[i] = np.array([x, y, float(channel)])
-        y += fp.height + _BANK_Y_GAP
-        top = max(top, y)
-        column_width = max(column_width, fp.width)
-    width = x + column_width
-    y = top
+    fixed, width, y = _stack_banks(gates, banks, channel)
     free = [i for i in range(len(gates)) if i not in fixed]
     gate_shift = 0.0
     if all(gates[i].metadata.get("south_pins") for i in banks):
