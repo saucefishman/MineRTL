@@ -98,9 +98,14 @@ class BulkRegion(Region):
 
 def cells_around_boxes(region: Region, boxes: Iterable[Box], reach: int) -> list[tuple[int, int, int]]:
     """Non-air cells outside each box and within reach of its faces, the only cells that can touch what's inside it."""
+    return list(map(tuple, _around_boxes(region, boxes, reach).tolist()))
+
+
+def _around_boxes(region: Region, boxes: Iterable[Box], reach: int) -> np.ndarray:
+    """cells_around_boxes as a sorted n x 3 array."""
     blocks = region._Region__blocks
     air = [i for i, b in enumerate(region._Region__palette) if b.id in ("minecraft:air", "minecraft:cave_air")]
-    found: set[tuple[int, int, int]] = set()
+    found: list[np.ndarray] = []
     for lo, hi in boxes:
         grown_lo = [max(c - reach, 0) for c in lo]
         grown_hi = [min(c + reach, n) for c, n in zip(hi, blocks.shape)]
@@ -111,9 +116,24 @@ def cells_around_boxes(region: Region, boxes: Iterable[Box], reach: int) -> list
                 corner = list(grown_lo)
                 corner[axis] = start
                 slab = tuple(slice(a, b) for a, b in zip(corner, (*grown_hi[:axis], stop, *grown_hi[axis + 1:])))
-                hits = np.argwhere(~np.isin(blocks[slab], air)) + corner
-                found.update(map(tuple, hits.tolist()))
-    return sorted(found)
+                found.append(np.argwhere(~np.isin(blocks[slab], air)) + corner)
+    if not found:
+        return np.empty((0, 3), dtype=np.int64)
+    return np.unique(np.concatenate(found), axis=0) if len(found) > 1 else found[0]
+
+
+def cells_in_boxes_near(region: Region, boxes: Iterable[Box], reach: int, offsets: Iterable[tuple[int, int, int]]) -> np.ndarray:
+    """Cells inside the boxes, sorted, an offset away from a cell around them: what those cells could touch."""
+    boxes = list(boxes)
+    around = _around_boxes(region, boxes, reach)
+    sx, sy, sz = region._Region__blocks.shape
+    moved = (around[:, None, :] + np.array(list(offsets), dtype=np.int64)[None, :, :]).reshape(-1, 3)
+    inside = np.zeros(len(moved), dtype=bool)
+    for lo, hi in boxes:
+        inside |= ((moved >= lo) & (moved < hi)).all(axis=1)
+    moved = moved[inside]
+    moved = moved[((moved >= 0) & (moved < (sx, sy, sz))).all(axis=1)]
+    return np.unique(moved, axis=0)
 
 
 def _block_str(block: BlockState) -> str:

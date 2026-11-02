@@ -13,7 +13,7 @@ from litemapy import BlockState, Region
 from litemapy.minecraft import TileEntity
 from nbtlib.tag import Byte, Compound, List, String
 
-from .block_utils import Box, cells_around_boxes, palette_writer
+from .block_utils import Box, cells_in_boxes_near, palette_writer
 from .verify import _World, signal_grid
 
 Pos = tuple[int, int, int]
@@ -38,12 +38,9 @@ def apply_dust_shapes(region: Region, opaque: Collection[Box] = ()) -> int:
         is_wire[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
     at = np.argwhere(is_wire).astype(np.int32)
     del is_wire
-    wires = set(wire_ids)
-    near = {(x + dx, y + dy, z + dz) for x, y, z in cells_around_boxes(region, opaque, 1)
-            for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)}
-    extra = sorted(p for p in near if any(all(a <= c < b for a, c, b in zip(lo, p, hi)) for lo, hi in opaque)
-                   and int(blocks[p]) in wires)
-    at = np.concatenate((at, np.array(extra, dtype=np.int32).reshape(-1, 3)))
+    near = cells_in_boxes_near(region, opaque, 1, [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)])
+    near = near[np.isin(blocks[near[:, 0], near[:, 1], near[:, 2]], wire_ids)]
+    at = np.concatenate((at, near.astype(np.int32)))
     grid = signal_grid(region, frozenset(), frozenset())
     if grid is not None:
         return _write_shapes(region, at, grid.dust_shapes(at[:, 0], at[:, 1], at[:, 2]))

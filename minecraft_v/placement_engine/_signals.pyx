@@ -5,7 +5,7 @@ The Python in verify.py and hold.py stays the definition of what these compute (
 it exactly, ties and all: a node's key sorts as its (pos, mode) tuple does, successors come in the same order, and
 dust_directions' Python set order is read from a table of real sets, since it depends on insertion order.
 """
-from libc.stdint cimport int32_t, int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t
 from libcpp.vector cimport vector
 import itertools
 import numpy as np
@@ -337,6 +337,7 @@ cdef extern from *:
         int kind(int, int, int)
     cdef cppclass IntMap:
         int get(int64_t)
+        void put(int64_t, int)
     cdef cppclass NetGraph:
         vector[int64_t] node
         IntMap ids
@@ -635,3 +636,594 @@ cdef class HoldKernel:
         if self.via_net[gate] < 0:
             return None
         return self.via_net[gate], self.via_driver[gate], self.via_sink[gate]
+
+
+cdef extern from *:
+    """
+    static const int FX[6] = {0, 0, 0, 0, -1, 1}, FY[6] = {1, -1, 0, 0, 0, 0}, FZ[6] = {0, 0, -1, 1, 0, 0};
+    """
+    const int FX[6]
+    const int FY[6]
+    const int FZ[6]
+
+
+cdef struct SettleCell:
+    int x, y, z
+    int kind, pid, facing, power, level, saved_power, run
+    int links_off, links_len, takers_off, takers_len, inputs_off, inputs_len
+    int sides_off, sides_len, sources_off, sources_len, readers_off, readers_len
+    int side_mask          # directions dust points, -1 until asked
+    bint locked, saved_locked, inside, subtract, queued
+
+
+cdef enum:  # as propagate.py numbers them
+    S_DUST, S_REPEATER, S_COMPARATOR, S_TORCH, S_WALL_TORCH, S_LAMP, S_LEVER, S_BLOCK
+cdef enum:  # indexes of propagate._FACES; a direction's opposite is its index ^ 1
+    D_TOP, D_BOTTOM
+
+
+cdef inline int _horizontal(int dx, int dz):
+    if dx == 0:
+        return 2 if dz < 0 else 3
+    return 4 if dx < 0 else 5
+
+
+cdef class Settler:
+    """propagate._Propagation, step for step: cells get numbered in the same lazy order and a block's readers come out of a
+    real Python set of those numbers, so the queue runs in the same order and flip-flops land the same way."""
+    cdef uint32_t[:, :, :] blocks
+    cdef int w, h, l
+    cdef vector[uint8_t] solid, transparent
+    cdef vector[int] kind_id, pal_facing, pal_level, pal_attach
+    cdef vector[uint8_t] pal_locked, pal_subtract, pal_dot
+    cdef vector[int] box
+    cdef vector[int] reach_x, reach_y, reach_z
+    cdef IntMap index, signals
+    cdef vector[SettleCell] cells
+    cdef vector[int] arena
+    cdef vector[vector[int]] runs
+    cdef vector[uint8_t] run_queued
+    cdef vector[vector[int]] buckets
+    cdef public long long steps
+    cdef public bint oscillated
+
+    def __init__(self, blocks, tables, boxes, reach, comparator_signal):
+        self.blocks = blocks
+        self.w, self.h, self.l = blocks.shape
+        for v in tables["solid"]:
+            self.solid.push_back(v)
+        for v in tables["transparent"]:
+            self.transparent.push_back(v)
+        for v in tables["kind"]:
+            self.kind_id.push_back(v)
+        for v in tables["facing"]:
+            self.pal_facing.push_back(v)
+        for v in tables["level"]:
+            self.pal_level.push_back(v)
+        for v in tables["attach"]:
+            self.pal_attach.push_back(v)
+        for v in tables["locked"]:
+            self.pal_locked.push_back(v)
+        for v in tables["subtract"]:
+            self.pal_subtract.push_back(v)
+        for v in tables["dot"]:
+            self.pal_dot.push_back(v)
+        for lo, hi in boxes:
+            for v in (*lo, *hi):
+                self.box.push_back(v)
+        for x, y, z in reach:
+            self.reach_x.push_back(x)
+            self.reach_y.push_back(y)
+            self.reach_z.push_back(z)
+        for (x, y, z), level in comparator_signal.items():
+            if 0 <= x < self.w and 0 <= y < self.h and 0 <= z < self.l:
+                self.signals.put(self._key(x, y, z), level)
+        self.buckets.resize(16)
+        self.steps = 0
+        self.oscillated = False
+
+    cdef inline int64_t _key(self, int x, int y, int z):
+        return (<int64_t>x * self.h + y) * self.l + z
+
+    cdef inline int _id(self, int x, int y, int z):
+        if 0 <= x < self.w and 0 <= y < self.h and 0 <= z < self.l:
+            return self.blocks[x, y, z]
+        return 0
+
+    cdef inline int _kind_id_at(self, int x, int y, int z):
+        return self.kind_id[self._id(x, y, z)]
+
+    cdef inline bint _solid_at(self, int x, int y, int z):
+        return self.solid[self._id(x, y, z)]
+
+    cdef int _at(self, int x, int y, int z):
+        if not (0 <= x < self.w and 0 <= y < self.h and 0 <= z < self.l):
+            return -1
+        cdef int i = self.index.get(self._key(x, y, z))
+        if i < 0 and self.kind_id[self.blocks[x, y, z]] >= 0:
+            i = self._load(x, y, z)
+        return i
+
+    cdef int _load(self, int x, int y, int z):
+        cdef int pid = self.blocks[x, y, z]
+        cdef int i = self.cells.size(), j, level, k = self.kind_id[pid]
+        cdef SettleCell c
+        c.x, c.y, c.z = x, y, z
+        c.kind, c.pid = k, pid
+        c.facing = self.pal_facing[pid]
+        level = self.pal_level[pid]
+        if k == S_COMPARATOR:
+            level = self.signals.get(self._key(x, y, z))
+            if level < 0:
+                level = 0
+        c.power, c.level, c.saved_power = level, 0, level
+        c.locked = c.saved_locked = self.pal_locked[pid]
+        c.subtract = self.pal_subtract[pid]
+        c.inside = False
+        for j in range(0, self.box.size(), 6):
+            if (self.box[j] <= x < self.box[j + 3] and self.box[j + 1] <= y < self.box[j + 4]
+                    and self.box[j + 2] <= z < self.box[j + 5]):
+                c.inside = True
+                break
+        c.run = -1
+        c.side_mask = -1
+        c.queued = False
+        c.links_off = c.takers_off = c.inputs_off = c.sides_off = c.sources_off = c.readers_off = -1
+        c.links_len = c.takers_len = c.inputs_len = c.sides_len = c.sources_len = c.readers_len = 0
+        self.index.put(self._key(x, y, z), i)
+        self.cells.push_back(c)
+        return i
+
+    # ---- wire shape and connections
+
+    cdef bint _connects(self, int x, int y, int z, int d):
+        cdef int pid = self._id(x, y, z), k = self.kind_id[pid]
+        if k < 0 or k == S_LAMP:
+            return False
+        return k != S_REPEATER or (self.pal_facing[pid] >> 1) == (d >> 1)
+
+    cdef int _dust_sides(self, int i):
+        cdef int found = self.cells[i].side_mask
+        cdef int x, y, z, d, sx, sz, count = 0, last = 0
+        cdef bint above_solid
+        if found >= 0:
+            return found
+        x, y, z = self.cells[i].x, self.cells[i].y, self.cells[i].z
+        above_solid = self._solid_at(x, y + 1, z)
+        found = 0
+        for d in range(2, 6):
+            sx, sz = x + FX[d], z + FZ[d]
+            if (self._connects(sx, y, sz, d)
+                    or not above_solid and self._kind_id_at(sx, y + 1, sz) == S_DUST
+                    or not self._solid_at(sx, y, sz) and self._kind_id_at(sx, y - 1, sz) == S_DUST):
+                found |= 1 << d
+                count += 1
+                last = d
+        if count == 1:
+            found |= 1 << (last ^ 1)
+        elif count == 0:
+            found = 0 if self.pal_dot[self.cells[i].pid] else 0b111100
+        self.cells[i].side_mask = found
+        return found
+
+    cdef inline void _keep_links(self, int i, vector[int]& found):
+        self.cells[i].links_off = self.arena.size()
+        self.cells[i].links_len = found.size()
+        self.arena.insert(self.arena.end(), found.begin(), found.end())
+
+    cdef void _dust_links(self, int i):
+        if self.cells[i].links_off >= 0:
+            return
+        cdef vector[int] found
+        cdef int x = self.cells[i].x, y = self.cells[i].y, z = self.cells[i].z, d, qx, qy, qz, q_id
+        cdef bint above_solid = self._solid_at(x, y + 1, z)
+        for d in range(6):
+            qx, qy, qz = x + FX[d], y + FY[d], z + FZ[d]
+            if self._kind_id_at(qx, qy, qz) == S_DUST:
+                found.push_back(self._at(qx, qy, qz))
+            if d >= 2:
+                q_id = self._id(qx, qy, qz)
+                if not above_solid and not self.transparent[q_id] and self._kind_id_at(qx, qy + 1, qz) == S_DUST:
+                    found.push_back(self._at(qx, qy + 1, qz))
+                if not self.solid[q_id] and self._kind_id_at(qx, qy - 1, qz) == S_DUST:
+                    found.push_back(self._at(qx, qy - 1, qz))
+        self._keep_links(i, found)
+
+    cdef inline bint _in_arena(self, int off, int n, int e):
+        cdef int j
+        for j in range(off, off + n):
+            if self.arena[j] == e:
+                return True
+        return False
+
+    cdef void _take_from(self, int i, int qx, int qy, int qz, vector[int]& found):
+        cdef int j
+        if self._kind_id_at(qx, qy, qz) == S_DUST:
+            j = self._at(qx, qy, qz)
+            self._dust_links(j)
+            if self._in_arena(self.cells[j].links_off, self.cells[j].links_len, i):
+                found.push_back(j)
+
+    cdef void _dust_takers(self, int i):
+        if self.cells[i].takers_off >= 0:
+            return
+        cdef vector[int] found
+        cdef int x = self.cells[i].x, y = self.cells[i].y, z = self.cells[i].z, d
+        for d in range(6):
+            self._take_from(i, x + FX[d], y + FY[d], z + FZ[d], found)
+        for d in range(2, 6):
+            self._take_from(i, x + FX[d], y + 1, z + FZ[d], found)
+            self._take_from(i, x + FX[d], y - 1, z + FZ[d], found)
+        self.cells[i].takers_off = self.arena.size()
+        self.cells[i].takers_len = found.size()
+        self.arena.insert(self.arena.end(), found.begin(), found.end())
+
+    cdef int _run(self, int start):
+        cdef int number = self.cells[start].run, a, j, q
+        if number >= 0:
+            return number
+        number = self.runs.size()
+        self.cells[start].run = number
+        cdef vector[int] run
+        run.push_back(start)
+        cdef size_t at = 0
+        while at < run.size():
+            a = run[at]
+            at += 1
+            self._dust_links(a)
+            self._dust_takers(a)
+            for j in range(self.cells[a].links_off, self.cells[a].links_off + self.cells[a].links_len):
+                q = self.arena[j]
+                if self.cells[q].run < 0:
+                    self.cells[q].run = number
+                    run.push_back(q)
+            for j in range(self.cells[a].takers_off, self.cells[a].takers_off + self.cells[a].takers_len):
+                q = self.arena[j]
+                if self.cells[q].run < 0:
+                    self.cells[q].run = number
+                    run.push_back(q)
+        self.runs.push_back(run)
+        self.run_queued.push_back(False)
+        return number
+
+    # ---- what emits into a cell: `side` is the direction from the reader to p
+
+    cdef int _weak(self, int x, int y, int z, int side, bint dust_power):
+        cdef int i = self._at(x, y, z), k
+        cdef bint emits
+        if i < 0:
+            return -1
+        k = self.cells[i].kind
+        if k == S_TORCH:
+            emits = side != D_TOP
+        elif k == S_WALL_TORCH:
+            emits = self.cells[i].facing != side
+        elif k == S_BLOCK or k == S_LEVER:
+            emits = True
+        elif k == S_REPEATER or k == S_COMPARATOR:
+            emits = self.cells[i].facing == side
+        elif k == S_DUST:
+            emits = dust_power and side != D_BOTTOM and (side == D_TOP or (self._dust_sides(i) >> (side ^ 1)) & 1)
+        else:
+            emits = False
+        return i if emits else -1
+
+    cdef int _strong(self, int x, int y, int z, int side, bint dust_power):
+        cdef int i = self._at(x, y, z), k
+        if i < 0:
+            return -1
+        k = self.cells[i].kind
+        if k == S_TORCH or k == S_WALL_TORCH:
+            return i if side == D_BOTTOM else -1
+        if k == S_LEVER:
+            return i if self.pal_attach[self.cells[i].pid] == side else -1
+        if k == S_DUST or k == S_REPEATER or k == S_COMPARATOR:
+            return self._weak(x, y, z, side, dust_power)
+        return -1
+
+    cdef void _signal(self, int x, int y, int z, int side, bint dust_power, vector[int]& out):
+        cdef int d, e
+        if self._solid_at(x, y, z):
+            for d in range(6):
+                e = self._strong(x + FX[d], y + FY[d], z + FZ[d], d, dust_power)
+                if e >= 0:
+                    out.push_back(e)
+        else:
+            e = self._weak(x, y, z, side, dust_power)
+            if e >= 0:
+                out.push_back(e)
+
+    cdef void _inputs(self, int i):
+        if self.cells[i].inputs_off >= 0:
+            return
+        cdef vector[int] found
+        cdef int k = self.cells[i].kind, x = self.cells[i].x, y = self.cells[i].y, z = self.cells[i].z, d, j
+        if k == S_TORCH:
+            self._signal(x, y - 1, z, D_TOP, True, found)
+        elif k == S_WALL_TORCH:
+            d = self.cells[i].facing ^ 1
+            self._signal(x + FX[d], y + FY[d], z + FZ[d], d, True, found)
+        elif k == S_LAMP:
+            for d in range(6):
+                self._signal(x + FX[d], y + FY[d], z + FZ[d], d, True, found)
+        else:
+            d = self.cells[i].facing
+            self._signal(x + FX[d], y + FY[d], z + FZ[d], d, True, found)
+            if found.empty():
+                j = self._at(x + FX[d], y + FY[d], z + FZ[d])
+                if j >= 0 and self.cells[j].kind == S_DUST:
+                    found.push_back(j)
+        self.cells[i].inputs_off = self.arena.size()
+        self.cells[i].inputs_len = found.size()
+        self.arena.insert(self.arena.end(), found.begin(), found.end())
+
+    cdef void _side_inputs(self, int i):
+        cdef int k = self.cells[i].kind
+        if self.cells[i].sides_off >= 0 or (k != S_REPEATER and k != S_COMPARATOR):
+            return
+        cdef vector[int] found
+        cdef int x = self.cells[i].x, y = self.cells[i].y, z = self.cells[i].z
+        cdef int f = self.cells[i].facing, dx = FX[f], dz = FZ[f], n, ax, az, d, j, kq, e
+        for n in range(2):
+            ax, az = (dz, -dx) if n == 0 else (-dz, dx)
+            d = _horizontal(ax, az)
+            j = self._at(x + ax, y, z + az)
+            kq = self.cells[j].kind if j >= 0 else -1
+            if kq == S_REPEATER or kq == S_COMPARATOR:
+                e = self._weak(x + ax, y, z + az, d, False)
+                if e >= 0:
+                    found.push_back(e)
+            elif k == S_COMPARATOR and (kq == S_DUST or kq == S_BLOCK):
+                found.push_back(j)
+        self.cells[i].sides_off = self.arena.size()
+        self.cells[i].sides_len = found.size()
+        self.arena.insert(self.arena.end(), found.begin(), found.end())
+
+    cdef void _dust_sources(self, int i):
+        if self.cells[i].sources_off >= 0:
+            return
+        cdef vector[int] found
+        cdef int x = self.cells[i].x, y = self.cells[i].y, z = self.cells[i].z, d
+        for d in range(6):
+            self._signal(x + FX[d], y + FY[d], z + FZ[d], d, False, found)
+        self.cells[i].sources_off = self.arena.size()
+        self.cells[i].sources_len = found.size()
+        self.arena.insert(self.arena.end(), found.begin(), found.end())
+
+    cdef void _readers(self, int e):
+        if self.cells[e].readers_off >= 0:
+            return
+        cdef vector[int] found
+        cdef int x = self.cells[e].x, y = self.cells[e].y, z = self.cells[e].z, n, qx, qy, qz, k, c, r
+        cdef size_t j
+        cdef bint fresh
+        for n in range(self.reach_x.size()):
+            qx, qy, qz = x + self.reach_x[n], y + self.reach_y[n], z + self.reach_z[n]
+            k = self._kind_id_at(qx, qy, qz)
+            r = 0
+            fresh = False
+            if k == S_DUST:
+                c = self._at(qx, qy, qz)
+                self._dust_sources(c)
+                if self._in_arena(self.cells[c].sources_off, self.cells[c].sources_len, e):
+                    r = ~self._run(c)
+                    fresh = True
+            elif k == S_REPEATER or k == S_COMPARATOR or k == S_TORCH or k == S_WALL_TORCH or k == S_LAMP:
+                c = self._at(qx, qy, qz)
+                self._inputs(c)
+                if self._in_arena(self.cells[c].inputs_off, self.cells[c].inputs_len, e):
+                    r = c
+                    fresh = True
+                else:
+                    self._side_inputs(c)
+                    if self._in_arena(self.cells[c].sides_off, self.cells[c].sides_len, e):
+                        r = c
+                        fresh = True
+            if fresh:
+                for j in range(found.size()):
+                    if found[j] == r:
+                        fresh = False
+                        break
+                if fresh:
+                    found.push_back(r)
+        if found.size() > 1:  # the order a set of them iterates in
+            ordered = set()
+            for j in range(found.size()):
+                ordered.add(found[j])
+            j = 0
+            for v in ordered:
+                found[j] = v
+                j += 1
+        self.cells[e].readers_off = self.arena.size()
+        self.cells[e].readers_len = found.size()
+        self.arena.insert(self.arena.end(), found.begin(), found.end())
+
+    # ---- evaluation
+
+    cdef inline bint _any_on(self, int off, int n):
+        cdef int j
+        for j in range(off, off + n):
+            if self.cells[self.arena[j]].power:
+                return True
+        return False
+
+    cdef inline int _max_on(self, int off, int n):
+        cdef int j, best = 0, p
+        for j in range(off, off + n):
+            p = self.cells[self.arena[j]].power
+            if p > best:
+                best = p
+        return best
+
+    cdef int _output(self, int i):
+        cdef int k = self.cells[i].kind, level, sides
+        self._inputs(i)
+        cdef int io = self.cells[i].inputs_off, il = self.cells[i].inputs_len
+        if k == S_REPEATER:
+            self._side_inputs(i)
+            self.cells[i].locked = self._any_on(self.cells[i].sides_off, self.cells[i].sides_len)
+            if self.cells[i].locked:
+                return self.cells[i].power
+            return 15 if self._any_on(io, il) else 0
+        if k == S_COMPARATOR:
+            level = self._max_on(io, il)
+            self._side_inputs(i)
+            sides = self._max_on(self.cells[i].sides_off, self.cells[i].sides_len)
+            if self.cells[i].subtract:
+                return max(level - sides, 0)
+            return level if level >= sides else 0
+        if k == S_LAMP:
+            return 15 if self._any_on(io, il) else 0
+        return 0 if self._any_on(io, il) else 15
+
+    cdef void _dust_levels(self, int number, vector[int]& changed):
+        cdef size_t a
+        cdef int i, level, q, j, n = self.runs[number].size()
+        for a in range(n):
+            self.cells[self.runs[number][a]].level = 0
+        for level in range(16):
+            self.buckets[level].clear()
+        for a in range(n):
+            i = self.runs[number][a]
+            self._dust_sources(i)
+            level = self._max_on(self.cells[i].sources_off, self.cells[i].sources_len)
+            if level:
+                self.cells[i].level = level
+                self.buckets[level].push_back(i)
+        for level in range(15, 1, -1):
+            a = 0
+            while a < self.buckets[level].size():
+                i = self.buckets[level][a]
+                a += 1
+                if self.cells[i].level != level:
+                    continue
+                self._dust_takers(i)
+                for j in range(self.cells[i].takers_off, self.cells[i].takers_off + self.cells[i].takers_len):
+                    q = self.arena[j]
+                    if self.cells[q].level < level - 1:
+                        self.cells[q].level = level - 1
+                        self.buckets[level - 1].push_back(q)
+        changed.clear()
+        for a in range(n):
+            i = self.runs[number][a]
+            if self.cells[i].power != self.cells[i].level:
+                changed.push_back(i)
+
+    cdef inline void _mark(self, int item, bint on):
+        if item >= 0:
+            self.cells[item].queued = on
+        else:
+            self.run_queued[~item] = on
+
+    cdef inline bint _is_queued(self, int item):
+        return self.cells[item].queued if item >= 0 else self.run_queued[~item]
+
+    def run(self, starting, int steps_per_item, int steps_per_cell):
+        """starting: the cells to begin from, an n x 3 int32 array."""
+        cdef int[:, :] start = starting
+        cdef vector[int] queue, in_box, waiting, steppers, changed
+        cdef size_t qh = 0, bh = 0, wh = 0
+        cdef Py_ssize_t n
+        cdef int i, k, number, item, level, j, reader, a
+        cdef long long queued_count = 0, limit, steps = 0
+        for n in range(start.shape[0]):
+            i = self._at(start[n, 0], start[n, 1], start[n, 2])
+            k = self.cells[i].kind
+            if k == S_DUST:
+                number = self._run(i)
+                if self.runs[number][0] == i:
+                    queue.push_back(~number)
+            elif k == S_REPEATER or k == S_COMPARATOR or k == S_TORCH or k == S_WALL_TORCH or k == S_LAMP:
+                steppers.push_back(i)
+        for a in range(steppers.size()):  # latches first, as the set of them is built before the queues
+            self._side_inputs(steppers[a])
+        for a in range(steppers.size()):
+            i = steppers[a]
+            if self.cells[i].sides_len == 0:
+                queue.push_back(i)
+            else:
+                waiting.push_back(i)
+        for a in range(queue.size()):
+            self._mark(queue[a], True)
+        for a in range(waiting.size()):
+            self._mark(waiting[a], True)
+        queued_count = queue.size() + waiting.size()
+        limit = <long long>steps_per_item * max(queued_count, 1)
+        while qh < queue.size() or bh < in_box.size() or wh < waiting.size():
+            steps += 1
+            if steps > limit:
+                limit = <long long>steps_per_cell * max(<long long>self.cells.size(), 1)
+                if steps > limit:
+                    self.oscillated = True
+                    break
+            if qh < queue.size():
+                item = queue[qh]
+                qh += 1
+            elif bh < in_box.size():
+                item = in_box[bh]
+                bh += 1
+            else:
+                item = waiting[wh]
+                wh += 1
+            self._mark(item, False)
+            if item < 0:
+                self._dust_levels(~item, changed)
+                for a in range(changed.size()):
+                    i = changed[a]
+                    self.cells[i].power = self.cells[i].level
+            else:
+                level = self._output(item)
+                changed.clear()
+                if level != self.cells[item].power:
+                    self.cells[item].power = level
+                    changed.push_back(item)
+            for a in range(changed.size()):
+                i = changed[a]
+                self._readers(i)
+                for j in range(self.cells[i].readers_off, self.cells[i].readers_off + self.cells[i].readers_len):
+                    reader = self.arena[j]
+                    if self._is_queued(reader):
+                        continue
+                    self._mark(reader, True)
+                    if reader >= 0:
+                        self._side_inputs(reader)
+                    if reader >= 0 and self.cells[reader].sides_len:
+                        waiting.push_back(reader)
+                    elif self.cells[reader if reader >= 0 else self.runs[~reader][0]].inside:
+                        in_box.push_back(reader)
+                    else:
+                        queue.push_back(reader)
+        self.steps = steps
+
+    @property
+    def cell_count(self):
+        return self.cells.size()
+
+    def results(self):
+        """Per block that has a state to write, sorted by position: positions n x 3, what kind of state, power, locked.
+        Kind: 0 repeater, 1 dust, 2 torch or lamp, 3 comparator. Inside a box, only the ones that moved."""
+        cdef size_t i
+        cdef int k
+        keep = []
+        for i in range(self.cells.size()):
+            k = self.cells[i].kind
+            if k == S_LEVER or k == S_BLOCK:
+                continue
+            if self.cells[i].inside and self.cells[i].power == self.cells[i].saved_power \
+                    and self.cells[i].locked == self.cells[i].saved_locked:
+                continue
+            keep.append(i)
+        n = len(keep)
+        pos = np.empty((n, 3), dtype=np.int32)
+        state = np.empty(n, dtype=np.int8)
+        power = np.empty(n, dtype=np.int32)
+        locked = np.empty(n, dtype=bool)
+        for row, c in enumerate(keep):
+            i = c
+            pos[row, 0], pos[row, 1], pos[row, 2] = self.cells[i].x, self.cells[i].y, self.cells[i].z
+            k = self.cells[i].kind
+            state[row] = 0 if k == S_REPEATER else 1 if k == S_DUST else 3 if k == S_COMPARATOR else 2
+            power[row] = self.cells[i].power
+            locked[row] = self.cells[i].locked
+        order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
+        return pos[order], state[order], power[order], locked[order]
