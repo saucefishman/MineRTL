@@ -23,6 +23,7 @@ from minecraft_v.progress import pulse
 cdef extern from *:
     """
     #include <algorithm>
+    #include <functional>
     #include <vector>
     struct HeapEntry {
         double f; long long neg_h; double g; long long counter;
@@ -32,12 +33,19 @@ cdef extern from *:
     // the pops don't depend on how the heap is laid out: 4-ary over 16 byte keys, with the rest of an
     // entry in an array by counter. Sifting is most of a big search's cache misses.
     struct HeapKey { double f; int neg_h; unsigned int counter; };
-    struct HeapData { double g; double g_wire; long long node; long long parent; int group; };
+    struct HeapData { double g; double g_wire; long long node; long long parent; int group; int next; };
+    // One queue per (f, -h), first in first out, which is the counter's order: a search has few of them.
+    struct Bucket { unsigned long long key; int head, tail; };
     struct Heap {
         std::vector<HeapKey> keys;
         std::vector<HeapData> data;
-        // With g and weight * h whole quarters, f and h fix g exactly, so it needs no looking at.
+        // With g and weight * h whole quarters, f and h fix g exactly, so it needs no looking at, and entries
+        // go in buckets by (f, -h). Otherwise the 4-ary heap on keys.
         bool g_can_differ = true;
+        std::vector<Bucket> buckets;     // open addressing; head < 0 is an empty queue
+        size_t bucket_count = 0;
+        std::vector<unsigned long long> active;  // min-heap of the keys of non-empty queues
+        static constexpr unsigned long long NO_BUCKET = ~0ULL;
         inline bool before(const HeapKey& a, const HeapKey& b) const {
             if (a.f != b.f) return a.f < b.f;
             if (a.neg_h != b.neg_h) return a.neg_h < b.neg_h;
@@ -47,15 +55,63 @@ cdef extern from *:
             }
             return a.counter < b.counter;
         }
-        bool empty() const { return keys.empty(); }
+        bool empty() const { return keys.empty() && active.empty(); }
         void clear() {
             keys.clear();
             data.clear();
+            active.clear();
             if (data.capacity() > (1u << 22)) { std::vector<HeapData>().swap(data); std::vector<HeapKey>().swap(keys); }
+            size_t cap = buckets.size() > (1u << 12) || buckets.empty() ? (1u << 10) : buckets.size();
+            buckets.assign(cap, Bucket{NO_BUCKET, -1, -1});
+            bucket_count = 0;
+        }
+        static inline size_t bucket_mix(unsigned long long k) {
+            k *= 0x9e3779b97f4a7c15ULL;
+            return (size_t)(k >> 40);
+        }
+        inline Bucket* bucket(unsigned long long key) {
+            size_t mask = buckets.size() - 1, i = bucket_mix(key) & mask;
+            while (buckets[i].key != key) {
+                if (buckets[i].key == NO_BUCKET) {
+                    if ((bucket_count + 1) * 2 > mask + 1) {
+                        std::vector<Bucket> old;
+                        old.swap(buckets);
+                        buckets.assign(old.size() * 2, Bucket{NO_BUCKET, -1, -1});
+                        size_t m = buckets.size() - 1;
+                        for (const Bucket& b : old) {
+                            if (b.key == NO_BUCKET) continue;
+                            size_t j = bucket_mix(b.key) & m;
+                            while (buckets[j].key != NO_BUCKET) j = (j + 1) & m;
+                            buckets[j] = b;
+                        }
+                        return bucket(key);
+                    }
+                    buckets[i].key = key;
+                    bucket_count++;
+                    return &buckets[i];
+                }
+                i = (i + 1) & mask;
+            }
+            return &buckets[i];
         }
         // e.counter is its place in data: the number of pushes so far.
         inline void push(const HeapEntry& e) {
-            data.push_back(HeapData{e.g, e.g_wire, e.node, e.parent, e.group});
+            data.push_back(HeapData{e.g, e.g_wire, e.node, e.parent, e.group, -1});
+            if (!g_can_differ) {
+                // f * 4 < 2^32: g is under 1e9 by the time it gets here, and h is a few thousand.
+                unsigned long long key = ((unsigned long long)(e.f * 4) << 32) | (unsigned int)((int)e.neg_h + 0x40000000);
+                Bucket* b = bucket(key);
+                int at = (int)e.counter;
+                if (b->head < 0) {
+                    b->head = b->tail = at;
+                    active.push_back(key);
+                    std::push_heap(active.begin(), active.end(), std::greater<unsigned long long>());
+                } else {
+                    data[b->tail].next = at;
+                    b->tail = at;
+                }
+                return;
+            }
             HeapKey k{e.f, (int)e.neg_h, (unsigned int)e.counter};
             size_t i = keys.size();
             keys.push_back(k);
@@ -69,6 +125,21 @@ cdef extern from *:
             h[i] = k;
         }
         inline HeapEntry pop() {
+            if (!g_can_differ) {
+                unsigned long long key = active[0];
+                Bucket* b = bucket(key);
+                int at = b->head;
+                const HeapData& d = data[at];
+                b->head = d.next;
+                if (d.next < 0) {
+                    std::pop_heap(active.begin(), active.end(), std::greater<unsigned long long>());
+                    active.pop_back();
+                } else {
+                    __builtin_prefetch(&data[d.next]);
+                }
+                return HeapEntry{(double)(key >> 32) / 4, (long long)(int)((unsigned int)key - 0x40000000), d.g, at,
+                                 d.g_wire, d.node, d.parent, d.group};
+            }
             HeapKey* h = keys.data();
             HeapKey top = h[0];
             size_t n = keys.size() - 1;
