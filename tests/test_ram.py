@@ -212,3 +212,18 @@ def test_group_settled_bank_by_bank_equals_settled_whole(monkeypatch, workers):
                                                    b.settled.ids.tolist()))
     assert cells(made) == cells(whole)
     assert made.settled.comparators == whole.settled.comparators
+
+
+def test_a_blocks_output_with_no_net_keeps_wire_off_its_pin():
+    # bpmem: takes' bit 0 is never read on two ports, but those pins still go high. next_pc1's select was routed over one.
+    from types import SimpleNamespace as NS
+
+    from minecraft_v.placement_engine.builder import _terminal_keepout, _unused_output_terminals
+    from minecraft_v.placement_engine.ir import ComponentType, Direction
+
+    pins = [NS(name="used", direction=Direction.OUT), NS(name="spare", direction=Direction.OUT), NS(name="in", direction=Direction.IN)]
+    block = NS(component=NS(id="ram", type=ComponentType.CUSTOM, pins=pins))
+    terminals = {("ram", "used"): (1, 1, 1), ("ram", "spare"): (5, 1, 1), ("ram", "in"): (9, 1, 1)}
+    found = _unused_output_terminals([block], [NS(source=NS(component_id="ram", pin_name="used"), sinks=[])], terminals)
+    assert found == {"unused:ram:spare": {(5, 1, 1)}}
+    assert {(5, 1, 1), (5, 2, 1), (5, 1, 2)} <= _terminal_keepout(found["unused:ram:spare"])
