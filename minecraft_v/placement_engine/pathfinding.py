@@ -138,13 +138,7 @@ class _BlockIndex:
     def __init__(self, region: Region):
         # Positive-size regions store blocks at region coordinates directly.
         assert region.width > 0 and region.height > 0 and region.length > 0
-        blocks = region._Region__blocks
-        kinds = np.array([
-            (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
-            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
-            for b in region._Region__palette
-        ], dtype=np.uint8)
-        k = kinds[blocks]
+        k = self.kinds(region)
 
         def cells(mask: int) -> set[tuple[int, int, int]]:
             return set(map(tuple, np.argwhere(k & mask).tolist()))
@@ -154,6 +148,16 @@ class _BlockIndex:
         self.torch = cells(4)
         self.repeater = cells(8)
         self.grid = None  # _astar.CellGrid mirroring these sets; update keeps it current
+
+    @staticmethod
+    def kinds(region: Region) -> np.ndarray:
+        """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater."""
+        kinds = np.array([
+            (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
+            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
+            for b in region._Region__palette
+        ], dtype=np.uint8)
+        return kinds[region._Region__blocks]
 
     @classmethod
     def layered(cls, base: _BlockIndex, overlay: dict[tuple[int, int, int], BlockState]) -> _BlockIndex:
@@ -227,7 +231,7 @@ class IndexedWorkspace:
                 or not all(hasattr(c, "_grid") for c in (solid, dust_owner, inverted_cells))):
             return
         region = self.region
-        _astar.CellGrid(region.width, region.height, region.length, self._index, solid, dust_owner,
+        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._index, solid, dust_owner,
                         inverted_cells, footprint_blocked, terminal_positions)
 
 

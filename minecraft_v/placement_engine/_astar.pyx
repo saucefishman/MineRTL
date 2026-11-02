@@ -15,6 +15,7 @@ from libcpp.vector cimport vector
 from cython.operator cimport dereference
 from cpython.set cimport PySet_Contains
 import time
+import numpy as np
 from minecraft_v.progress import pulse
 
 cdef extern from *:
@@ -313,6 +314,7 @@ cdef enum:
     G_OWNED = 1 << 5     # in dust_owner (CellGrid.owner holds who)
     G_KEEP1 = 1 << 6     # keepout count >= 1
     G_KEEP2 = 1 << 7     # keepout count >= 2
+    G_FP_READ = 1 << 11  # F_FP has been read from the footprint set
     G_DIRECT = F_SOLID | F_NONAIR | F_WIRE | F_TORCH | F_REP | F_FP | F_INV | F_TERM
     GRID_MARGIN = 8      # cells either side of the region; queries beyond read the containers
 
@@ -330,9 +332,11 @@ cdef class CellGrid:
     A search asks about each cell a dozen times over a dozen Python containers; this answers from
     one read. It lives as long as a router, kept current by the containers' writers
     (JournaledSet, JournaledDict, _BlockIndex.update call put / put_owner), so nothing is rebuilt
-    per search. Keepouts come from a count dict that doesn't change once built (load_keepout).
-    calloc: untouched pages cost nothing, and most of a big workspace is never read. Cells outside
-    the grid aren't mirrored; World reads those from the containers."""
+    per search. Filled up front, region blocks from an array since walking millions of tuples is
+    slow, except the footprint set: 13M tuples on the full CPU, three minutes to walk on a loaded
+    machine, so each cell asks it once, when first read. Keepouts come from a count dict that
+    doesn't change once built (load_keepout). Only cells with blocks are written, leaving other
+    pages untouched. Cells outside the grid aren't mirrored; World reads those from the containers."""
     cdef uint16_t* g
     cdef int nx, ny, nz
     cdef long long sx, sy
@@ -345,8 +349,9 @@ cdef class CellGrid:
     def __cinit__(self):
         self.g = NULL
 
-    def __init__(self, width, height, length, index, solid, dust_owner, inverted, fp, terminal):
-        """Mirrors every container now; they must call put / put_owner from here on."""
+    def __init__(self, width, height, length, kinds, index, solid, dust_owner, inverted, fp, terminal):
+        """kinds: the region's cells as an array of _BlockIndex's kind bits (index's sets, as they
+        cost minutes to walk). The containers must call put / put_owner from here on."""
         self.nx = width + 2 * GRID_MARGIN
         self.ny = height + 2 * GRID_MARGIN
         self.nz = length + 2 * GRID_MARGIN
@@ -358,11 +363,13 @@ cdef class CellGrid:
         self.owner_ids = {}
         self.non_air, self.wire, self.torch, self.repeater = index.non_air, index.wire, index.torch, index.repeater
         self.solid, self.dust_owner, self.inverted, self.fp, self.terminal = solid, dust_owner, inverted, fp, terminal
-        for cells, bit in ((self.non_air, F_NONAIR), (self.wire, F_WIRE), (self.torch, F_TORCH),
-                           (self.repeater, F_REP), (solid, F_SOLID), (inverted, F_INV), (fp, F_FP),
-                           (terminal, F_TERM)):
-            for pos in cells:
-                self.put(pos, bit, True)
+        cdef size_t cells = <size_t>(self.sx * self.nx)
+        flat = np.asarray(<uint16_t[:cells]>self.g)
+        xs, ys, zs = np.nonzero(kinds)
+        flat[(xs + GRID_MARGIN) * self.sx + (ys + GRID_MARGIN) * self.sy + (zs + GRID_MARGIN)] = (
+            kinds[xs, ys, zs].astype(np.uint16) << 1)  # kind bits are F_NONAIR.. >> 1
+        for cells_set, bit in ((solid, F_SOLID), (inverted, F_INV), (terminal, F_TERM)):
+            self.put_all(cells_set, bit)
         for pos, value in dust_owner.items():
             self.put_owner(pos, value)
         index.grid = self
@@ -373,6 +380,10 @@ cdef class CellGrid:
 
     def __dealloc__(self):
         free(self.g)
+
+    cdef int read_fp(self, uint16_t* w, int x, int y, int z) except -1:
+        w[0] |= G_FP_READ | (F_FP if PySet_Contains(self.fp, (x, y, z)) else 0)
+        return 0
 
     cdef inline uint16_t* word(self, int x, int y, int z) noexcept:
         cdef unsigned int ux = <unsigned int>(x + GRID_MARGIN), uy = <unsigned int>(y + GRID_MARGIN)
@@ -386,6 +397,15 @@ cdef class CellGrid:
         if w != NULL:
             w[0] = (w[0] | bit) if on else (w[0] & ~bit)
 
+    cdef int put_all(self, cells, unsigned int bit) except -1:
+        cdef uint16_t* w
+        cdef tuple pos
+        for pos in cells:
+            w = self.word(pos[0], pos[1], pos[2])
+            if w != NULL:
+                w[0] |= bit
+        return 0
+
     cpdef put_owner(self, tuple pos, value):
         cdef int x = pos[0], y = pos[1], z = pos[2], ins
         cdef uint16_t* w = self.word(x, y, z)
@@ -394,10 +414,7 @@ cdef class CellGrid:
         if value is None:
             w[0] &= ~G_OWNED
             return
-        oid = self.owner_ids.get(value)
-        if oid is None:
-            oid = self.owner_ids[value] = 1 + len(self.owner_ids)
-        self.owner_map.get(cell_key(x, y, z), &ins)[0] = oid
+        self.owner_map.get(cell_key(x, y, z), &ins)[0] = self.owner_id(value)
         w[0] |= G_OWNED
 
     cdef int owner_id(self, value) except -1:
@@ -535,12 +552,15 @@ cdef class World:
 
     # Reads. With a grid, a cell inside it needs no Python; everything else takes cell()'s path.
 
-    cdef inline uint16_t* gw(self, int x, int y, int z) noexcept:
+    cdef inline uint16_t* gw(self, int x, int y, int z) except? NULL:
         cdef unsigned int ux = <unsigned int>(x + GRID_MARGIN), uy = <unsigned int>(y + GRID_MARGIN)
         cdef unsigned int uz = <unsigned int>(z + GRID_MARGIN)
         if self.gp == NULL or ux >= <unsigned int>self.gnx or uy >= <unsigned int>self.gny or uz >= <unsigned int>self.gnz:
             return NULL
-        return &self.gp[ux * self.gsx + uy * self.gsy + uz]
+        cdef uint16_t* w = &self.gp[ux * self.gsx + uy * self.gsy + uz]
+        if not w[0] & G_FP_READ:
+            self.grid.read_fp(w, x, y, z)
+        return w
 
     cdef inline unsigned int base(self, int x, int y, int z) except? 0xFFFFFFFF:
         """Flags of G_DIRECT only are meaningful."""

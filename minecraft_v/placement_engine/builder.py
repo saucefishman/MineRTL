@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import bisect
+import gc
 import time
 import zlib
 from collections import deque
@@ -1202,6 +1203,8 @@ class _GreedyRouter:
         escalated: set[str] = set()
         started = last_log = time.monotonic()
         attempts = 0
+        # A full collection walks every set of cells, millions of entries, none of them garbage.
+        gc.freeze()
         with ProgressBar(label, len(jobs)) as bar:
             while queue:
                 now = time.monotonic()
