@@ -79,17 +79,20 @@ Read this first; the State log below has the detail.
 - synth-nets (`worktree-agent-ab09b6e9e2db63bc5`, f7b1e27, not merged): adder fold (`techmap/fa_const.v`) plus `&syn2;&dch,-f;&nf`: nets 15,230 to 12,621, tiles down 10%, gate levels 102 to 82, ABC cec equivalent. Never finished routing; muxes double, a routing risk. Fallback: tile-cost library, fewer muxes. density tests it after t1.
 
 ## TODO: investigate when the machine has room
-Rule: if the machine is strained (swap filling, stalled processes), write ideas here instead of starting them.
-- Longer test program exercising branches and the predictor; `hi` is too short to clear it. Wait for preload-fault.
-- Footprint: fold + `RAM_STACK_BANKS=12` with gate width about .55 if fold alone can't route under 1024x1024.
-- Footprint: two RAM tiers with lanes in two bundles (estimate 432x328x413, not prototyped).
-- Routing: coarse global routing corridors for long edges, tag_rf and select lanes. Failed searches track edge length: under 100 blocks about 0.2% fail, 100-300 blocks 12-16%, 300+ almost all (h1). They don't cluster at RAM pins, so pin-access stubs are not worth trying.
-- Congestion: RUDY can't rank settings or locate failures (`scripts/predict_congestion.py` on worktree-agent-ae2dffb15a5e5ae50, not merged). Unrouted guesses for 1024x1024: fold with width .5 channel 250 (863x305x905), or width .6 channel 250 density .20 (863x306x839).
-- Routing: failed-set PathFinder for hard nets; per-module ABC; stage hierarchy.
-- Open: `--tiled-ram` on `memread` wrong words, `bpmem` `next_pc1` (preload-fault running).
-- Open: `hist` 1 failure at half 500 and 350, folded and current, not looked into.
-- Open: full-adder opens in hf1 and hf2, `net_9622` inverted, unexplained.
-- Open: RAM group with lone lower read pin refused, address pitch 5 broken.
+Rule: if the queue is badly backed up, write ideas here instead of starting them. Slowdown from swapping is fine for work that isn't timed.
+- Done 2026-11-02, removed: longer predictor program (`examples/floweypu_loop`); memread and bpmem faults (live pins, gated-clock hold); fit under 1024x1024 (hi1 863x305x585); RUDY congestion predictor (doesn't rank settings).
+- Verify: `floweypu_loop` in redstone mode on the final settings (running); in game; a second placement seed for hi and loop.
+- Verify: `t1` was installed with real faults, now replaced; check nothing else used it.
+- Routing: split long edges into soft waypoints (global-routing session, 3d8708f): 13% fewer failed searches, 8% less A* time on one placement; merge after its checks. Long searches stall about 50 blocks short of goal while rip-up clears around it; rip-at-stall untested.
+- Routing: kernel reuse across sinks and dominance (multi-sink session), results pending.
+- Routing: walled-in short searches cost more time than failed long ones; failed-set PathFinder for hard nets, tag_rf and select lanes.
+- Footprint, if wanted smaller: X is set by the folded RAM group (808 of 863); 12 banks per stack gives 759 X but 369 high and a failed net; two RAM tiers with lanes in two bundles (estimate 432x328x413, not prototyped).
+- Synthesis: a generic pass for part-selects whose offset depends on a few bits, so the 2-line `pipe_decode_read.sv` ternary edit could be reverted to the original; or try an SV frontend (yosys-slang, Synlig) instead of sv2v.
+- Synthesis: tile-cost library has half the muxes of the current recipe, as a fallback if mux routing hurts.
+- Hold: `E` hold time assumed equal to `D`; paths launched from input pins aren't timed; detoured nets not kept across `--resume`.
+- Open: full-adder opens in hf1 and hf2, `net_9622` inverted, unexplained (not seen since).
+- Open: RAM group with lone lower read pin refused unfolded; address pitch 5 broken.
+- Open: `--debug` crashes, `sevenseg --flat` and `pinext` fail pin targets, `halfvideo --route-passes 3` fails on a support block, `video` fails pin targets by default: all broken on main too.
 
 ## Job queue
 All builds and simulations go through `python3 scripts/job.py run --mem 7G --name floweypu-build --timeout 2400 -- <command>`; it blocks until there's room. Rough memory: floweypu build 7G, floweypu simulation 3G, small example 1G. `--exclusive` for builds whose time matters, `--priority 10` for final checks, `-10` for sweeps. `python3 scripts/job.py status` shows the queue. Waiting raises priority one level per minute, so nothing starves. Timeouts don't count sleep. Jobs may swap: admission allows 10G over what's free (`JOB_OVERCOMMIT_GB`), up to 16G of swap in use, because most jobs aren't time critical. Timings from shared runs mean nothing; use `--exclusive`.
