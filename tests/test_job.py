@@ -1,4 +1,5 @@
 """scripts/job.py against real clients, with memory and swap faked through the environment."""
+import importlib.util
 import os
 import subprocess
 import sys
@@ -117,3 +118,14 @@ def test_status_lists_jobs(tmp_path):
     out = subprocess.run([sys.executable, SCRIPT, "status"], env=env, capture_output=True, text=True).stdout
     assert "listed" in out and "running" in out
     assert job.wait(30) == 0
+
+
+def test_waiting_overtakes_priority():
+    spec = importlib.util.spec_from_file_location("job", SCRIPT)
+    job = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(job)
+    now = time.time()
+    fresh_high = {"priority": 10, "queued": now}
+    old_low = {"priority": -10, "queued": now - 21 * job._AGING}
+    assert job._order(old_low) < job._order(fresh_high)
+    assert job._order({"priority": 10, "queued": now}) < job._order({"priority": -10, "queued": now})

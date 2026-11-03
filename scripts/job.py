@@ -34,6 +34,7 @@ _SWAP_LOW = 1 * _GB  # less room than this under the cap: nothing new starts, an
 _SWAP_OK = 2 * _GB  # paused jobs carry on once this much is free
 _PEAK_MARGIN = 1.1
 _MAX_BACKFILL_WAIT = 600  # seconds the head of the queue waits before smaller jobs stop passing it
+_AGING = 60.0  # seconds of waiting worth one level of priority
 _POLL = 2.0
 _SAMPLE = 5.0
 
@@ -120,7 +121,8 @@ def _need(job: dict, peaks: dict) -> int:
 
 
 def _order(job: dict) -> tuple:
-    return (-job["priority"], job["queued"])
+    """Who goes first. Waiting counts as priority, so low priority jobs get their turn."""
+    return (-job["priority"] - (time.time() - job["queued"]) / _AGING, job["queued"])
 
 
 def may_start(key: str, state: dict, free: int, swap: int, cores: int, now: float) -> bool:
