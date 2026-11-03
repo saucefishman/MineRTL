@@ -1118,7 +1118,7 @@ cdef class World:
                     return False
                 if o == 0 and v & (F_TORCH | F_WIRE) and not (with_inv_fp and self.efp(nx, ny, nz)):
                     return False
-        for vdy in (1, -1):
+        for vdy in range(1, -2, -2):  # 1, -1; a C loop, where a tuple unboxes each
             vy = y + vdy
             if has_exempt and x == ex and vy == ey and z == ez:
                 continue
@@ -1517,7 +1517,7 @@ cdef class World:
             if not ok:
                 continue
             for k in range(4):
-                for ddy in (-1, 1):
+                for ddy in range(-1, 2, 2):  # -1, 1, as a C loop
                     if self.owner(nx + HORIZ[k][0], y - 2 + ddy, nz + HORIZ[k][1]) != 0:
                         ok = False
                         break
