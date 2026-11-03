@@ -7,6 +7,8 @@ from .constants import (
 )
 from .block_utils import _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
 
+_foot_repeaters = [False]  # see pathfinding.set_foot_repeaters
+
 
 class LayConflict(ValueError):
     """A searched path that can't be laid as-is (e.g. it crosses its own support or wire).
@@ -372,6 +374,38 @@ def _signal_returns(
     def input_side(block: BlockState) -> tuple[int, int]:
         return next(d for d, f in _DELTA_TO_FACING.items() if f == block["facing"])
 
+    # Most neighbours are neither; the index saves reading those from the region. With it, a block is read only for a
+    # repeater's facing.
+    index = workspace.block_index() if hasattr(workspace, "block_index") else None
+    if index is not None:
+        wires, repeaters = index.wire, index.repeater
+        seen = {start, cut}
+        stack = [start]
+        while stack:
+            pos = stack.pop()
+            if pos == target:
+                return True
+            x, y, z = pos
+            at_repeater = pos in repeaters
+            if at_repeater:
+                dx, dz = input_side(workspace[pos])
+                nexts = [(x - dx, y + dy, z - dz) for dy in (-1, 0, 1)]
+            else:
+                nexts = [(x + dx, y + dy, z + dz) for dx, dz in _HORIZ_DIRS for dy in (-1, 0, 1)]
+            for nxt in nexts:
+                if nxt in seen:
+                    continue
+                if nxt in wires:
+                    follows = dust_owner.get(nxt) == net_id
+                elif nxt in repeaters and not at_repeater and pos[1] >= 0:
+                    dx, dz = input_side(workspace[nxt])
+                    follows = dust_owner.get(nxt, net_id) == net_id and (nxt[0] + dx, nxt[2] + dz) == (x, z)
+                else:
+                    follows = False
+                if follows:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
     seen = {start, cut}
     stack = [start]
     while stack:
@@ -431,17 +465,22 @@ def _place_repeaters_for_net(
         cell for cell, succs in successors.items() if len(succs) > 1
     }
 
+    sinks = {path[-1] for path in ordered_paths}  # a later branch can run on through a sink's pin cell
+
     def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
         if j <= 0 or j >= len(path) - 1:
             return False
+        if path[j] in sinks:
+            return False  # a repeater across the pin cell hides the wire from the gate
         x, y, z = path[j]
         px, py, pz = path[j - 1]
         nx, ny, nz = path[j + 1]
         dx, dz = x - px, z - pz
         if (dx, dz) not in _DELTA_TO_FACING:
             return False
-        if (ny != y or y != py) and (not (y == py - 1 and ny == y)):
-            return False  # next cell is slope or tower
+        # At a slope's foot it would read the block under the slope: glass, or powered by other wire.
+        if (ny != y or y != py) and not (_foot_repeaters[0] and y == py - 1 and ny == y):
+            return False
         if (nx - x, nz - z) != (dx, dz):
             return False  # turn after repeater
         if path[j] in branch_points:
@@ -456,6 +495,13 @@ def _place_repeaters_for_net(
     # reach viable repeater positions in the already-laid upstream wire.
     upstream_seg: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
     upstream_dist: dict[tuple[int, int, int], int] = {}  # signal already spent at that reset cell
+    # The index answers repeater and torch from a set, where the region decodes a block.
+    index = workspace.block_index() if hasattr(workspace, "block_index") else None
+    if index is not None:
+        is_repeater_at, is_torch_at = index.repeater.__contains__, index.torch.__contains__
+    else:
+        is_repeater_at = lambda pos: _is_repeater(workspace[pos])
+        is_torch_at = lambda pos: _is_torch(workspace[pos])
 
     for orig_path in ordered_paths:
         path: list[tuple[int, int, int]] = list(orig_path)
@@ -471,8 +517,6 @@ def _place_repeaters_for_net(
         depth = 0
         depths = []
         for pos_idx, pos in enumerate(path):
-            px_, py_, pz_ = pos
-            cell_block = workspace[px_, py_, pz_]
             if pos_idx > 0:
                 prev = path[pos_idx - 1]
                 depth += abs(pos[0] - prev[0]) + abs(pos[2] - prev[2]) # dy does not decrease power
@@ -484,12 +528,12 @@ def _place_repeaters_for_net(
                     (dy == 4 and dxz in _TOWER_2BLOCK)
                     or (dy == -4 and dxz == (0, 0))
                 )
-                if _is_repeater(cell_block):
+                if is_repeater_at(pos):
                     # Same reset as placing it below (and as the search's slot reset): a
                     # repeater laid by an earlier walk must not cost the stretch after it a cell.
                     reset_depth = depth
                     reset_idx = pos_idx
-                elif is_special_reset or _is_torch(cell_block):
+                elif is_special_reset or is_torch_at(pos):
                     reset_depth = depth - 1
                     reset_idx = pos_idx
 
@@ -508,7 +552,7 @@ def _place_repeaters_for_net(
                         rx, ry, rz = path[j]
                         rpx, _, rpz = path[j - 1]
                         facing = _OPPOSITE_SIDE[_DELTA_TO_FACING[(rx - rpx, rz - rpz)]]
-                        if not _is_repeater(workspace[rx, ry, rz]):
+                        if not is_repeater_at((rx, ry, rz)):
                             dust_owner.pop((rx, ry, rz), None)
                             workspace[rx, ry, rz] = BlockState(
                                 "minecraft:repeater", facing=facing, delay="1"

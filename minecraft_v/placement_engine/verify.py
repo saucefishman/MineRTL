@@ -5,7 +5,7 @@ structures the router builds) and searches from each net's source:
 - open:  a sink of the net that its source can't reach;
 - short: a cell reached from two nets' sources, or a cell owned by another net;
 - weak: a sink the source reaches, but with no signal strength left;
-- latch: a repeater whose own output reaches its input, so that it holds itself on;
+- latch: a repeater or torch whose own output reaches its input, so that it holds itself on;
 - inverted: wire fed by both the net's signal and its opposite (a tower's middle blocks, the
   inverted stage of a powered drop), or a sink that only gets the opposite.
 `verify_support` separately flags dust/repeaters/torches with nothing to stand on.
@@ -23,7 +23,7 @@ Rules (see tests/test_verify.py):
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -33,6 +33,11 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
+
+try:
+    from . import _signals
+except ImportError:
+    _signals = None  # not built: the Python below does the same, slower
 
 Pos = tuple[int, int, int]
 
@@ -44,11 +49,23 @@ _STRONG, _WEAK = "S", "W"
 _MAX_SIGNAL = 15
 
 
+_LIVE_PIN_SAFE = frozenset({"minecraft:air", "minecraft:cave_air", "minecraft:glass"})
+
+
 @dataclass(frozen=True)
 class Violation:
-    kind: str                 # "open" | "short" | "weak" | "latch" | "inverted" | "unsupported"
+    kind: str                 # "open" | "short" | "weak" | "latch" | "inverted" | "unsupported" | "live_pin" | "hold"
     nets: frozenset[str]
     pos: Pos
+
+
+def find_live_pin_wire(region, pins: dict[str, Pos]) -> list[Violation]:
+    """Anything but air or glass on the cell of a pin that drives it but has no net (a block's unread output, a top-level
+    input nothing uses). The pin's repeater powers what is there, and no net's walk starts from it, so verify_signals
+    can't see the short. Glass and air don't conduct."""
+    size = (abs(region.width), abs(region.height), abs(region.length))
+    return [Violation("live_pin", frozenset({name}), pos) for name, pos in pins.items()
+            if all(0 <= c < n for c, n in zip(pos, size)) and region[pos].id not in _LIVE_PIN_SAFE]
 
 
 @lru_cache(maxsize=None)
@@ -64,6 +81,22 @@ def _block_kind(bid: str) -> int:
     if bid == "minecraft:redstone_wall_torch":
         return _WALL_TORCH
     return _OTHER if any(m in bid for m in _NON_OPAQUE_MARKERS) else _OPAQUE
+
+
+_NOTHING = (_AIR, None)  # a world entry with no block to ask about
+
+
+def classify_block(block: BlockState) -> tuple[int, int, int, bool]:
+    """What _astar.NetChecks needs of a palette entry: kind, _FACING_TO_DELTA of what has a meaningful facing, whether it's
+    a redstone block."""
+    kind = _block_kind(block.id)
+    dx, dz = _FACING_TO_DELTA[block["facing"]] if kind in (_REPEATER, _WALL_TORCH) else (0, 0)
+    return kind, dx, dz, block.id == "minecraft:redstone_block"
+
+
+def _kind_of(block: BlockState) -> tuple[int, BlockState | None]:
+    kind = _block_kind(block.id)
+    return _NOTHING if kind == _AIR else (kind, block)
 
 
 class Excluding:
@@ -86,8 +119,66 @@ class Either:
         return p in self.a or p in self.b
 
 
+class HiddenBoxes:
+    """Cells of a set, and of a few boxes that would be too many cells to list."""
+
+    def __init__(self, cells, boxes):
+        self.cells, self.boxes = cells, boxes
+
+    def __contains__(self, p) -> bool:
+        x, y, z = p
+        for (lx, ly, lz), (hx, hy, hz) in self.boxes:
+            if lx <= x < hx and ly <= y < hy and lz <= z < hz:
+                return True
+        return p in self.cells
+
+
+def cell_byte(block: BlockState | None) -> int:
+    """What _signals.Grid holds for a block: kind, then facing and delay where it has them."""
+    if block is None:
+        return 0
+    kind = _block_kind(block.id)
+    if kind == _AIR:
+        return 0
+    if block.id == "minecraft:redstone_block":
+        return 7
+    byte = kind
+    if kind in (_REPEATER, _WALL_TORCH):
+        byte |= _HORIZ_DIRS.index(_FACING_TO_DELTA[block["facing"]]) << 3
+    if kind == _REPEATER:
+        byte |= (int(block["delay"]) - 1 if "delay" in block else 0) << 5
+    return byte
+
+
+def signal_grid(region: Region, blocked: Collection[Pos], terminals: Collection[Pos]):
+    """The kernel's view of region as _World(region, blocked, terminals) has it, terminals marked as stops. None without
+    the kernel, or for what it can't hold: a region not backed by an array, a blocked it can't list, a cell outside."""
+    palette, blocks = getattr(region, "_Region__palette", None), getattr(region, "_Region__blocks", None)
+    if _signals is None or blocks is None or not isinstance(blocked, (HiddenBoxes, set, frozenset)):
+        return None
+    table = np.array([cell_byte(b) for b in palette], dtype=np.uint8)
+    size = blocks.shape
+    ends = np.array([p for p in terminals if p is not None], dtype=np.int64).reshape(-1, 3)
+    if len(ends) and ((ends < 0).any() or (ends >= size).any()):
+        return None
+    grid = np.asarray(table[blocks], order="C")
+    cells = blocked
+    if isinstance(blocked, HiddenBoxes):
+        for lo, hi in blocked.boxes:
+            grid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 0
+        cells = blocked.cells
+    if cells:
+        hidden = np.array(list(cells), dtype=np.int64).reshape(-1, 3)
+        hidden = hidden[((hidden >= 0) & (hidden < size)).all(axis=1)]
+        grid[hidden[:, 0], hidden[:, 1], hidden[:, 2]] = 0
+    if len(ends):
+        at = ends[:, 0], ends[:, 1], ends[:, 2]
+        grid[at] = table[blocks[at]] | 128
+    return _signals.Grid(grid)
+
+
 class _World:
-    def __init__(self, region: Region, blocked: frozenset[Pos], terminals: frozenset[Pos]):
+    def __init__(self, region: Region, blocked: Collection[Pos], terminals: frozenset[Pos]):
         self.region = region
         self.blocked = blocked
         self.terminals = terminals
@@ -95,7 +186,9 @@ class _World:
         self._successors: dict[tuple[Pos, str], list[tuple[Pos, str]]] = {}
         self._size = (region.width, region.height, region.length)
         self._palette = getattr(region, "_Region__palette", None)  # straight there, this is read so often
-        self._blocks = getattr(region, "_Region__blocks", None)
+        blocks = getattr(region, "_Region__blocks", None)
+        self._blocks = None if blocks is None else memoryview(blocks)  # scalar reads are faster than numpy's
+        self._by_palette: dict[int, tuple[int, BlockState | None]] = {}  # what _lookup gives per palette entry
 
     def changed(self, p: Pos) -> None:
         """The block at p was written. Neighbours' successors depend on it too, so they all go."""
@@ -115,11 +208,20 @@ class _World:
             return cached
         x, y, z = p
         w, h, l = self._size
-        if not (0 <= x < w and 0 <= y < h and 0 <= z < l) or (p in self.blocked and p not in self.terminals):
-            result = (_AIR, None)  # component internals are invisible
+        if not (0 <= x < w and 0 <= y < h and 0 <= z < l):
+            result = _NOTHING
         else:
-            b = self._palette[self._blocks[p]] if self._blocks is not None else self.region[p]
-            result = (_block_kind(b.id), b)
+            if self._blocks is not None:
+                entry = self._blocks[p]
+                result = self._by_palette.get(entry)
+                if result is None:
+                    b = self._palette[entry]
+                    result = self._by_palette[entry] = _kind_of(b)
+            else:
+                result = _kind_of(self.region[p])
+            # Air first: blocked can be millions of cells, and most lookups here are air.
+            if result is not _NOTHING and p in self.blocked and p not in self.terminals:
+                result = _NOTHING  # component internals are invisible
         self._kind[p] = result
         return result
 
@@ -141,6 +243,17 @@ class _World:
 
     def is_torch(self, p: Pos) -> bool:
         return self.kind(p) in (_TORCH, _WALL_TORCH)
+
+    def passes_by(self, terminal: Pos) -> bool:
+        """A repeater on a pin's wire cell that sends its signal along the wire: the gate's input beside it gets none."""
+        if self.kind(terminal) != _REPEATER:
+            return False
+        out = self.repeater_output(terminal)
+        if out in self.blocked or (self.kind(out) == _REPEATER and self.repeater_input(out) == terminal):
+            return False
+        x, y, z = terminal
+        beside = [(x + dx, y, z + dz) for dx, dz in _HORIZ_DIRS]
+        return any(q in self.blocked or (self.kind(q) == _REPEATER and self.repeater_input(q) == terminal) for q in beside)
 
     def dust_links(self, p: Pos) -> list[Pos]:
         """Dust cells p is wired to (same Y, slope up, slope down)."""
@@ -284,12 +397,13 @@ def _strengths(world: _World, source: Pos, stop: frozenset[Pos]) -> set[Pos]:
 
 
 def find_latch(region: Region, source: Pos, stop: frozenset[Pos], world: _World | None = None) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any. world: one to reuse, with nothing hidden."""
+    """The cells of a signal cycle from source through a repeater or torch, if any. world: one to reuse, with nothing hidden."""
     return _latch_cycle(world or _World(region, frozenset(), frozenset()), source, stop)
 
 
 def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
-    """The cells of a signal cycle from source through a repeater, if any: it holds itself on."""
+    """The cells of a signal cycle from source through a repeater or torch, if any: it holds itself on, as when a
+    drop's two torches feed back into the wire that drives them."""
     start: tuple[Pos, str] = (source, _STRONG if world.kind(source) == _OPAQUE else "")
     ids = {start: 0}
     nodes = [start]
@@ -309,13 +423,13 @@ def _latch_cycle(world: _World, source: Pos, stop: frozenset[Pos]) -> list[Pos]:
                 queue.append(nxt)
             tails.append(tail)
             heads.append(head)
-    repeaters = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) == _REPEATER]
-    if not repeaters:
+    drivers = [i for i, (pos, _) in enumerate(nodes) if world.kind(pos) in (_REPEATER, _TORCH, _WALL_TORCH)]
+    if not drivers:
         return []
     graph = csr_matrix((np.ones(len(tails), dtype=np.int8), (tails, heads)), shape=(len(nodes), len(nodes)))
     _, labels = connected_components(graph, directed=True, connection="strong")
     sizes = np.bincount(labels)
-    for label in sorted({labels[i] for i in repeaters if sizes[labels[i]] > 1}):
+    for label in sorted({labels[i] for i in drivers if sizes[labels[i]] > 1}):
         return sorted({nodes[i][0] for i in np.flatnonzero(labels == label).tolist()})
     return []
 
@@ -376,7 +490,7 @@ def verify_signals(
         region: Region,
         nets: dict[str, tuple[Pos, list[Pos]]],
         owner: dict[Pos, str],
-        blocked: frozenset[Pos] = frozenset(),
+        blocked: Collection[Pos] = frozenset(),
         on_net: Callable[[str], None] | None = None,
 ) -> list[Violation]:
     """Opens (unreached sinks) and shorts (cross-net reach) for the given nets.
@@ -387,6 +501,7 @@ def verify_signals(
     """
     terminals = frozenset(p for src, sinks in nets.values() for p in (src, *sinks))
     world = _World(region, blocked, terminals)
+    grid = signal_grid(region, blocked, terminals)
     violations: list[Violation] = []
     reached_by: dict[Pos, str] = {}
     short_pairs: set[frozenset[str]] = set()
@@ -402,18 +517,25 @@ def verify_signals(
         # own sinks there is only component interior, which `blocked` already hides.
         own = {source, *sinks}
         stop = Excluding(terminals, own)
-        reached = _reach(world, source, stop)
+        if grid is not None:
+            order, strong, has_latch, inverted = grid.check_net(source, sinks, own)
+            reached = set(order)  # built in the same order as _reach's: which cell a short reports depends on it
+            strong_enough = {sink for sink, ok in zip(sinks, strong) if ok}
+        else:
+            reached = _reach(world, source, stop)
+            strong_enough = _strengths(world, source, stop)
         for sink in sinks:
-            if sink not in reached:
+            if sink not in reached or world.passes_by(sink):
                 violations.append(Violation("open", frozenset({net_id}), sink))
-        strong_enough = _strengths(world, source, stop)
         for sink in sinks:
             if sink in reached and sink not in strong_enough:
                 violations.append(Violation("weak", frozenset({net_id}), sink))
-        latch = _latch_cycle(world, source, stop)
+        latch = _latch_cycle(world, source, stop) if grid is None or has_latch else []
         if latch:
             violations.append(Violation("latch", frozenset({net_id}), latch[0]))
-        for pos in _inverted_contacts(world, source, frozenset(sinks), stop)[:1]:
+        contacts = _inverted_contacts(world, source, frozenset(sinks), stop)[:1] if grid is None else \
+            ([] if inverted is None else [inverted])
+        for pos in contacts:
             violations.append(Violation("inverted", frozenset({net_id}), pos))
         for pos in reached:
             cell_owner = owner.get(pos)
@@ -447,12 +569,14 @@ def _gives_support(block: BlockState) -> bool:
 def verify_support(
         region: Region,
         owner: dict[Pos, str],
-        blocked: frozenset[Pos] = frozenset(),
+        blocked: Collection[Pos] = frozenset(),
+        skip: Iterable[tuple[Pos, Pos]] = (),
 ) -> list[Violation]:
     """Dust, repeaters, comparators and torches outside `blocked` with no supporting block.
 
     Floor-standing blocks need a sturdy block below; a wall torch needs one behind it.
     In-game such blocks pop off (or can't be pasted), so the circuit silently breaks.
+    skip: boxes (lowest cell, one past the highest) not to look in at all.
     """
     palette = region._Region__palette
     blocks = region._Region__blocks
@@ -460,7 +584,10 @@ def verify_support(
     if not needy:
         return []
     violations: list[Violation] = []
-    for p in map(tuple, np.argwhere(np.isin(blocks, needy)).tolist()):
+    mask = np.isin(blocks, needy)
+    for lo, hi in skip:
+        mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
+    for p in map(tuple, np.argwhere(mask).tolist()):
         if p in blocked:
             continue
         block = palette[blocks[p]]

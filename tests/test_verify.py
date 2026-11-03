@@ -375,6 +375,45 @@ def test_hold_arrival_counts_a_repeaters_delay():
     assert arrival[(3, 1, 1)] == 3
 
 
+def test_hold_finds_clock_inputs_through_a_gate():
+    # examples/memread: _clk & switch drives every clock pin, and hold fixing used to skip the design without a word.
+    from types import SimpleNamespace as NS
+
+    from litemapy import Region
+
+    from minecraft_v.placement_engine.hold import _HoldTiming
+    from minecraft_v.placement_engine.ir import ComponentType as T
+    from minecraft_v.placement_engine.verify import _World
+
+    def end(cid, pin):
+        return NS(component_id=cid, pin_name=pin)
+
+    kinds = {"clk": T.INPUT_PIN, "en": T.INPUT_PIN, "data": T.INPUT_PIN, "ff": T.DFF, "gate": T.AND, "div": T.DFF, "ff2": T.DFF}
+    comp = NS(components=[NS(id=c, type=k) for c, k in kinds.items()], nets=[
+        NS(net_id="a", source=end("clk", "Y"), sinks=[end("gate", "A"), end("div", "C")]),
+        NS(net_id="b", source=end("en", "Y"), sinks=[end("gate", "B")]),
+        NS(net_id="c", source=end("gate", "Y"), sinks=[end("ff", "C")]),
+        NS(net_id="d", source=end("data", "Y"), sinks=[end("ff", "D")]),
+        NS(net_id="e", source=end("div", "Q"), sinks=[end("ff2", "C")]),  # a flip-flop stops the walk back
+    ])
+    timing = _HoldTiming(_World(Region(0, 0, 0, 2, 2, 2), frozenset(), frozenset()), comp, {}, set())
+    assert timing.roots == {"clk", "en"}
+
+
+def test_wire_on_a_live_pin_with_no_net_is_a_violation():
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.verify import find_live_pin_wire
+
+    region = Region(0, 0, 0, 8, 4, 4)
+    region[1, 1, 1] = BlockState("minecraft:redstone_wire")
+    region[2, 1, 1] = BlockState("minecraft:red_wool")  # bpmem, t1: a repeater strongly powers a wire's support
+    region[3, 1, 1] = BlockState("minecraft:glass")
+    pins = {"dust": (1, 1, 1), "wool": (2, 1, 1), "glass": (3, 1, 1), "clear": (4, 1, 1), "outside": (9, 1, 1)}
+    found = find_live_pin_wire(region, pins)
+    assert [(v.kind, sorted(v.nets), v.pos) for v in found] == [("live_pin", ["dust"], (1, 1, 1)), ("live_pin", ["wool"], (2, 1, 1))]
+
+
 def test_hold_only_converts_dust_on_a_straight_run():
     from litemapy import BlockState, Region
 
@@ -426,3 +465,66 @@ def test_world_successors_follow_a_changed_block():
     world.changed((2, 1, 1))
     assert world.successors(((2, 1, 1), "")) == [((3, 1, 1), "")]
     assert ((2, 1, 1), "") not in world.successors(((3, 1, 1), ""))
+
+
+def _torch_drop(region: Region, owner: dict) -> None:
+    """Wire into a block, torch, wire into a block, torch: same polarity out as in. Output cell (7, 3, 8)."""
+    _wire(region, owner, "a", _line_x(2, 5, 3, 5))
+    region[6, 3, 5] = STONE
+    region[7, 3, 5] = BlockState("minecraft:redstone_wall_torch", facing="east", lit="true")
+    region[7, 2, 5] = STONE
+    _wire(region, owner, "a", _line_z(5, 6, 3, 8))
+    region[8, 3, 7] = STONE
+    region[8, 3, 8] = BlockState("minecraft:redstone_wall_torch", facing="south", lit="false")
+    region[8, 2, 8] = STONE
+
+
+def test_torch_drop_feeding_its_own_input_is_a_latch():
+    """hf3's net_1820: the wire after a drop joined the wire before it, and stuck high from power-up."""
+    region, owner = _region(), {}
+    _torch_drop(region, owner)
+    _wire(region, owner, "a", _line_x(2, 7, 3, 8) + _line_z(6, 7, 3, 2))
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 5)])}, owner)
+    assert any(v.kind == "latch" for v in violations)
+
+
+def test_torch_drop_going_on_is_not_a_latch():
+    region, owner = _region(), {}
+    _torch_drop(region, owner)
+    _wire(region, owner, "a", _line_x(4, 7, 3, 8))
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 8)])}, owner)
+    assert not any(v.kind == "latch" for v in violations)
+
+
+def test_repeater_across_a_pin_cell_is_open():
+    """hf3's net_2367 and three nets on h1: wire ran past a gate's pin with a repeater on the pin's cell, and the gate
+    never switched."""
+    region, owner = _region(), {}
+    _wire(region, owner, "a", _line_x(2, 3, 3, 5) + _line_x(5, 6, 3, 5))
+    region[4, 3, 5] = _repeater((-1, 0))
+    region[4, 2, 5] = STONE
+    region[4, 3, 4] = _repeater((0, 1))  # the gate's input, hidden from verify
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 5), (6, 3, 5)])}, owner, blocked=frozenset({(4, 3, 4)}))
+    assert [v.pos for v in violations if v.kind == "open"] == [(4, 3, 5)]
+
+
+def test_repeater_across_a_pin_cell_is_open_with_the_input_in_view():
+    """Compact gates leave their input repeater outside the footprint, so verify sees it, unfed."""
+    region, owner = _region(), {}
+    _wire(region, owner, "a", _line_x(2, 3, 3, 5) + _line_x(5, 6, 3, 5))
+    region[4, 3, 5] = _repeater((-1, 0))
+    region[4, 2, 5] = STONE
+    region[4, 3, 4] = _repeater((0, 1))
+    region[4, 2, 4] = STONE
+    violations = verify_signals(region, {"a": ((2, 3, 5), [(4, 3, 5), (6, 3, 5)])}, owner)
+    assert [v.pos for v in violations if v.kind == "open"] == [(4, 3, 5)]
+
+
+def test_repeater_into_a_pin_is_not_open():
+    region, owner = _region(), {}
+    _wire(region, owner, "a", _line_z(6, 7, 3, 4))
+    region[4, 3, 5] = _repeater((0, 1))
+    region[4, 2, 5] = STONE
+    region[4, 3, 4] = _repeater((0, 1))
+    violations = verify_signals(region, {"a": ((4, 3, 7), [(4, 3, 5)])}, owner, blocked=frozenset({(4, 3, 4)}))
+    assert not violations

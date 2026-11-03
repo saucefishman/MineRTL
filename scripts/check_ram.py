@@ -1,0 +1,132 @@
+"""Check the tiled RAM in mchprs_headless on all modes.
+
+  check_ram.py array <depth> <width> <out_dir> [reads [banks]]  the bare array: every word written twice, read on both ports
+  check_ram.py build <netlist.json> <out_dir> <seed>     examples/ramtile built, random traffic against a model of the RTL
+"""
+import os
+import random
+import subprocess
+import sys
+from pathlib import Path
+
+from litemapy import Region, Schematic
+
+from minecraft_v.placement_engine.ir import Direction
+from minecraft_v.placement_engine.ram import build_ram, build_stack
+from settle_schematic import headless_binary
+
+ROOT = Path(__file__).parent.parent
+MODES = "noupdate,redstone,redpiler"
+ARRAY_SETTLE = 300  # towers add up in a tall stack
+HALF_PERIOD = 40
+DEPTH, WIDTH, ABITS = 4, 2, 2
+NORMAL = {"east": (1, 0), "north": (0, -1), "south": (0, 1)}
+
+
+def array_script(depth: int, width: int, seed: int, reads: int = 2, init: list[int] | None = None) -> str:
+    rng = random.Random(seed)
+    mask = (1 << width) - 1
+    abits = depth.bit_length() - 1
+    words = [rng.randrange(mask + 1) for _ in range(depth)]
+
+    def address(pin: str, value: int) -> list[str]:
+        return [f"set {pin}[{b}] {value >> b & 1}" for b in range(abits)]
+
+    ports = "abcd"[:reads]
+    lines = ["set we 0"] + address("wa", 0) + [line for p in ports for line in address(f"a{p}", 0)] + [f"settle {ARRAY_SETTLE}"]
+    for a in range(depth) if init else ():  # preload reads back before any write
+        lines += [line for p in ports for line in address(f"a{p}", a)] + [f"settle {ARRAY_SETTLE}"]
+        lines += [f"expect r{p}[{i}] {init[a] >> i & 1}" for p in ports for i in range(width)]
+    for k, word in [(k, ~w & mask) for k, w in enumerate(words)] + list(enumerate(words)):
+        lines += address("wa", k) + [f"set wd[{i}] {word >> i & 1}" for i in range(width)]
+        lines += [f"settle {ARRAY_SETTLE}", "set we 1", f"settle {ARRAY_SETTLE}", "set we 0", f"settle {ARRAY_SETTLE}"]
+    lines += [f"set wd[{i}] 0" for i in range(width)] + [f"settle {ARRAY_SETTLE}"]
+    for a in range(depth):
+        at = {p: (a + n) % depth if n % 2 == 0 else depth - 1 - (a + n) % depth for n, p in enumerate(ports)}
+        lines += [line for p in ports for line in address(f"a{p}", at[p])] + [f"settle {ARRAY_SETTLE}"]
+        lines += [f"expect r{p}[{i}] {words[at[p]] >> i & 1}" for p in ports for i in range(width)]
+    return "\n".join(lines) + "\n"
+
+
+def check_array(depth: int, width: int, out: Path, reads: int = 2, banks: int = 1) -> int:
+    """With ``banks`` above 1, ``depth`` is per bank and the block is a stack."""
+    out.mkdir(parents=True, exist_ok=True)
+    total = depth * banks
+    init = [random.Random(total + k).randrange(1 << width) for k in range(total)] if reads == 4 else None
+    if banks > 1:
+        row_bits = depth.bit_length() - 1
+        ram = build_stack("ram", row_bits, banks, 0, (total - 1).bit_length(), width, init)
+    else:
+        ram = build_ram("ram", depth, width, reads, init)
+    depth = total
+    fp = ram.footprint
+    region = Region(0, 0, 0, fp.width, fp.height, fp.depth)
+    for pos, block in ram.blocks:
+        region[pos] = block
+    Schematic(name="ram", author="MineRTL", regions={"ram": region}).save(str(out / "ram.litematic"))
+    with open(out / "ram.pins", "w") as f:
+        for pin in ram.pins:
+            nx, nz = NORMAL[pin.side.value]
+            f.write(f"{pin.name} {pin.offset[0]} {pin.offset[1]} {fp.depth - 1 - pin.offset[2]} {nx} {nz}\n")
+    (out / "ram.script").write_text(array_script(depth, width, depth * 100 + width, reads, init))
+    print(f"{fp.width}x{fp.height}x{fp.depth}, {fp.width * fp.height * fp.depth / depth / width:.0f} volume per bit, "
+          f"{len(ram.blocks) / depth / width:.0f} blocks per bit")
+    levers = [arg for pin in ram.pins if pin.direction == Direction.IN for arg in ("--add-lever", pin.name)]
+    return subprocess.run([headless_binary(), "test", out / "ram.litematic", out / "ram.pins", out / "ram.script",
+                           "--modes", "redstone,redpiler", *levers]).returncode
+
+
+def build_script(seed: int, steps: int = 60) -> str:
+    rng = random.Random(seed)
+    mem = [0] * DEPTH
+    lines = ["set clk 0", "set wen 0"]
+
+    def drive(name: str, width: int, value: int) -> None:
+        lines.extend(f"set {name}[{i}] {value >> i & 1}" for i in range(width))
+
+    def expect_reads(a: int, b: int) -> None:
+        lines.extend(f"expect rdata{port}[{i}] {mem[addr] >> i & 1}" for port, addr in ((0, a), (1, b)) for i in range(WIDTH))
+
+    lines.append(f"settle {HALF_PERIOD}")
+    for addr in range(DEPTH):  # no reset, so contents are defined by writing them
+        mem[addr] = rng.randrange(1 << WIDTH)
+        drive("waddr", ABITS, addr)
+        drive("wdata", WIDTH, mem[addr])
+        lines += ["set wen 1", f"settle {HALF_PERIOD}", f"pulse clk {HALF_PERIOD}", "set wen 0", f"settle {HALF_PERIOD}"]
+    for _ in range(steps):
+        a, b, addr, value = (rng.randrange(DEPTH), rng.randrange(DEPTH), rng.randrange(DEPTH), rng.randrange(1 << WIDTH))
+        wen = rng.random() < 0.6
+        drive("raddr0", ABITS, a)
+        drive("raddr1", ABITS, b)
+        drive("waddr", ABITS, addr)
+        drive("wdata", WIDTH, value)
+        lines += [f"set wen {int(wen)}", f"settle {HALF_PERIOD}"]
+        expect_reads(a, b)
+        lines += [f"pulse clk {HALF_PERIOD}", f"settle {HALF_PERIOD}"]
+        if wen:
+            mem[addr] = value
+        expect_reads(a, b)
+    return "\n".join(lines) + "\n"
+
+
+def check_build(netlist: str, out: Path, seed: str, *args: str) -> int:
+    out.mkdir(parents=True, exist_ok=True)
+    litematic, pins = out / f"s{seed}.litematic", out / f"s{seed}.pins"
+    (out / f"s{seed}_artifacts").mkdir(exist_ok=True)
+    subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", netlist, "--route-passes", "1",
+                    "--generate-clock", "none", "--place-seed", seed, "--out-litematic", litematic, *args], check=True,
+                   env={**os.environ, "MINECRAFT_V_ARTIFACTS_DIR": str(out / f"s{seed}_artifacts")})
+    script = out / f"s{seed}.script"
+    script.write_text(build_script(int(seed)))
+    return subprocess.run([headless_binary(), "test", litematic, pins, script, "--modes", MODES, "--add-lever", "clk"]).returncode
+
+
+def main() -> int:
+    mode, *rest = sys.argv[1:]
+    if mode == "array":
+        return check_array(int(rest[0]), int(rest[1]), Path(rest[2]), *map(int, rest[3:]))
+    return check_build(rest[0], Path(rest[1]), rest[2], *rest[3:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

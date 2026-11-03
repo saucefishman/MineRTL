@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+import numpy as np
 from litemapy import BlockState, Region, Schematic
 
 from minecraft_v.progress import log
@@ -29,6 +30,16 @@ from .template import _mirror_block_x, _rotate_block_180
 
 Pos = tuple[int, int, int]
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
+
+
+@dataclass
+class BlockArrays:
+    xs: np.ndarray
+    ys: np.ndarray
+    zs: np.ndarray
+    ids: np.ndarray       # into palette
+    palette: list[BlockState]
+    comparators: list[tuple[Pos, int]] = field(default_factory=list)  # those with a signal, in cell order: their saved signal
 
 
 @dataclass
@@ -47,6 +58,30 @@ class Macro:
     nets: dict[str, tuple[str, list[str]]] = field(default_factory=dict)  # inner net -> source, sinks
     port_net: dict[str, str] = field(default_factory=dict)   # pin -> inner net
     cells: int = 0
+    settled: BlockArrays | None = None               # instead of blocks: already shaped and settled, see ram.py
+    edges: dict[str, dict[str, dict[tuple[bool, bool], int]]] = field(default_factory=dict)  # as arcs, per (input up, output up)
+    closing: dict[str, int] = field(default_factory=dict)  # input pin -> ticks until the block is still after it falls
+    guarded: dict[str, list[str]] = field(default_factory=dict)  # such a pin -> pins that mustn't change until then
+
+    def arrays_oriented(self, mirrored: bool, rotated: bool) -> BlockArrays:
+        """The blocks turned, as arrays for BulkRegion.paste."""
+        arrays = self.settled
+        if arrays is None:
+            palette: dict[BlockState, int] = {}
+            ids = np.fromiter((palette.setdefault(b, len(palette)) for _, b in self.blocks), dtype=np.int32, count=len(self.blocks))
+            cells = np.array([p for p, _ in self.blocks], dtype=np.int32).reshape(-1, 3)
+            arrays = BlockArrays(cells[:, 0], cells[:, 1], cells[:, 2], ids, list(palette))
+        xs, zs = arrays.xs, arrays.zs
+        turned = arrays.palette
+        if mirrored != rotated:  # as oriented()
+            xs = self.footprint.width - 1 - xs
+        if rotated:
+            zs = self.footprint.depth - 1 - zs
+            turned = [_rotate_block_180(b) for b in turned]
+        if mirrored:
+            turned = [_mirror_block_x(b) for b in turned]
+        return BlockArrays(xs, arrays.ys, zs, arrays.ids, turned,
+                           [(self.oriented(p, mirrored, rotated), level) for p, level in arrays.comparators])
 
     def blocks_oriented(self, mirrored: bool, rotated: bool) -> list[tuple[Pos, BlockState]]:
         out = []
@@ -667,6 +702,13 @@ def io_column_pins(n_pins: int, y_gap: int, column_gap: int) -> int:
     return max(1, math.ceil(math.sqrt(n_pins * column_gap / y_gap)))
 
 
+def _chains_within(cls: RepeatedClass) -> bool:
+    """An instance's output is another's input: a bank or array can't yet hold both ends of one net as its pins."""
+    inputs = {m[n] for m in cls.instances for n, label in cls.nets.items() if label == "input"}
+    outputs = {m[n] for m in cls.instances for n, label in cls.nets.items() if label not in ("input", "internal")}
+    return bool(inputs & outputs)
+
+
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
                    max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, min_instances: int = 2, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
@@ -679,7 +721,8 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
     pin_rows: list[tuple[str, str, str, Direction]] = []
 
     # Small repeats route worse as macros than as gates.
-    classes = [cls for cls in find_repeated(comp, max_fanout, min_cells) if len(cls.instances) >= min_instances]
+    classes = [cls for cls in find_repeated(comp, max_fanout, min_cells) if len(cls.instances) >= min_instances
+               and not _chains_within(cls)]
     for cls in classes:
         banked = bank_columns > 0 and len(cls.instances) >= 2 * bank_columns
         sub, ports = macro_netlist(cls, comp, back_unique=banked)

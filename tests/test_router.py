@@ -1,7 +1,7 @@
 import pytest
 from litemapy import BlockState, Region
 
-from minecraft_v.placement_engine import _astar, builder
+from minecraft_v.placement_engine import _astar, builder, pathfinding
 from minecraft_v.placement_engine.builder import (
     _GreedyRouter, _KeepoutMap, _RouteJob, _repair_faulty_nets, _terminal_halo,
 )
@@ -147,6 +147,25 @@ def test_router_rips_up_failed_job():
     assert [key for key, _ in failures] == ["n"]
     assert _state(region, solid, dust_owner) == before
     assert "n" not in router.paths and "n" not in router.rec.journals
+
+
+def test_cell_grid_gives_the_moves_the_containers_give(monkeypatch):
+    # check mode works out every cell's moves from both, raising on a difference; the second net
+    # is searched over a grid the first net's laying and rip-up have written to.
+    monkeypatch.setattr(pathfinding, "_ASTAR_GRID", "check")
+    router, region, solid, dust_owner = _router()
+    assert router.indexed.block_index().grid is not None
+    walled = (14, 1, 14)
+    terminals = {"a": {(2, 1, 2), (8, 1, 2), walled}, "b": {(2, 1, 6), (14, 1, 6)}}
+    keepouts = _KeepoutMap(terminals)
+    region[walled] = STONE
+    solid.add(walled)
+    jobs = [_RouteJob(key=net, net_id=net, src=src, sinks=sinks, bounds=BOUNDS, protected=keepouts.for_net(net),
+                      terminals=terminals[net])
+            for net, src, sinks in (("a", (2, 1, 2), [(8, 1, 2), walled]), ("b", (2, 1, 6), [(14, 1, 6)]))]
+    failures = router.run(jobs, "[test]")
+    assert [key for key, _ in failures] == ["a"]
+    assert dust_owner[(14, 1, 6)] == "b"
 
 
 def test_blockers_finds_jobs_near_a_goal():
@@ -499,3 +518,93 @@ def test_repair_reroutes_a_net_verify_finds_fault_with():
     dust_owner.pop(cut)
     assert _repair_faulty_nets(router, [job], set(), frozenset(), None) == []
     assert verify_signals(region, {"n": (job.src, job.sinks)}, dust_owner) == []
+
+
+def test_repair_runs_on_a_layout_with_a_macro(monkeypatch):
+    # floweypu: one RAM block turned repair off for the whole design, so faults only surfaced at the flat verify.
+    from types import SimpleNamespace
+
+    from minecraft_v.placement_engine.ir import ComponentType, NetConnection, NetEndpoint
+
+    router, region, solid, dust_owner = _router()
+    macro = SimpleNamespace(origin=(20, 1, 20), component=SimpleNamespace(
+        id="ram", type=ComponentType.CUSTOM, metadata={}, pins=[], footprint=SimpleNamespace(width=4, height=4, depth=4)))
+    region[21, 2, 21] = STONE  # inside the macro: hidden from verify
+    terminals = {("a", "y"): (2, 1, 2), ("b", "a"): (8, 1, 2)}
+    net = NetConnection(net_id="n", source=NetEndpoint(component_id="a", pin_name="y"),
+                        sinks=[NetEndpoint(component_id="b", pin_name="a")])
+    seen = []
+    real = builder._repair_faulty_nets
+
+    def spy(router, jobs, failed, cells, deadline):
+        seen.append((21, 2, 21) in cells)
+        return real(router, jobs, failed, cells, deadline)
+
+    monkeypatch.setattr(builder, "_repair_faulty_nets", spy)
+    failures, _, _ = builder._route_all_nets(region, router.rec, solid, dust_owner, [net], terminals, BOUNDS, BOUNDS[4],
+                                             frozenset(), {"n": set(terminals.values())}, placed=[macro])
+    assert failures == [] and seen == [True]
+
+
+def test_no_repeater_at_a_slopes_foot():
+    # floweypu net_2891, net_8652: it reads the block under the slope, which can be glass or powered by other wire.
+    assert pathfinding._signal_step(3, 0, (1, -1, 0)) == (4, 0)
+    region = Region(0, 0, 0, 40, 6, 3)
+    path = [(x, 3, 1) for x in range(1, 3)] + [(x, 2, 1) for x in range(3, 17)]
+    for x, y, z in path:
+        region[x, y, z] = BlockState("minecraft:redstone_wire")
+        region[x, y - 1, z] = STONE
+    _place_repeaters_for_net(region, {p: "n" for p in path}, "n", [path])
+    assert region[3, 2, 1].id == "minecraft:redstone_wire"
+    assert any(region[p].id == "minecraft:repeater" for p in path)
+
+
+def test_repeater_at_a_slopes_foot_when_allowed():
+    # examples/cpu, routed banks: without these it fails routing on every seed tried. main.py turns them on without RAM blocks.
+    pathfinding.set_foot_repeaters(True)
+    try:
+        assert pathfinding._signal_step(3, 0, (1, -1, 0)) == (4, 1)
+        region = Region(0, 0, 0, 40, 6, 3)
+        path = [(x, 3, 1) for x in range(1, 3)] + [(x, 2, 1) for x in range(3, 17)]
+        for x, y, z in path:
+            region[x, y, z] = BlockState("minecraft:redstone_wire")
+            region[x, y - 1, z] = STONE
+        _place_repeaters_for_net(region, {p: "n" for p in path}, "n", [path])
+        assert any(region[p].id == "minecraft:repeater" for p in path)
+    finally:
+        pathfinding.set_foot_repeaters(False)
+
+
+def test_no_repeater_at_a_sinks_pin_cell():
+    # floweypu net_2367: a later branch leaves from a sink's pin cell and runs straight on, and the repeater search
+    # picked that cell, so the gate read the repeater's output side and never switched.
+    sink = (_REPEATER_INTERVAL - 1, 2, 1)
+    first = [(x, 2, 1) for x in range(0, sink[0] + 1)]
+    second = [(x, 2, 1) for x in range(sink[0], 2 * _REPEATER_INTERVAL + 4)]
+    region = Region(0, 0, 0, 60, 6, 3)
+    for x, y, z in first + second:
+        region[x, y, z] = BlockState("minecraft:redstone_wire")
+        region[x, y - 1, z] = STONE
+    _place_repeaters_for_net(region, {p: "n" for p in first + second}, "n", [first, second])
+    assert region[sink].id == "minecraft:redstone_wire"
+    assert any(region[p].id == "minecraft:repeater" for p in second)
+
+
+def test_long_edge_leads_split_only_long_tree_edges():
+    # Two sinks near the source and one far off: only the far edge of the spanning tree is split.
+    leads = builder._long_edge_leads((0, 10, 0), [(5, 10, 0), (0, 10, 6), (305, 10, 0)], 100)
+    assert leads == [(80, 10, 0), (155, 10, 0), (230, 10, 0)]
+    assert builder._long_edge_leads((0, 10, 0), [(90, 10, 0)], 100) == []
+
+
+def test_long_edge_split_only_on_large_designs(monkeypatch):
+    # examples/cpu (4509 gates) and bpmem (345) route slower split, floweypu (12448) faster.
+    monkeypatch.delenv("ROUTE_SPLIT", raising=False)
+    monkeypatch.setattr(builder, "_long_edge_split", [0])
+    builder.set_long_edge_split(4509)
+    assert builder._long_edge_split[0] == 0
+    builder.set_long_edge_split(12448)
+    assert builder._long_edge_split[0] == 100
+    monkeypatch.setenv("ROUTE_SPLIT", "0")
+    builder.set_long_edge_split(12448)
+    assert builder._long_edge_split[0] == 0

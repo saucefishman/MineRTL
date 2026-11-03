@@ -144,6 +144,9 @@ def test_server_clock_lever(tmp_path):
     assert "clock" not in schematic.regions
     lever = schematic.regions["main"][tuple(sidecar["clock"]["pos"])]
     assert lever.id == "minecraft:lever" and lever["powered"] == "false"
+    assert sorted(entry["name"] for entry in sidecar["levers"]) == ["a", "clk"]
+    for entry in sidecar["levers"]:
+        assert schematic.regions["main"][tuple(entry["pos"])].id == "minecraft:lever"
 
 
 def fake_headless(tmp_path, help_text="--run-clock"):

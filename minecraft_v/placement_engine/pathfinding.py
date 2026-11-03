@@ -11,9 +11,9 @@ import numpy as np
 from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
-from .wire import LayConflict
+from .wire import LayConflict, _foot_repeaters
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
-    _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
+    _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
 
@@ -66,12 +66,21 @@ def _snap_shift_tables(d: tuple[int, int, int]) -> tuple[tuple[int, ...], tuple[
     return tables
 
 
+def set_foot_repeaters(on: bool) -> None:
+    """Allow repeaters at a slope's foot. They can read a glass or powered block under the slope, which verify and repair
+    catch, but without them a design of routed banks can't find routes: examples/cpu fails on every seed tried. Off for
+    designs with RAM blocks, where nearly every net has to be right first time."""
+    _foot_repeaters[0] = on
+    if _astar is not None:
+        _astar.set_foot_repeaters(on)
+
+
 def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, int]:
     """Signal state after move d from a cell with (depth, cand); the kernel's rule.
 
     depth: signal distance since the last cell where _place_repeaters_for_net could put a
     repeater (or a tower / powered -4 reset). cand: 1 + the _HORIZ_DIRS index of the move
-    into the cell when that move lets it hold a repeater (unit step, flat or 1 down), else 0;
+    into the cell when that move lets it hold a repeater (flat unit step), else 0;
     the cell becomes a repeater slot once the next move is flat in that same direction.
     The search prunes moves whose depth reaches _REPEATER_INTERVAL, so every stretch of a
     path has a slot in reach and repeater placement can't fail for want of one.
@@ -82,7 +91,7 @@ def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, i
     step = abs(dx) + abs(dz)
     if cand and dy == 0 and step == 1 and _HORIZ_DIRS[cand - 1] == (dx, dz):
         depth = 0
-    unit = step == 1 and dy in (0, -1)
+    unit = step == 1 and (dy == 0 or (_foot_repeaters[0] and dy == -1))
     return depth + step, (_HORIZ_DIRS.index((dx, dz)) + 1) if unit else 0
 
 
@@ -126,6 +135,19 @@ def _can_be_support(
     return _is_air(workspace[pos[0], pos[1], pos[2]])
 
 
+_KINDS: dict[str, int] = {}  # block id -> _BlockIndex.kinds bits
+
+
+def _kind_of(block_id: str) -> int:
+    """_BlockIndex.kinds' bits for a block id: every test it makes reads the id alone."""
+    kind = _KINDS.get(block_id)
+    if kind is None:
+        block = BlockState(block_id)
+        kind = _KINDS[block_id] = ((0 if _is_air(block) else 1) | (2 if _is_redstone_wire(block) else 0)
+                                   | (4 if _is_torch(block) else 0) | (8 if _is_repeater(block) else 0))
+    return kind
+
+
 class _BlockIndex:
     """Sparse sets of signal-relevant cells, built from the Region's raw block array.
 
@@ -133,18 +155,12 @@ class _BlockIndex:
     read); _wire_walkable does ~40 reads per call. Valid only while the workspace is
     unchanged, i.e. for the duration of one A* search.
     """
-    __slots__ = ("non_air", "wire", "torch", "repeater")
+    __slots__ = ("non_air", "wire", "torch", "repeater", "grid", "grid_bits")
 
     def __init__(self, region: Region):
         # Positive-size regions store blocks at region coordinates directly.
         assert region.width > 0 and region.height > 0 and region.length > 0
-        blocks = region._Region__blocks
-        kinds = np.array([
-            (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
-            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
-            for b in region._Region__palette
-        ], dtype=np.uint8)
-        k = kinds[blocks]
+        k = self.kinds(region)
 
         def cells(mask: int) -> set[tuple[int, int, int]]:
             return set(map(tuple, np.argwhere(k & mask).tolist()))
@@ -153,6 +169,17 @@ class _BlockIndex:
         self.wire = cells(2)
         self.torch = cells(4)
         self.repeater = cells(8)
+        self.grid = None  # _astar.CellGrid mirroring these sets; update keeps it current
+
+    @staticmethod
+    def kinds(region: Region) -> np.ndarray:
+        """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater."""
+        kinds = np.array([
+            (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
+            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
+            for b in region._Region__palette
+        ], dtype=np.uint8)
+        return kinds[region._Region__blocks]
 
     @classmethod
     def layered(cls, base: _BlockIndex, overlay: dict[tuple[int, int, int], BlockState]) -> _BlockIndex:
@@ -162,6 +189,7 @@ class _BlockIndex:
         idx.wire = set(base.wire)
         idx.torch = set(base.torch)
         idx.repeater = set(base.repeater)
+        idx.grid = None
         for pos, b in overlay.items():
             if _is_air(b):
                 continue
@@ -176,13 +204,20 @@ class _BlockIndex:
 
     def update(self, pos: tuple[int, int, int], old: BlockState, new: BlockState) -> None:
         """Reflect one block write (old → new); same classification as __init__."""
-        for cells, test in ((self.non_air, lambda b: not _is_air(b)), (self.wire, _is_redstone_wire),
-                            (self.torch, _is_torch), (self.repeater, _is_repeater)):
-            was, now = test(old), test(new)
-            if was and not now:
+        was, now = _kind_of(old.id), _kind_of(new.id)
+        if was == now:
+            return
+        grid = self.grid
+        for i, cells in enumerate((self.non_air, self.wire, self.torch, self.repeater)):
+            bit = 1 << i
+            if was & bit and not now & bit:
                 cells.discard(pos)
-            elif now and not was:
+                if grid is not None:
+                    grid.put(pos, self.grid_bits[i], False)
+            elif now & bit and not was & bit:
                 cells.add(pos)
+                if grid is not None:
+                    grid.put(pos, self.grid_bits[i], True)
 
 
 class IndexedWorkspace:
@@ -199,7 +234,10 @@ class IndexedWorkspace:
         self._write = palette_writer(region)
 
     def __getitem__(self, pos) -> BlockState:
-        return self.region[pos]
+        # Region.__getitem__ without its coordinate conversion, a no-op for a positive-size region. Saving a schematic
+        # replaces the palette, so it's looked up each time.
+        region = self.region
+        return region._Region__palette[region._Region__blocks[pos]]
 
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
@@ -211,6 +249,17 @@ class IndexedWorkspace:
 
     def block_index(self) -> _BlockIndex:
         return self._index
+
+    def attach_grid(self, solid, dust_owner, inverted_cells, footprint_blocked, terminal_positions) -> None:
+        """Have searches over this workspace read an _astar.CellGrid of these containers, which
+        from here on keep it current. Containers that don't (plain sets) leave searches reading
+        them directly. MINECRAFT_V_ASTAR_GRID: 0 no grid, check compares every cell's moves."""
+        if (_astar is None or _ASTAR_MODE != "kernel" or _ASTAR_GRID == "0"
+                or not all(hasattr(c, "_grid") for c in (solid, dust_owner, inverted_cells))):
+            return
+        region = self.region
+        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._index, solid, dust_owner,
+                        inverted_cells, footprint_blocked, terminal_positions)
 
 
 def _wire_walkable(
@@ -773,10 +822,13 @@ def _find_wire_path(
     # Fan-out tree routing: existing own-net wire cells are valid branch seeds
     if tree_seeds:
         seed_set = set(seeds)
+        min_x, min_y, min_z, max_x, max_y, max_z = bounds
         for ts in tree_seeds:
-            if ts not in seed_set and _in_bounds(ts, bounds) and ts not in solid:
-                seeds.append(ts)
-                seed_set.add(ts)
+            if ts not in seed_set and ts not in solid:
+                x, y, z = ts
+                if min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z:  # _in_bounds
+                    seeds.append(ts)
+                    seed_set.add(ts)
     if not seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
@@ -790,7 +842,17 @@ def _find_wire_path(
 
     # A* search: seeds in order, with their group (0 = start seeds, then one per tree seed).
     seed_depths = seed_depths or {}
-    seed_nodes = [_pid(seed) << _NODE_SHIFT
+    # _pid of each seed, inline: hundreds per search.
+    seed_ids = []
+    for seed in seeds:
+        i = pos_ids.get(seed)
+        if i is None:
+            i = pos_ids[seed] = len(pos_list)
+            pos_list.append(seed)
+            h_list.append(abs(seed[0] - gx) * x_h_factor + abs(seed[1] - gy) * 4 + abs(seed[2] - gz))  # heuristic
+            move_cache.append(None)
+        seed_ids.append(i)
+    seed_nodes = [seed_ids[i] << _NODE_SHIFT
                   | min(seed_depths.get(seed, 0) if i >= n_start_seeds else 0, _SIG_DEPTH_MASK) << _SIG_SHIFT
                   for i, seed in enumerate(seeds)]
     seed_groups = [0 if i < n_start_seeds else 1 + i - n_start_seeds for i in range(len(seeds))]
@@ -802,10 +864,10 @@ def _find_wire_path(
     def node_str(node: int) -> str:
         return str((pos_list[node >> _NODE_SHIFT], node & _SNAP_MASK))
 
-    best_seed = min(seeds, key=heuristic)
-    best_node = _pid(best_seed) << _NODE_SHIFT
-    best_h: int = heuristic(best_seed)
-    group_max_f: list[int] = [max(gh, 10) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
+    best = min(range(len(seeds)), key=lambda i: h_list[seed_ids[i]])  # the first seed of least heuristic
+    best_node = seed_ids[best] << _NODE_SHIFT
+    best_h: int = h_list[seed_ids[best]]
+    group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
     initial_group_best_h = list(group_best_h)
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
                    weight, time_limit, pos_list, h_list, expand, congestion_cost)
@@ -820,8 +882,10 @@ def _find_wire_path(
             ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
             goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,
             terminal_positions, workspace, GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
-            pos_ids, pos_list, h_list, move_cache, pending_sinks)
+            pos_ids, pos_list, h_list, move_cache, pending_sinks,
+            getattr(block_index, "grid", None), _ASTAR_GRID == "check")
 
+    search_started = time.perf_counter()
     reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world, stagnation=stagnation, budget=budget)
     if reached is None and early_stop_reason is None and h_radius_pruned:
         # The open list ran dry only because the h-radius cull discarded detours (typically a
@@ -829,6 +893,8 @@ def _find_wire_path(
         group_best_h[:] = initial_group_best_h
         reached, best_node, _, early_stop_reason, came_from = _run_search(
             search_args, net_id, make_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
+    if _SEARCH_LOG:
+        _log_search(net_id, best_seed, goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -844,8 +910,12 @@ def _find_wire_path(
         reason = f"; {early_stop_reason}" if early_stop_reason else ""
         error = RouteTimeout if early_stop_reason and early_stop_reason.startswith("timeout") else ValueError
         raise error(f"No route for net {net_id} from {start} to {goal} (closest reached: {node_str(best_node)}{reason}; h_radius_pruned={h_radius_pruned})")
-    if walkable(goal) and pos_list[reached >> _NODE_SHIFT] != goal:
-        raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {node_str(reached)}")
+    def pos_of(cid: int) -> tuple[int, int, int]:
+        """A successful kernel search leaves the cells it made in its own vectors, not pos_list."""
+        return pos_list[cid] if cid < len(pos_list) else _astar.cell_pos(cid)
+
+    if walkable(goal) and pos_of(reached >> _NODE_SHIFT) != goal:
+        raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {pos_of(reached >> _NODE_SHIFT)}")
 
     path: list[tuple[int, int, int]] = []
     back_visited = set()
@@ -853,7 +923,7 @@ def _find_wire_path(
     while cur != _NO_PARENT:
         if cur in back_visited:
             raise ValueError("Path tracing resulted in loop")
-        cur_pos = pos_list[cur >> _NODE_SHIFT]
+        cur_pos = pos_of(cur >> _NODE_SHIFT)
         path.append(cur_pos)
         back_visited.add(cur)
         cur = came_from[cur]
@@ -1044,6 +1114,7 @@ if _ASTAR_MODE not in ("kernel", "py", "check"):
 if _ASTAR_MODE != "kernel":
     print(f"[astar] MINECRAFT_V_ASTAR={_ASTAR_MODE} is deprecated: the Python A* is no longer "
           "maintained and may differ from the kernel", file=sys.stderr)
+_ASTAR_GRID = os.environ.get("MINECRAFT_V_ASTAR_GRID", "1")
 try:
     from . import _astar
 except ImportError as exc:
@@ -1054,6 +1125,9 @@ except ImportError as exc:
 else:
     if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
         atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
+    # MINECRAFT_V_ASTAR_SUBSET=0: no subset dominance (_astar.set_subset_dominance), for the paths from before it.
+    # The Python search hasn't got it, so check mode goes without.
+    _astar.set_subset_dominance(os.environ.get("MINECRAFT_V_ASTAR_SUBSET", "1") != "0" and _ASTAR_MODE == "kernel")
     _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
                 _ROUTE_MAX_EXPANSIONS, _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN,
                 _SIG_SHIFT, _REPEATER_INTERVAL)
@@ -1090,6 +1164,16 @@ def _keepout_spec(keepout) -> tuple | None:
         return ("keepout", keepout._count, keepout._own, keepout._excluded, keepout._extra,
                 keepout._halo, keepout._own_halo)
     return None
+
+
+_SEARCH_LOG = os.environ.get("ROUTE_SEARCH_LOG")
+
+
+def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
+    last = _astar.LAST if _astar is not None else {}
+    with open(_SEARCH_LOG, "a") as f:
+        f.write(f"{net_id},{seed[0]},{seed[1]},{seed[2]},{goal[0]},{goal[1]},{goal[2]},{int(ok)},"
+                f"{(reason or '').split(' ')[0]},{last.get('exp', 0)},{last.get('pos', 0)},{seconds:.4f}\n")
 
 
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,

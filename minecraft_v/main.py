@@ -10,8 +10,9 @@ from minecraft_v.build_utils import save_build_artifacts
 from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
-from minecraft_v.placement_engine.builder import build_macro
+from minecraft_v.placement_engine.builder import build_macro, set_first_fanout, set_long_edge_split
 from minecraft_v.placement_engine.macro import extract_macros
+from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block, group_block, set_block_cache, stack_spec
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
 from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX
 from minecraft_v.placement_engine.resume import ResumeStore
@@ -65,6 +66,39 @@ def _init_high_bits(module: Module) -> set[int]:
     return high
 
 
+def _add_ram_group(stacks, components: list[Component], bit_endpoints) -> None:
+    """All of a design's RAM stacks as one block, whose lanes carry the nets they share."""
+    specs = []
+    outputs: dict[tuple[int, str], int] = {}
+    for k, (cell_name, cell) in enumerate(stacks):
+        nets: dict[str, int] = {}
+        for port, bits in cell.connections.items():
+            for i, bit in enumerate(bits):
+                pin = f"{port}[{i}]" if len(bits) > 1 or port != "we" else port
+                if port in ("ra", "rb", "rc", "rd"):
+                    if isinstance(bit, int):
+                        outputs[(k, pin)] = bit
+                elif isinstance(bit, int):
+                    nets[pin] = bit
+                elif bit == "1":  # TODO: drive a pin tied high. Low is what an unconnected pin reads anyway.
+                    raise ValueError(f"{cell_name}: {pin} is tied to {bit}")
+        specs.append(stack_spec(cell.parameters, nets))
+    block, own_pins, lane_pins = group_block(specs)
+    pins = []
+    by_name = {p.name: p for p in block.pins}
+    for bit, name in lane_pins.items():
+        pins.append(by_name[name])
+        bit_endpoints[bit].append(("ram_group", name, Direction.IN))
+    for name, (k, stack_pin) in own_pins.items():
+        pin = by_name[name]
+        bit = outputs.get((k, stack_pin)) if pin.direction == Direction.OUT else specs[k].nets.get(stack_pin)
+        if bit is not None:
+            pins.append(pin)
+            bit_endpoints[bit].append(("ram_group", name, pin.direction))
+    components.append(Component(id="ram_group", type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
+                                metadata={"macro": block.name, "bank": True, "south_pins": True}))
+
+
 def module_to_component_list(module: Module) -> ComponentList:
     components: list[Component] = []
     init_high = _init_high_bits(module)
@@ -82,8 +116,28 @@ def module_to_component_list(module: Module) -> ComponentList:
                 bit_endpoints[bit].append((port_name, pin_name, pin_dir))
         components.append(Component(id=port_name, type=comp_type, pins=pins))
 
+    stacks = [(name, cell) for name, cell in module.cells.items() if cell.type == RAM4_CELL]
+    grouped = {name for name, _ in stacks} if len(stacks) > 1 else set()
+    if grouped:
+        _add_ram_group(stacks, components, bit_endpoints)
+
     for cell_name, cell in module.cells.items():
-        if cell.type in DEBUG_CELLS:
+        if cell.type in DEBUG_CELLS or cell_name in grouped:
+            continue
+        if cell.type in BLOCK_CELLS:
+            block = block_for_cell(cell.type, cell.parameters)
+            pins = []
+            for pin in block.pins:
+                port, _, index = pin.name.rstrip("]").partition("[")
+                bit = cell.connections[port][int(index or 0)]
+                # TODO: drive a pin tied high. Low is what an unconnected pin reads anyway.
+                if bit == "1" and pin.direction == Direction.IN:
+                    raise ValueError(f"{cell_name}: {pin.name} is tied to {bit}")
+                if isinstance(bit, int):
+                    pins.append(pin)
+                    bit_endpoints[bit].append((cell_name, pin.name, pin.direction))
+            components.append(Component(id=cell_name, type=ComponentType.CUSTOM, pins=pins, footprint=block.footprint,
+                                        metadata={"macro": block.name, **({"bank": True, "south_pins": True} if cell.type == RAM4_CELL else {"thin": True})}))
             continue
         if cell.type not in CELL_TYPE_MAP:
             known = ", ".join(sorted(CELL_TYPE_MAP))
@@ -146,7 +200,7 @@ _MACRO_FANOUT = 2  # nets above this fanout are shared between instances, not gr
 _MACRO_MIN_CELLS = 8  # smallest repeated subcircuit worth a macro
 _MACRO_ROW_TILES = 0  # instances per array, sharing lanes; 0 = all instances of a pattern in one array
 _MACRO_BANK_COLUMNS = 4  # tiles per row in fixed two-row banks facing one lane plane
-_MACRO_CHANNEL = 24  # Z kept clear past a long macro's input face
+_MACRO_CHANNEL = int(os.environ.get("RAM_CHANNEL", 24))  # Z kept clear past a long macro's input face
 _MACRO_EAST_ROOM = 20  # X past a bank stack's pin end where gates may go; the rest go on top
 _MACRO_HEADROOM = 32  # layers kept above the tallest macro
 _BANK_GUTTER = 12
@@ -235,7 +289,7 @@ def main():
     parser.add_argument("--resume-reroute", type=str, default="",
                         help="--resume-dir: comma-separated nets to search again instead of reusing their paths")
     parser.add_argument("--macro-cache", type=str, default="build/macro_cache",
-                        help="--macros: directory keeping routed macros between builds")
+                        help="Directory keeping routed macros and settled RAM blocks between builds")
     args = parser.parse_args()
 
     set_debug(args.debug)
@@ -261,6 +315,7 @@ def main():
     if module is None:
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
+    set_block_cache(Path(args.macro_cache) / "ram")
     component_list = module_to_component_list(module)
     probes = extract_probes(module) if args.debug_prints else None
 
@@ -287,6 +342,13 @@ def main():
 
     macros = None
     flat_comp = component_list
+    rams = {c.metadata["macro"]: built_block(c.metadata["macro"])
+            for c in component_list.components if c.type == ComponentType.CUSTOM}
+    if rams:
+        macros = rams
+    pathfinding.set_foot_repeaters(not rams)
+    set_first_fanout(64 if rams else 0)
+    set_long_edge_split(sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN) for c in component_list.components))
     if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
@@ -302,6 +364,7 @@ def main():
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
                                                            on_class=report)
+        macros = {**macros, **rams}
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")
         if any(c.metadata.get("bank") for c in component_list.components):
