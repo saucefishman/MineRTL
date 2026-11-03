@@ -92,4 +92,5 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 - Longer predictor test `examples/floweypu_loop` (RTL prints `aaaanttnttnttcccccccxyxy`, halts edge 212) FAILS on a fixed build: flip-flop `slice$25910` hold margin -14 logged as `[hold] still short` and ignored, wrong from clock 35, not speed. So `still short` lines are real faults and t1, p200, p100 are unproven until hold-leftovers finishes. New `live_pin` verify violation; `scripts/check_bpmem.py`.
 - Best footprint so far p100: 863x305x684, passes hi at 1500 and generated half, compare 0, live pins and hold leftovers (0, 0, 4) still to clear.
 - Queue bug fixed (bf28fe9): stale clients at the head stalled everyone. A client runs the code it started with.
+- Predictor proven in gates once: `floweypu_loop` with hold detours (hs/lp2 in scratchpad) prints `aaaanttnttnttcccccccxyxy`, halts edge 212, flip-flops 0, gate vs RTL 0, redpiler at half 2000 only. Real hold limits measured: DFF safe after 2 ticks, DFFE after 5; `[hold] still short` now prints slack and a real shortfall is a `hold` violation.
 
