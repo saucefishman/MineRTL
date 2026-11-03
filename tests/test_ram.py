@@ -214,16 +214,23 @@ def test_group_settled_bank_by_bank_equals_settled_whole(monkeypatch, workers):
     assert made.settled.comparators == whole.settled.comparators
 
 
-def test_a_blocks_output_with_no_net_keeps_wire_off_its_pin():
-    # bpmem: takes' bit 0 is never read on two ports, but those pins still go high. next_pc1's select was routed over one.
+def test_a_live_pin_with_no_net_keeps_wire_off_its_cell():
+    # bpmem: takes' bit 0 is never read on two ports and wpc1[15:9] go nowhere, but those pins still drive their cells.
+    # next_pc1's select was routed over the first, wpc1[8]'s wire over the second.
     from types import SimpleNamespace as NS
 
     from minecraft_v.placement_engine.builder import _terminal_keepout, _unused_output_terminals
     from minecraft_v.placement_engine.ir import ComponentType, Direction
 
-    pins = [NS(name="used", direction=Direction.OUT), NS(name="spare", direction=Direction.OUT), NS(name="in", direction=Direction.IN)]
-    block = NS(component=NS(id="ram", type=ComponentType.CUSTOM, pins=pins))
-    terminals = {("ram", "used"): (1, 1, 1), ("ram", "spare"): (5, 1, 1), ("ram", "in"): (9, 1, 1)}
-    found = _unused_output_terminals([block], [NS(source=NS(component_id="ram", pin_name="used"), sinks=[])], terminals)
-    assert found == {"unused:ram:spare": {(5, 1, 1)}}
+    def out(name):
+        return NS(name=name, direction=Direction.OUT)
+
+    placed = [NS(component=NS(id="ram", type=ComponentType.CUSTOM, pins=[out("used"), out("spare"), NS(name="in", direction=Direction.IN)])),
+              NS(component=NS(id="a[0]", type=ComponentType.INPUT_PIN, pins=[out("a[0]")])),
+              NS(component=NS(id="a[9]", type=ComponentType.INPUT_PIN, pins=[out("a[9]")])),
+              NS(component=NS(id="gate", type=ComponentType.AND, pins=[out("Y")]))]
+    terminals = {("ram", "used"): (1, 1, 1), ("ram", "spare"): (5, 1, 1), ("ram", "in"): (9, 1, 1), ("a[0]", "a[0]"): (13, 1, 1),
+                 ("a[9]", "a[9]"): (17, 1, 1), ("gate", "Y"): (21, 1, 1)}
+    found = _unused_output_terminals(placed, {"n": {(1, 1, 1), (13, 1, 1)}}, terminals)
+    assert found == {"unused:ram:spare": {(5, 1, 1)}, "unused:a[9]:a[9]": {(17, 1, 1)}}
     assert {(5, 1, 1), (5, 2, 1), (5, 1, 2)} <= _terminal_keepout(found["unused:ram:spare"])
