@@ -15,6 +15,9 @@ Read this first; the State log below has the detail.
 - **Unverified:** in game, more than one seed, redstone on the loop program (pending), MCHPRS server loading this size (other session).
 - **Open branches not merged:** split long edges (global-routing session, 3d8708f, checks pending), routing kernel reuse (multi-sink session), opt-in false-path proof (dde54ee, not wanted).
 
+## Shipped (2026-11-02)
+`/Users/saucefishman/Projects/MCHPRS/schems/floweypu.litematic` + `floweypu.server.json`: printing floweypu_hi, seed 2 build `fin_hi2` (scratchpad), 863x305x585, generated half 1558, 2 print probes, 0 failed after repair, 0 verify, hi PASS 1 reset in redstone and redpiler at 1558, gate vs RTL 0. Not tried in game. Seeds 1 and 4 failed nets at channel 1; seed 3 routed clean (not checked further). Since then merged long-edge split (10k+ gates) and route kernel work; seeds 1 and 2 rebuilt to check them (mg1, mg2).
+
 ## User's rules
 - Source edits allowed if proven equivalent. Hist keeps all bits, behaviour unchanged: no trimming, no bug fix.
 - Stay on branch claude/floweypu-example-checklist-ca457a. Commit here, merge children here, merge main in when useful. No push, no merge to main.
