@@ -95,3 +95,4 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 - hi1 (density's defaults 6360805 plus hold, live pin and clock fixes): 863x305x585, synth 7 + build 385 = 392s, 0 failed, 0 verify, hold detours left no shortfall, generated half 1591. hi PASS 1 reset in redstone and redpiler at 1591, compare 0. Installed to MCHPRS at its generated half; not tried in game. loop1 (predictor program) pending.
 - User (2026-11-02): faster clock periods are not a goal; redpiler is fast enough. Generated clock only needs to be safe.
 - Installed floweypu builds live at MCHPRS `schems/floweypu.litematic` and `floweypu.server.json` (renamed from claude.*); currently hi1.
+- false-paths session done: no unsafe generated clock found; floweypu's generated half has no false-path slack. Opt-in SAT false-path proof is on branch claude/vibrant-murdock-9780d1 (dde54ee), off by default, not merged since clock speed isn't a goal.
