@@ -1122,6 +1122,9 @@ except ImportError as exc:
 else:
     if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
         atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
+    # MINECRAFT_V_ASTAR_SUBSET=0: no subset dominance (_astar.set_subset_dominance), for the paths from before it.
+    # The Python search hasn't got it, so check mode goes without.
+    _astar.set_subset_dominance(os.environ.get("MINECRAFT_V_ASTAR_SUBSET", "1") != "0" and _ASTAR_MODE == "kernel")
     _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
                 _ROUTE_MAX_EXPANSIONS, _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN,
                 _SIG_SHIFT, _REPEATER_INTERVAL)
