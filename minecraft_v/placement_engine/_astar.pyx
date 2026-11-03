@@ -422,6 +422,7 @@ cdef int NODE_SHIFT = 0
 cdef int SIG_SHIFT = 0           # signal depth (4 bits) then repeater-candidate dir (3 bits)
 cdef int SIG_LIMIT = 0           # _REPEATER_INTERVAL
 cdef bint FOOT_REPEATERS = False  # see pathfinding.set_foot_repeaters
+cdef bint SUBSET_DOMINANCE = True  # see set_subset_dominance
 cdef long long SNAP_MASK = 0
 cdef int STAGNATION = 0
 cdef int MAX_NODES = 0
@@ -1118,7 +1119,7 @@ cdef class World:
                     return False
                 if o == 0 and v & (F_TORCH | F_WIRE) and not (with_inv_fp and self.efp(nx, ny, nz)):
                     return False
-        for vdy in (1, -1):
+        for vdy in range(1, -2, -2):  # 1, -1; a C loop, where a tuple unboxes each
             vy = y + vdy
             if has_exempt and x == ex and vy == ey and z == ez:
                 continue
@@ -1517,7 +1518,7 @@ cdef class World:
             if not ok:
                 continue
             for k in range(4):
-                for ddy in (-1, 1):
+                for ddy in range(-1, 2, 2):  # -1, 1, as a C loop
                     if self.owner(nx + HORIZ[k][0], y - 2 + ddy, nz + HORIZ[k][1]) != 0:
                         ok = False
                         break
@@ -1728,6 +1729,24 @@ def cell_pos(int cid):
     return (x, y, z)
 
 
+def set_subset_dominance(bint on) -> None:
+    """Whether a state is dropped when one already expanded at its cell has a subset of its snapshot, no more signal
+    depth, the same tower flag and the same repeater candidate (or any, when it has none), at no more cost: every move
+    open to it is open to that one, at no more cost and depth. Most of a cell's states are snapshot variants, and this
+    drops about a third of all expansions. A dropped state still counts toward the stagnation and expansion limits.
+    The search can end in another path, as cheap or cheaper; an earlier -4 side chosen, or another seed group's f-cap,
+    can make it miss one this state alone had."""
+    global SUBSET_DOMINANCE
+    SUBSET_DOMINANCE = on
+
+
+cdef struct Expanded:  # a state already expanded at a cell, for subset dominance
+    uint32_t snap
+    int sig     # signal depth | candidate << 4 | tower << 7
+    double g
+    int next    # the cell's previous entry, or -1
+
+
 def set_foot_repeaters(bint on) -> None:
     global FOOT_REPEATERS
     FOOT_REPEATERS = on
@@ -1760,6 +1779,12 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef vector[char] is_goal
     cdef vector[int] taken
     cdef vector[int] extras  # (ex, ey, ez) triples of this expansion's taken 2x slopes
+    cdef vector[int] expanded_head  # by cell: its latest Expanded, or -1
+    cdef vector[Expanded] expanded
+    cdef Expanded* xp
+    cdef int xi, x_sig = 0, x_depth, x_cand
+    cdef uint32_t x_snap = 0
+    cdef bint subset_dominated
     cdef HeapEntry e, ne
     cdef NodeSlot* np
     cdef int skip
@@ -1839,6 +1864,31 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         if ni.parent == NOT_EXPANDED and nodes.dominated(e.node, e.g):
             continue
         cid = <int>(e.node >> NODE_SHIFT)
+        if SUBSET_DOMINANCE and ni.parent == NOT_EXPANDED:
+            x_snap = <uint32_t>(e.node & SNAP_MASK)
+            x_sig = <int>((e.node >> SIG_SHIFT) & 127) | (128 if e.node & TOWER_FLAG else 0)
+            x_depth = x_sig & 15
+            x_cand = x_sig & 0x70
+            subset_dominated = False
+            xi = expanded_head[cid] if cid < <int>expanded_head.size() else -1
+            while xi >= 0:
+                xp = &expanded[xi]
+                if (not xp.snap & ~x_snap and xp.g <= e.g and (xp.sig & 128) == (x_sig & 128)
+                        and (xp.sig & 15) <= x_depth and (x_cand == 0 or (xp.sig & 0x70) == x_cand)):
+                    subset_dominated = True
+                    break
+                xi = xp.next
+            if subset_dominated:
+                # The budgets count it as the expansion it saves: a search that fails gives up where it did before,
+                # not past more cells.
+                n_exp += 1
+                if n_exp - last_new_pos >= stagnation_limit:
+                    early_stop_reason = f"stagnated ({stagnation_limit} expansions without a new position)"
+                    break
+                if n_exp >= max_expansions:
+                    early_stop_reason = f"expansion cap ({max_expansions})"
+                    break
+                continue
         h = cells.h[cid]
         if h < best_h:
             best_h = h
@@ -1850,6 +1900,11 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             n_reexp += 1
         else:
             nodes.set_parent(ni, e.parent)
+            if SUBSET_DOMINANCE:
+                if <int>expanded_head.size() <= cid:
+                    expanded_head.resize(cid + 1, -1)
+                expanded.push_back(Expanded(x_snap, x_sig, e.g, expanded_head[cid]))
+                expanded_head[cid] = <int>expanded.size() - 1
             if <Py_ssize_t>explored_xyz.size() <= cid:
                 explored_xyz.resize(cid + 1, 0)
             if not explored_xyz[cid]:
@@ -1921,7 +1976,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             m = &cells.moves[taken[k]]
             # Signal state (pathfinding._signal_step): prune moves that would leave a stretch
             # with no cell _place_repeaters_for_net could put a repeater on.
-            step = abs(m.dx) + abs(m.dz)
+            step = abs(<int>m.dx) + abs(<int>m.dz)  # ints: abs of a char goes through Python
             if m.arrive or (m.dy == -4 and step == 0):
                 ndepth = 1
                 ncand = 0
