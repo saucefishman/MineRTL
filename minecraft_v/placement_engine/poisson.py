@@ -687,7 +687,8 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
             output_z = max(pos_all[i, 2] + netlist.comps[i].footprint.depth for i in blocks) + _SOUTH_PINS_OUTPUT_Z
             east = max(pos_all[i, 0] + netlist.comps[i].footprint.width for i in blocks) + _IO_COLUMN_CLEAR
             order = sorted(outputs, key=lambda i: pos_all[i, 0])
-            pos_all[order, 0] = east + _SOUTH_PINS_OUTPUT_PITCH * np.arange(len(order))
+            pitch = _south_pins_setting("RAM_OUTPUT_PITCH", n, _SOUTH_PINS_OUTPUT_PITCH, _SOUTH_PINS_OUTPUT_PITCH_LARGE)
+            pos_all[order, 0] = east + pitch * np.arange(len(order))
     pos_all[outputs, 2] = output_z
 
 
@@ -706,8 +707,22 @@ _BANK_STACK_HEIGHT = 190  # worlds aren't tall enough for one stack of a big mem
 _BANK_COLUMN_GAP = 4
 _SOUTH_PINS_CLEAR = 24  # Z past a south_pins block's face, for the output row and wire to its pins
 _SOUTH_PINS_DENSITY = float(os.environ.get("RAM_GATE_DENSITY", 0.15))
+_SOUTH_PINS_LARGE = 10000  # gates; at or above, a design has to fit a plot, with the tighter settings below
 _SOUTH_PINS_OUTPUT_PITCH = 4
-_SOUTH_PINS_WIDTH = float(os.environ.get("RAM_GATE_WIDTH", 0.35))  # share of the block's width
+_SOUTH_PINS_OUTPUT_PITCH_LARGE = 2  # outputs differ in Y, so columns can be tight
+_SOUTH_PINS_CHANNEL_LARGE = 1.0  # Z from the block's clearance to the gates: smaller designs keep the void
+_SOUTH_PINS_WIDTH_LARGE = 0.6
+
+
+def _south_pins_setting(name: str, gates: int, small: float | None, large: float) -> float | None:
+    """A setting's value for a design this big, or the environment's."""
+    value = os.environ.get(name)
+    if value:
+        return float(value)
+    return large if gates >= _SOUTH_PINS_LARGE else small
+
+
+_SOUTH_PINS_WIDTH = 0.35  # share of the block's width
 _SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
                             # spill onto later gates' targets and each search walks through all that's piled there
@@ -752,7 +767,7 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
         # Every pin is on the south face and a net can't cross a block: all gates go south, past room for outputs and wire.
         box = (np.zeros(3), np.array([width, y, channel + depth + _SOUTH_PINS_CLEAR]))
         # Gates in the middle of the block's width, not stretched along it: long thin bands make long nets.
-        gate_width = width * _SOUTH_PINS_WIDTH
+        gate_width = width * _south_pins_setting("RAM_GATE_WIDTH", len(free), _SOUTH_PINS_WIDTH, _SOUTH_PINS_WIDTH_LARGE)
         gate_depth = float(np.prod(sizes[free], axis=1).sum()) / _SOUTH_PINS_DENSITY / (gate_width * y)
         gate_shift = (width - gate_width) // 2
         repel = (np.zeros(3), np.array([gate_width, y, box[1][2]]))
@@ -767,6 +782,12 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     held = {i: origin - np.array([gate_shift, 0.0, 0.0]) for i, origin in fixed.items()}
     pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, held, repel))
     pos[free, 0] += gate_shift
+    channel_z = _south_pins_setting("RAM_GATE_CHANNEL", len(free), None, _SOUTH_PINS_CHANNEL_LARGE)
+    if all(gates[i].metadata.get("south_pins") for i in banks) and channel_z is not None:
+        # The block's charge presses gates to the far end of the domain, leaving a void: close it to the channel wanted.
+        # Moved as one, so global placement's density and legalization time don't change, as a shorter domain's would.
+        near = float(np.percentile(pos[free, 2], 2))
+        pos[free, 2] = np.maximum(pos[free, 2] - max(0.0, near - box[1][2] - channel_z), box[1][2])
     occ = _Occupancy(np.vstack([sizes, box[1]]))
     occ.add(len(gates), (0, 0, 0))
     for i in fixed:
