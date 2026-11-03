@@ -34,7 +34,7 @@ _SWAP_LOW = 1 * _GB  # less room than this under the cap: nothing new starts, an
 _SWAP_OK = 2 * _GB  # paused jobs carry on once this much is free
 _PEAK_MARGIN = 1.1
 _MAX_BACKFILL_WAIT = 600  # seconds the head of the queue waits before smaller jobs stop passing it
-_VERSION = 4
+_VERSION = 5
 _AGING = 60.0  # seconds of waiting worth one level of priority
 _POLL = 2.0
 _SAMPLE = 5.0
@@ -117,6 +117,14 @@ def _state():
         tmp.replace(path)
 
 
+def _held_below() -> int:
+    """While $JOB_DIR/hold holds a number, jobs of lower priority don't start: room for something urgent."""
+    try:
+        return int((_DIR / "hold").read_text().strip())
+    except (OSError, ValueError):
+        return -(1 << 30)
+
+
 def _need(job: dict, peaks: dict) -> int:
     """What it will use: its last peak once there is one, as a declared size is usually a guess on the safe side."""
     peak = peaks.get(job["name"], 0)
@@ -136,6 +144,9 @@ def may_start(key: str, state: dict, free: int, swap: int, cores: int, now: floa
     # A client keeps the code it started with, so one from an older version may never go when this one thinks it should.
     waiting = sorted((j for j in jobs.values() if j["state"] == "waiting" and j.get("version") == _VERSION), key=_order)
     me = jobs[key]
+    if me["priority"] < _held_below():
+        return False
+    waiting = [j for j in waiting if j["priority"] >= _held_below()] or waiting
     head = waiting[0]
     if not running:
         return me is head
