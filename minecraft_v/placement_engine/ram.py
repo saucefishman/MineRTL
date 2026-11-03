@@ -39,6 +39,8 @@ from .block_utils import BulkRegion
 from .cosmetics import apply_dust_shapes
 from .macro import BlockArrays, Macro
 from .propagate import comparator_entity, settle
+from .ram_timing import PinEdges, checker_words, joined, measure_array, measure_blocks, measure_wire, pin_cell
+from .tick_sim import Edges
 from .verify import verify_support
 
 Pos = tuple[int, int, int]
@@ -96,8 +98,13 @@ def _comparator(facing: str) -> BlockState:
     return BlockState("minecraft:comparator", facing=facing, mode="subtract", powered="false")
 
 
+def _through_pin(edges: PinEdges) -> PinEdges:
+    """Measured arcs start at an input pin repeater's output, but the routed wire ends a cell outside that repeater."""
+    return {pin: {out: {key: ticks + 1 for key, ticks in found.items()} for out, found in outs.items()} for pin, outs in edges.items()}
+
+
 def _opaque(name: str, size: tuple[int, int, int], blocks: dict[Pos, BlockState], pins: list[PinRef],
-            arcs: dict[str, dict[str, int]], cells: int) -> Macro:
+            edges: PinEdges, cells: int, closing: dict[str, int] | None = None) -> Macro:
     """Verification stops at the pins: the block is one opaque gate, checked by its own harness test."""
     size_x, size_y, size_z = size
     terminals: dict[str, Pos] = {}
@@ -110,8 +117,26 @@ def _opaque(name: str, size: tuple[int, int, int], blocks: dict[Pos, BlockState]
         outside = f"{pin.name}:{pin.name}"
         nets[inner] = (outside, [inner]) if pin.direction == Direction.IN else (inner, [outside])
     return Macro(name=name, footprint=Footprint(width=size_x, height=size_y, depth=size_z), pins=pins,
-                 blocks=list(blocks.items()), arcs=arcs, q_out={}, setup={}, terminals=terminals,
-                 gate_boxes=[((0, 0, 0), size)], nets=nets, port_net=port_net, cells=cells)
+                 blocks=list(blocks.items()), arcs=_longest(_through_pin(edges)),
+                 q_out={}, setup={}, terminals=terminals, gate_boxes=[((0, 0, 0), size)], nets=nets, port_net=port_net,
+                 cells=cells, edges=_through_pin(edges), closing={pin: ticks + 1 for pin, ticks in (closing or {}).items()})
+
+
+def _longest(edges: PinEdges) -> dict[str, dict[str, int]]:
+    return {pin: {out: max(e.values()) for out, e in outs.items() if e} for pin, outs in edges.items()}
+
+
+_clock_block_edges: dict[str, PinEdges] = {}
+
+
+def _with_clock_edges(block: Macro) -> Macro:
+    """A block fed only by the clock, timed by simulating it."""
+    edges = _clock_block_edges.get(block.name)
+    if edges is None:
+        edges = _clock_block_edges[block.name] = measure_blocks(settled_block(block))
+    block.edges = _through_pin(edges)
+    block.arcs = _longest(block.edges)
+    return block
 
 
 def build_window() -> Macro:
@@ -141,13 +166,14 @@ def build_window() -> Macro:
     blocks[(2, y, 4)] = _repeater("east")
     pins = [PinRef(name="clk", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(2, y, 0)),
             PinRef(name="window", direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(1, y, size[2] - 1))]
-    return _opaque(WINDOW_MACRO, size, blocks, pins, {"clk": {"window": 8}}, 1)
+    return _with_clock_edges(_opaque(WINDOW_MACRO, size, blocks, pins, {}, 1))
 
 
 def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int] | None = None,
-              high_bits: int = 0, high: int = 0) -> Macro:
+              high_bits: int = 0, high: int = 0, measure: bool = True) -> Macro:
     """``reads`` is 2 or 4. ``init`` holds a preloaded word per row. With ``high_bits``, addresses have that many more
-    bits, and this array answers only when they equal ``high``: several can share address lines and OR their bitlines."""
+    bits, and this array answers only when they equal ``high``: several can share address lines and OR their bitlines.
+    ``measure``: time it, by shape, or leave that to a caller who only wants the blocks."""
     row_bits = depth.bit_length() - 1
     if row_bits < 1 or depth != 1 << row_bits:
         raise ValueError(f"{name}: depth {depth} is not a power of two above 1")
@@ -282,24 +308,11 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
                 blocks[(sx, _Y_WORD, z)] = _torch(not stored)
                 blocks[(sx, _Y_WORD + 1, z)] = _STONE
 
-    # Worst paths, in repeater ticks. A written bit goes through its latch and both torches before the read tap.
-    along_decoder = 1 + (size_x - decoder_x) // _DECODER_REPEAT
-    along_row = along_decoder + 1 + width // _REPEAT_EVERY
-    along_column = 1 + depth // _REPEAT_EVERY + 1
-    decode = 1 + depth // _REPEAT_EVERY + 2  # along the address line, complement torch, tap torch
-    tap_ticks = 2  # side repeater or torch, then comparator
-    read = decode + along_row + tap_ticks + along_column
-    written = 4 + (2 if reads == 4 else 0) + along_column
-    outs = [port for port, _, _, _ in ports]
-    arcs: dict[str, dict[str, int]] = {}
-    for bit in range(abits):
-        for port in outs:
-            arcs[f"a{port}[{bit}]"] = {f"r{port}[{i}]": read for i in range(width)}
-        arcs[f"wa[{bit}]"] = {f"r{p}[{i}]": decode + along_row + written for p in outs for i in range(width)}
-    arcs["we"] = {f"r{p}[{i}]": decode + along_row + written for p in outs for i in range(width)}
-    for i in range(width):
-        arcs[f"wd[{i}]"] = {f"r{p}[{i}]": along_column + written for p in outs}
-    return _opaque(name, (size_x, size_y, size_z), blocks, pins, arcs, depth * width)
+    edges, closing = _array_timing(depth, width, reads, high_bits).edges_closing() if measure else ({}, {})
+    block = _opaque(name, (size_x, size_y, size_z), blocks, pins, edges, depth * width, closing)
+    if closing:
+        block.guarded = {"we": [p.name for p in pins if p.name.startswith(("wa[", "wd["))]}
+    return block
 
 
 def build_delay(name: str = "ram_delay") -> Macro:
@@ -310,8 +323,6 @@ def build_delay(name: str = "ram_delay") -> Macro:
     blocks[(0, y, 3)] = _repeater("south")
     blocks[(0, y, 2)] = _DUST
     pins = [PinRef(name="clk", direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(0, y, 0))]
-    arcs: dict[str, int] = {}
-    ticks = 1
     taps = _DELAY_TAPS
     for x in range(1, size[0]):
         cell = x - 1
@@ -320,11 +331,9 @@ def build_delay(name: str = "ram_delay") -> Macro:
             blocks[(x, y, 1)] = _repeater("south")
             blocks[(x, y, 0)] = _repeater("south")
             pins.append(PinRef(name=taps[cell], direction=Direction.OUT, side=CardinalDirection.NORTH, offset=(x, y, size[2] - 1)))
-            arcs[taps[cell]] = ticks + 2
         else:
             blocks[(x, y, 2)] = BlockState("minecraft:repeater", facing="west", delay="4", powered="false", locked="false")
-            ticks += 4
-    return _opaque(name, size, blocks, pins, {"clk": arcs}, 1)
+    return _with_clock_edges(_opaque(name, size, blocks, pins, {}, 1))
 
 
 def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, width: int, init: list[int],
@@ -341,7 +350,7 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
     depth = 1 << row_bits
     high_bits = abits - row_bits
     bank_args = [(depth, width, tuple(init[k * depth:(k + 1) * depth]), high_bits, base + k) for k in range(banks)]
-    arrays = [build_ram(name, depth, width, 4, list(a[2]), high_bits, a[4]) for a in bank_args[:1 if banks_out is not None else banks]]
+    arrays = [build_ram(name, depth, width, 4, list(a[2]), high_bits, a[4], measure=False) for a in bank_args[:1 if banks_out is not None else banks]]
     bank = arrays[0].footprint
     north = _STACK_NORTH
     south = _STACK_SOUTH_FOLDED if _FOLD else _STACK_SOUTH
@@ -369,7 +378,6 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
                 blocks[(x, y + 1, z)] = _torch((y - bottom) // 2 % 2 == 0)
 
     pins: list[PinRef] = []
-    arcs_in = _TOWER_TICKS * banks
     # Folded: towers on lanes nearest, so wire from pins on the south face crosses none; lowest first of the others, as a
     # line out runs under the further towers.
     columns: dict[int, list] = {}
@@ -424,8 +432,19 @@ def build_stack(name: str, row_bits: int, banks: int, base: int, abits: int, wid
                     blocks[(tower_x, top, z)] = _DUST
                 blocks[(tower_x, top - 1, z)] = _GLASS
             pins.append(PinRef(name=pin.name, direction=Direction.OUT, side=CardinalDirection.SOUTH, offset=(tower_x, top, 0)))
-    arcs = {pin: {out: ticks + arcs_in for out, ticks in outs.items()} for pin, outs in arrays[0].arcs.items()}
-    return _opaque(name, size, blocks, pins, arcs, len(init) * width)
+    edges: PinEdges = {}
+    closing: dict[str, int] = {}
+    if banks_out is None and not on_lanes:
+        local: list = []
+        shell = build_stack(name, row_bits, banks, base, abits, width, init, banks_out=local)
+        names = [p.name for p in shell.pins]
+        feeds = {pin: [(k, pin) for k in range(banks)] for pin in names if pin not in _array_timing(depth, width, 4, high_bits).outputs()}
+        leaves = {(k, pin): pin for k in range(banks) for pin in names if pin not in feeds}
+        edges, closing = _joined_timing(shell, local, feeds, leaves)
+    block = _opaque(name, size, blocks, pins, edges, len(init) * width, closing)
+    if closing:
+        block.guarded = _write_guards(feeds)
+    return block
 
 
 @dataclass
@@ -567,21 +586,40 @@ def build_group(name: str, specs: list[StackSpec], banks_out: list | None = None
         blocks[(entry, y, pin_z)] = _repeater("south")
         floor(entry, y, pin_z)
         pins.append(PinRef(name=lane_pins[net], direction=Direction.IN, side=CardinalDirection.SOUTH, offset=(entry, y, 0)))
-    along = size[0] // _LANE_REPEAT + lift // 2
-    arcs: dict[str, dict[str, int]] = {}
-    pin_of = {(k, pin): lane_pins[net] for net, ends in users.items() if net in lane_pins for k, pin in ends}
-    for k, sub in enumerate(built):
-        for pin, outs in sub.arcs.items():
-            into = arcs.setdefault(pin_of.get((k, pin), f"s{k}_{pin}"), {})
-            for out, ticks in outs.items():
-                into[f"s{k}_{out}"] = max(into.get(f"s{k}_{out}", 0), ticks + along)
     cells = sum(len(spec.init) * spec.width for spec in specs)
-    return _opaque(name, size, blocks, pins, arcs, cells), own_pins, lane_pins
+    block = _opaque(name, size, blocks, pins, {}, cells)
+    if banks_out is None:  # with the arrays in the blocks: time the same thing without them
+        timed = build_group(name, specs, [])[0]
+        block.edges, block.closing, block.guarded = timed.edges, timed.closing, timed.guarded
+        block.arcs = _longest(block.edges)
+        return block, own_pins, lane_pins
+    pin_of = {(k, pin): lane_pins[net] for net, ends in users.items() if net in lane_pins for k, pin in ends}
+    feeds: dict[str, list[tuple[int, str]]] = {}
+    leaves: dict[tuple[int, str], str] = {}
+    placed: list = []
+    for k, (spec, stack_banks) in enumerate(zip(specs, local)):
+        depth = 1 << spec.row_bits
+        outputs = _array_timing(depth, spec.width, 4, spec.abits - spec.row_bits).outputs()
+        for j, item in enumerate(stack_banks):
+            n = len(placed)
+            placed.append(((xs[k] + item[0][0], lift + item[0][1], item[0][2]), item[1], item[2]))
+            for pin in _array_timing(depth, spec.width, 4, spec.abits - spec.row_bits).pins:
+                if pin in outputs:
+                    leaves[n, pin] = f"s{k}_{pin}"
+                else:
+                    target = pin_of.get((k, pin), f"s{k}_{pin}")
+                    if target in {p.name for p in pins}:
+                        feeds.setdefault(target, []).append((n, pin))
+    edges, closing = _joined_timing(block, placed, feeds, leaves)
+    block.edges, block.closing = _through_pin(edges), {pin: ticks + 1 for pin, ticks in closing.items()}
+    block.guarded = _write_guards(feeds)
+    block.arcs = _longest(block.edges)
+    return block, own_pins, lane_pins
 
 
 _built: dict[str, Macro] = {}
 _cache_dir: Path | None = None
-_CODE = ("ram.py", "macro.py", "propagate.py", "cosmetics.py", "verify.py", "block_utils.py")
+_CODE = ("ram.py", "ram_timing.py", "tick_sim.py", "macro.py", "propagate.py", "cosmetics.py", "verify.py", "block_utils.py")
 
 
 def set_block_cache(directory: Path | None) -> None:
@@ -664,10 +702,107 @@ def _cached(key: object, build: Callable[[], tuple[Macro, object]],
     return block, extra
 
 
+@dataclass
+class _ArrayTiming:
+    """What simulating an array of a shape found. pins: name -> cell in the array."""
+    edges: PinEdges
+    closing: dict[str, int]
+    pins: dict[str, Pos]
+    output_names: frozenset[str]
+
+    def edges_closing(self) -> tuple[PinEdges, dict[str, int]]:
+        return self.edges, self.closing
+
+    def outputs(self) -> frozenset[str]:
+        return self.output_names
+
+
+_array_times: dict[tuple, _ArrayTiming] = {}
+
+
+def _array_timing(depth: int, width: int, reads: int, high_bits: int) -> _ArrayTiming:
+    """Contents and which upper address an array answers to don't change its timing, so each shape is simulated once."""
+    shape = depth, width, reads, high_bits, _FOLD
+    found = _array_times.get(shape)
+    if found is not None:
+        return found
+    digest = hashlib.sha256(repr((shape, _ADDR_PITCH)).encode())
+    for code in _CODE:
+        digest.update((Path(__file__).parent / code).read_bytes())
+    path = None if _cache_dir is None else _cache_dir / "timing" / f"{digest.hexdigest()[:24]}.pickle"
+    if path is not None and path.exists():
+        with open(path, "rb") as f:
+            found = pickle.load(f)
+    else:
+        with phase(f"[ram] timing an array of {depth}x{width}, {reads} reads"):
+            block = settled_block(build_ram("timed", depth, width, reads, checker_words(depth, width), high_bits, 0, measure=False))
+            edges, closing = measure_array(block, depth, width, depth.bit_length() - 1 + high_bits, "abcd"[:reads])
+            found = _ArrayTiming(edges, closing, {p.name: pin_cell(block, p.name) for p in block.pins},
+                                 frozenset(p.name for p in block.pins if p.direction == Direction.OUT))
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            partial = path.with_name(f"{path.name}.{os.getpid()}")
+            with open(partial, "wb") as f:
+                pickle.dump(found, f)
+            os.replace(partial, path)
+    _array_times[shape] = found
+    return found
+
+
+def _joined_timing(shell: Macro, banks: list, feeds: dict[str, list[tuple[int, str]]],
+                   leaves: dict[tuple[int, str], str]) -> tuple[PinEdges, dict[str, int]]:
+    """A block's arcs: its wire measured without its arrays, joined with theirs. banks: (origin, array arguments, size).
+    feeds: input pin -> (bank, array pin) it reaches. leaves: (bank, array output pin) -> the block's output pin."""
+    timing = [_array_timing(args[0], args[1], 4, args[3]) for _, args, _ in banks]
+
+    def cell(n: int, pin: str) -> Pos:
+        origin, _, _ = banks[n]
+        return tuple(a + b for a, b in zip(origin, timing[n].pins[pin]))
+
+    def entry(n: int, pin: str) -> Pos:
+        x, y, z = cell(n, pin)
+        return x, y, z + 1  # the wire's last cell, south of the array's pin
+
+    entries = {pin: [entry(n, array_pin) for n, array_pin in ends] for pin, ends in feeds.items()}
+    exits = {}
+    for (n, pin), out in leaves.items():
+        exits.setdefault(cell(n, pin), (_repeater("south"), []))[1].append(out)
+    into, out = measure_wire(dict(shell.blocks), (shell.footprint.width, shell.footprint.height, shell.footprint.depth), shell,
+                             entries, [(p, b, pins) for p, (b, pins) in exits.items()])
+    edges: PinEdges = {}
+    closing: dict[str, int] = {}
+    pin_repeater: Edges = {(False, False): 1, (True, True): 1}
+    for pin, ends in feeds.items():
+        for n, array_pin in ends:
+            wire = into.get((pin, entry(n, array_pin)))
+            if not wire:
+                raise ValueError(f"{shell.name}: {pin} doesn't reach {array_pin} of bank {n}")
+            wire = joined(wire, pin_repeater)
+            if array_pin in timing[n].closing:
+                closing[pin] = max(closing.get(pin, 0), max(wire.values()) + timing[n].closing[array_pin])
+            for array_out, arc in timing[n].edges.get(array_pin, {}).items():
+                leaving = leaves.get((n, array_out))
+                if leaving is None:
+                    continue
+                total = joined(wire, arc, out[cell(n, array_out), leaving])
+                have = edges.setdefault(pin, {}).setdefault(leaving, {})
+                for key, ticks in total.items():
+                    have[key] = max(have.get(key, 0), ticks)
+    return edges, closing
+
+
+def _write_guards(feeds: dict[str, list[tuple[int, str]]]) -> dict[str, list[str]]:
+    """Each block pin carrying write enable -> those carrying write address and data to the same arrays."""
+    enabled = {pin: {n for n, array_pin in ends if array_pin == "we"} for pin, ends in feeds.items()}
+    return {pin: [other for other, ends in feeds.items()
+                  if any(n in banks and array_pin.startswith(("wa[", "wd[")) for n, array_pin in ends)]
+            for pin, banks in enabled.items() if banks}
+
+
 def _bank_block(args: tuple) -> Macro:
     """One bank of a stack, settled alone: the same bank in another stack or group is read from the cache."""
     depth, width, init, high_bits, high = args
-    return _cached(("bank", *args), lambda: (build_ram("bank", depth, width, 4, list(init), high_bits, high), None),
+    return _cached(("bank", *args), lambda: (build_ram("bank", depth, width, 4, list(init), high_bits, high, measure=False), None),
                    subdirectory="banks")[0]
 
 

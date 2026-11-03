@@ -9,8 +9,9 @@ SCRIPT = Path(__file__).parent.parent / "scripts" / "job.py"
 GB = 1 << 30
 
 
-def _env(tmp_path, free=64, swap=64):
-    return {**os.environ, "JOB_DIR": str(tmp_path), "JOB_FAKE_FREE": str(free * GB), "JOB_FAKE_SWAP": str(swap * GB)}
+def _env(tmp_path, free=64, swap=64, overcommit=0):
+    return {**os.environ, "JOB_DIR": str(tmp_path), "JOB_FAKE_FREE": str(free * GB), "JOB_FAKE_SWAP": str(swap * GB),
+            "JOB_OVERCOMMIT_GB": str(overcommit)}
 
 
 def _start(env, log, tag, seconds, *flags):
@@ -41,6 +42,15 @@ def test_jobs_that_dont_fit_take_turns(tmp_path):
     second = _start(env, log, "b", 0, "--mem", "6G", "--name", "b")
     assert [first.wait(30), second.wait(30)] == [0, 0]
     assert _events(log) == ["start a", "end a", "start b", "end b"]
+
+
+def test_overcommit_lets_jobs_swap(tmp_path):
+    env, log = _env(tmp_path, free=8, overcommit=6), tmp_path / "log"
+    first = _start(env, log, "a", 3, "--mem", "6G", "--name", "a")
+    time.sleep(1)
+    second = _start(env, log, "b", 0, "--mem", "6G", "--name", "b")
+    assert [first.wait(30), second.wait(30)] == [0, 0]
+    assert _events(log).index("start b") < _events(log).index("end a")
 
 
 def test_a_job_bigger_than_the_machine_still_runs_alone(tmp_path):
