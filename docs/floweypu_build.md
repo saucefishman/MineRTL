@@ -85,3 +85,6 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 
 - t1, PLOT TARGET MET (density's branch worktree-agent-a704db239106ebe52, one seed, quiet machine): `RAM_FOLD=1 RAM_GATE_CHANNEL=380 RAM_GATE_WIDTH=.6`, synth 7s + build 361s = 368s (wire 227, placement 60). 863x306x989, 15,230 nets, 0 failed, 0 verify, peak 6.2 GB. 1-reset PASS at half 1500 in redstone and redpiler, compare_gate_rtl 0. Installed to MCHPRS with half 1500; not tried in game. Those settings aren't merged here or the default yet.
 - Generated clock now from edge-aware static timing (hold.py clock_requirement) with RAM arcs measured by tick_sim. Small examples safe at generated half: mem 197 of 197 needed, bphist 599 (fails 594), ramtile 36 (28), regs 16 (14), counter 29 (22), cpu no RAM 353 (177, weak traffic). floweypu value not yet built or swept; scripts/clock_sweep.py measures one.
+
+- Faster `mchprs_headless` from MineRTL session, uncommitted on MCHPRS master, copy at `~/.cache/mcv-jobs/mchprs_headless` (use `MCHPRS_HEADLESS`): t1 PASS in both modes, about 140s total; hf3 redstone still FAIL.
+- s1 (new synthesis recipe, density's branch): 8+501s, 863x305x954, 12,621 nets, passes the bar after a repair pass on net_2 (1086 sinks). t1 is still faster.
