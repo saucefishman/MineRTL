@@ -93,4 +93,5 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 - Best footprint so far p100: 863x305x684, passes hi at 1500 and generated half, compare 0, live pins and hold leftovers (0, 0, 4) still to clear.
 - Queue bug fixed (bf28fe9): stale clients at the head stalled everyone. A client runs the code it started with.
 - Predictor proven in gates once: `floweypu_loop` with hold detours (hs/lp2 in scratchpad) prints `aaaanttnttnttcccccccxyxy`, halts edge 212, flip-flops 0, gate vs RTL 0, redpiler at half 2000 only. Real hold limits measured: DFF safe after 2 ticks, DFFE after 5; `[hold] still short` now prints slack and a real shortfall is a `hold` violation.
+- hi1 (density's defaults 6360805 plus hold, live pin and clock fixes): 863x305x585, synth 7 + build 385 = 392s, 0 failed, 0 verify, hold detours left no shortfall, generated half 1591. hi PASS 1 reset in redstone and redpiler at 1591, compare 0. Installed to MCHPRS at its generated half; not tried in game. loop1 (predictor program) pending.
 
