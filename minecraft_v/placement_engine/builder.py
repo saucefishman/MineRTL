@@ -1445,13 +1445,14 @@ def _bank_pin_leads(
     return list(dict.fromkeys(leads))
 
 
-_LONG_EDGE_SPLIT = int(os.environ.get("ROUTE_SPLIT", 0))  # edges longer than this get soft waypoints
+_LONG_EDGE_SPLIT = int(os.environ.get("ROUTE_SPLIT", 100))  # edges longer than this get soft waypoints; 0 off
 
 
 def _long_edge_leads(src: Pos, sinks: list[Pos], split: int) -> list[Pos]:
     """Soft waypoints along the long edges of the terminals' spanning tree, every split blocks.
 
-    A search has a fixed budget of positions, so a long edge fails where a chain of short ones doesn't.
+    On floweypu a search over 100 blocks failed 16% of the time, one under 50 about 1%. Waypoints are leads: one that
+    can't be reached is skipped, and the sink is searched for from the wire laid so far.
     """
     points = np.array([src, *sinks], dtype=np.int32)
     n = len(points)
@@ -2407,7 +2408,7 @@ def build_litematic_from_component_list(
         first_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 64))  # clock and big selects first, while there's room
         sorted_nets = sorted(work_nets, key=lambda net: (
             (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout
-            else (1, -_net_sort_key(net, pin_terminal) if os.environ.get("ROUTE_LONG_FIRST") else _net_sort_key(net, pin_terminal))))
+            else (1, _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     if route_passes <= 1:
         if route_workers > 1:
