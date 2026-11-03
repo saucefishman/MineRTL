@@ -400,6 +400,20 @@ def test_hold_finds_clock_inputs_through_a_gate():
     assert timing.roots == {"clk", "en"}
 
 
+def test_wire_on_a_live_pin_with_no_net_is_a_violation():
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.verify import find_live_pin_wire
+
+    region = Region(0, 0, 0, 8, 4, 4)
+    region[1, 1, 1] = BlockState("minecraft:redstone_wire")
+    region[2, 1, 1] = BlockState("minecraft:red_wool")  # bpmem, t1: a repeater strongly powers a wire's support
+    region[3, 1, 1] = BlockState("minecraft:glass")
+    pins = {"dust": (1, 1, 1), "wool": (2, 1, 1), "glass": (3, 1, 1), "clear": (4, 1, 1), "outside": (9, 1, 1)}
+    found = find_live_pin_wire(region, pins)
+    assert [(v.kind, sorted(v.nets), v.pos) for v in found] == [("live_pin", ["dust"], (1, 1, 1)), ("live_pin", ["wool"], (2, 1, 1))]
+
+
 def test_hold_only_converts_dust_on_a_straight_run():
     from litemapy import BlockState, Region
 

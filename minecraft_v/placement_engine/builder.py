@@ -52,7 +52,7 @@ from .template import (
 from .hold import fix_hold, flat_terminals, repeater_delay
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import Either, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -2428,6 +2428,13 @@ def build_litematic_from_component_list(
             log(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
+    unused = _unused_output_terminals(placed, _build_terminal_map(work_nets, pin_terminal), pin_terminal)
+    live_pins = find_live_pin_wire(workspace, {name: next(iter(cells)) for name, cells in unused.items()})
+    for violation in live_pins:
+        log(f"[verify] live_pin {sorted(violation.nets)} has wire on its cell {violation.pos}")
+    signal_violations = signal_violations + live_pins
+    if live_pins and not allow_routing_failures:
+        raise RuntimeError(f"{len(live_pins)} pin(s) with no net drive wire, first: {live_pins[0]}")
     if signal_violations and not macros and not allow_routing_failures:
         raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
 

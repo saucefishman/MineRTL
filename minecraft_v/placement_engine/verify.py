@@ -49,11 +49,23 @@ _STRONG, _WEAK = "S", "W"
 _MAX_SIGNAL = 15
 
 
+_LIVE_PIN_SAFE = frozenset({"minecraft:air", "minecraft:cave_air", "minecraft:glass"})
+
+
 @dataclass(frozen=True)
 class Violation:
-    kind: str                 # "open" | "short" | "weak" | "latch" | "inverted" | "unsupported"
+    kind: str                 # "open" | "short" | "weak" | "latch" | "inverted" | "unsupported" | "live_pin"
     nets: frozenset[str]
     pos: Pos
+
+
+def find_live_pin_wire(region, pins: dict[str, Pos]) -> list[Violation]:
+    """Anything but air or glass on the cell of a pin that drives it but has no net (a block's unread output, a top-level
+    input nothing uses). The pin's repeater powers what is there, and no net's walk starts from it, so verify_signals
+    can't see the short. Glass and air don't conduct."""
+    size = (abs(region.width), abs(region.height), abs(region.length))
+    return [Violation("live_pin", frozenset({name}), pos) for name, pos in pins.items()
+            if all(0 <= c < n for c, n in zip(pos, size)) and region[pos].id not in _LIVE_PIN_SAFE]
 
 
 @lru_cache(maxsize=None)
