@@ -34,7 +34,7 @@ _SWAP_LOW = 1 * _GB  # less room than this under the cap: nothing new starts, an
 _SWAP_OK = 2 * _GB  # paused jobs carry on once this much is free
 _PEAK_MARGIN = 1.1
 _MAX_BACKFILL_WAIT = 600  # seconds the head of the queue waits before smaller jobs stop passing it
-_VERSION = 2
+_VERSION = 3
 _AGING = 60.0  # seconds of waiting worth one level of priority
 _POLL = 2.0
 _SAMPLE = 5.0
@@ -143,7 +143,7 @@ def may_start(key: str, state: dict, free: int, swap: int, cores: int, now: floa
         return False
     if me is not head and head["exclusive"]:
         return False
-    budget = free + _OVERCOMMIT - _RESERVE - sum(max(0, _need(j, peaks) - j.get("rss", 0)) for j in running)
+    budget = free + _OVERCOMMIT - _RESERVE - sum(max(0, _need(j, peaks) - j.get("high", 0)) for j in running)
     if sum(j["cores"] for j in running) + me["cores"] > cores:
         return False
     # Anyone ahead who fits goes first, so don't take their room. Nor that of anyone who has waited long, fitting or not:
@@ -220,6 +220,7 @@ def run(args: argparse.Namespace) -> int:
         with _state() as state:
             mine = state["jobs"][key]
             mine["rss"] = rss
+            mine["high"] = peak  # idle pages get compressed, so what it holds now can read far below what it needs
             if not paused and swap < _SWAP_LOW and _pause_choice(state) == key:
                 paused = True
                 mine["state"] = "paused"
