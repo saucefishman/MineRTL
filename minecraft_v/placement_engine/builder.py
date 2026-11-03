@@ -52,7 +52,7 @@ from .template import (
 from .hold import fix_hold, flat_terminals, repeater_delay
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
-from .verify import Either, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -568,6 +568,22 @@ def _build_terminal_map(
             t.add(_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name))
         all_terminals[net.net_id] = t
     return all_terminals
+
+
+def _unused_output_terminals(
+        placed: list,
+        all_terminals: dict[str, set[tuple[int, int, int]]],
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+) -> dict[str, set[tuple[int, int, int]]]:
+    """A block's output or a top-level input with no net still drives its pin cell, and wire there would be shorted to it,
+    unseen by verify as it belongs to no net. Keep every net off these cells, as if each were another net's terminal.
+    Never routed."""
+    taken = {cell for cells in all_terminals.values() for cell in cells}
+    return {f"unused:{p.component.id}:{pin.name}": {pin_terminal[p.component.id, pin.name]}
+            for p in placed if p.component.type in (ComponentType.CUSTOM, ComponentType.INPUT_PIN)
+            for pin in p.component.pins
+            if pin.direction == Direction.OUT and (p.component.id, pin.name) in pin_terminal
+            and pin_terminal[p.component.id, pin.name] not in taken}
 
 
 def _compute_net_protected(
@@ -2361,6 +2377,7 @@ def build_litematic_from_component_list(
             envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
         )
         all_terminals = _build_terminal_map(work_nets, pin_terminal)
+        all_terminals.update(_unused_output_terminals(placed, all_terminals, pin_terminal))
 
     save_artifact("component_layout.json", [
         {
@@ -2423,6 +2440,7 @@ def build_litematic_from_component_list(
 
     failed_nets = {nid for nid, _ in routing_failures}
     flat_period = 0
+    clock_requirement: list = []
     if capture is None:
         flat = flat_comp or comp
         inner = {(cell, pin): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
@@ -2434,7 +2452,7 @@ def build_litematic_from_component_list(
         save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
         # Placement splits multi-bit IO into one component per bit, named after the bit.
         flat_period = fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
-                                                 inner), failed_nets, probe_components(probes) if probes else frozenset(), opaque)
+                                                 inner), failed_nets, probe_components(probes) if probes else frozenset(), opaque, macros, clock_requirement)
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)
@@ -2448,6 +2466,13 @@ def build_litematic_from_component_list(
             log(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
+    unused = _unused_output_terminals(placed, _build_terminal_map(work_nets, pin_terminal), pin_terminal)
+    live_pins = find_live_pin_wire(workspace, {name: next(iter(cells)) for name, cells in unused.items()})
+    for violation in live_pins:
+        log(f"[verify] live_pin {sorted(violation.nets)} has wire on its cell {violation.pos}")
+    signal_violations = signal_violations + live_pins
+    if live_pins and not allow_routing_failures:
+        raise RuntimeError(f"{len(live_pins)} pin(s) with no net drive wire, first: {live_pins[0]}")
     if signal_violations and not macros and not allow_routing_failures:
         raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
 
@@ -2499,6 +2524,8 @@ def build_litematic_from_component_list(
     with phase("[timing] critical path"):
         critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
                                                      probe_components(probes) if probes else frozenset(), flat_period)
+    if clock_requirement and not clock_requirement[0].unclocked:  # static timing edge by edge, where it covers every flip-flop
+        critical_path_ticks = 2 * clock_requirement[0].half_period
     log(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
@@ -2533,7 +2560,7 @@ def build_litematic_from_component_list(
         lever = (cell[0] + nx, cell[1] + 1, cell[2] + nz)
         if workspace[lever].id != "minecraft:lever":
             raise RuntimeError(f"no room for the server clock lever of '{clock_pin}' at {lever}")
-        half_period = server_clock or max(1, _REPEATER_MAX_DELAY * ceil(critical_path_ticks / _REPEATER_MAX_DELAY / 2))
+        half_period = server_clock or max(1, ceil(critical_path_ticks / 2))
         clock_entry = {"pin": clock_pin, "pos": [c - lo for c, lo in zip(lever, low)], "half_period_ticks": half_period}
         log(f"[clock] server clock on '{clock_pin}': toggles every {half_period} ticks")
 
