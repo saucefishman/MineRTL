@@ -28,7 +28,7 @@ _GB = 1 << 30
 _DEFAULT_MEM = 2 * _GB
 _RESERVE = 1 * _GB  # kept free for everything not in the queue
 # Most jobs aren't urgent, so running slowly on swap beats waiting. --exclusive is for the ones whose time matters.
-_OVERCOMMIT = int(float(os.environ.get("JOB_OVERCOMMIT_GB", 6)) * _GB)
+_OVERCOMMIT = int(float(os.environ.get("JOB_OVERCOMMIT_GB", 10)) * _GB)
 _SWAP_CAP = 16 * _GB  # the system grows swap as needed, so the limit is on how much is in use
 _SWAP_LOW = 1 * _GB  # less room than this under the cap: nothing new starts, and the lowest priority job pauses
 _SWAP_OK = 2 * _GB  # paused jobs carry on once this much is free
