@@ -1517,6 +1517,48 @@ def _bank_pin_leads(
     return list(dict.fromkeys(leads))
 
 
+_long_edge_split = [int(os.environ.get("ROUTE_SPLIT", 0))]  # edges longer than this get soft waypoints; 0 off
+_SPLIT_MIN_GATES = 10_000
+
+
+def set_long_edge_split(gates: int) -> None:
+    """Split long edges every 100 blocks on designs of _SPLIT_MIN_GATES or more. floweypu routes 5% faster; examples/cpu
+    routes 19% slower and bpmem a little slower, so small designs keep it off. ROUTE_SPLIT overrides it."""
+    _long_edge_split[0] = int(os.environ.get("ROUTE_SPLIT", 100 if gates >= _SPLIT_MIN_GATES else 0))
+
+
+def _long_edge_leads(src: Pos, sinks: list[Pos], split: int) -> list[Pos]:
+    """Soft waypoints along the long edges of the terminals' spanning tree, every split blocks.
+
+    On floweypu a search over 100 blocks failed 16% of the time, one under 50 about 1%. Waypoints are leads: one that
+    can't be reached is skipped, and the sink is searched for from the wire laid so far.
+    """
+    points = np.array([src, *sinks], dtype=np.int32)
+    n = len(points)
+    if n < 2:
+        return []
+    best = np.abs(points - points[0]).sum(axis=1)
+    parent = np.zeros(n, dtype=np.int32)
+    done = np.zeros(n, dtype=bool)
+    done[0] = True
+    leads = []
+    for _ in range(n - 1):
+        i = int(np.argmin(np.where(done, 1 << 30, best)))
+        done[i] = True
+        length = int(best[i])
+        if length > split:
+            a, b = points[parent[i]], points[i]
+            parts = length // split + 1
+            for k in range(1, parts):
+                c = a + (b - a) * k / parts
+                leads.append((int(c[0]), int(c[1]), int(c[2])))
+        d = np.abs(points - points[i]).sum(axis=1)
+        closer = d < best
+        best[closer] = d[closer]
+        parent[closer] = i
+    return leads
+
+
 def _wall_vias(
         net: NetConnection,
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
@@ -1596,6 +1638,9 @@ def _route_all_nets(
             )
             for i, net in enumerate(sorted_nets, 1)
         ]
+        if split := _long_edge_split[0]:
+            for job in jobs:
+                job.lead = list(dict.fromkeys([*job.lead, *_long_edge_leads(job.src, job.sinks, split)]))
 
     def snapshot(i: int, job: _RouteJob) -> None:
         if snapshot_dir is not None and i % 10 == 0:
@@ -2490,7 +2535,8 @@ def build_litematic_from_component_list(
     with phase("[wire] ordering nets"):
         first_fanout = _first_fanout[0]  # clock and big selects first, while there's room
         sorted_nets = sorted(work_nets, key=lambda net: (
-            (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout else (1, _net_sort_key(net, pin_terminal))))
+            (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout
+            else (1, _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     kept_router: list = []
     if route_passes <= 1:

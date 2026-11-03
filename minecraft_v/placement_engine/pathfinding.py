@@ -854,6 +854,7 @@ def _find_wire_path(
             pos_ids, pos_list, h_list, move_cache, pending_sinks,
             getattr(block_index, "grid", None), _ASTAR_GRID == "check")
 
+    search_started = time.perf_counter()
     reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world, stagnation=stagnation, budget=budget)
     if reached is None and early_stop_reason is None and h_radius_pruned:
         # The open list ran dry only because the h-radius cull discarded detours (typically a
@@ -861,6 +862,8 @@ def _find_wire_path(
         group_best_h[:] = initial_group_best_h
         reached, best_node, _, early_stop_reason, came_from = _run_search(
             search_args, net_id, make_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
+    if _SEARCH_LOG:
+        _log_search(net_id, best_seed, goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -1127,6 +1130,16 @@ def _keepout_spec(keepout) -> tuple | None:
         return ("keepout", keepout._count, keepout._own, keepout._excluded, keepout._extra,
                 keepout._halo, keepout._own_halo)
     return None
+
+
+_SEARCH_LOG = os.environ.get("ROUTE_SEARCH_LOG")
+
+
+def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
+    last = _astar.LAST if _astar is not None else {}
+    with open(_SEARCH_LOG, "a") as f:
+        f.write(f"{net_id},{seed[0]},{seed[1]},{seed[2]},{goal[0]},{goal[1]},{goal[2]},{int(ok)},"
+                f"{(reason or '').split(' ')[0]},{last.get('exp', 0)},{last.get('pos', 0)},{seconds:.4f}\n")
 
 
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,

@@ -588,3 +588,23 @@ def test_no_repeater_at_a_sinks_pin_cell():
     _place_repeaters_for_net(region, {p: "n" for p in first + second}, "n", [first, second])
     assert region[sink].id == "minecraft:redstone_wire"
     assert any(region[p].id == "minecraft:repeater" for p in second)
+
+
+def test_long_edge_leads_split_only_long_tree_edges():
+    # Two sinks near the source and one far off: only the far edge of the spanning tree is split.
+    leads = builder._long_edge_leads((0, 10, 0), [(5, 10, 0), (0, 10, 6), (305, 10, 0)], 100)
+    assert leads == [(80, 10, 0), (155, 10, 0), (230, 10, 0)]
+    assert builder._long_edge_leads((0, 10, 0), [(90, 10, 0)], 100) == []
+
+
+def test_long_edge_split_only_on_large_designs(monkeypatch):
+    # examples/cpu (4509 gates) and bpmem (345) route slower split, floweypu (12448) faster.
+    monkeypatch.delenv("ROUTE_SPLIT", raising=False)
+    monkeypatch.setattr(builder, "_long_edge_split", [0])
+    builder.set_long_edge_split(4509)
+    assert builder._long_edge_split[0] == 0
+    builder.set_long_edge_split(12448)
+    assert builder._long_edge_split[0] == 100
+    monkeypatch.setenv("ROUTE_SPLIT", "0")
+    builder.set_long_edge_split(12448)
+    assert builder._long_edge_split[0] == 0
