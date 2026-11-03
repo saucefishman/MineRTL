@@ -71,8 +71,6 @@ Rule: if the machine is strained (swap filling, stalled processes), write ideas 
 - Longer test program exercising branches and the predictor; `hi` is too short to clear it. Wait for preload-fault.
 - Footprint: fold + `RAM_STACK_BANKS=12` with gate width about .55 if fold alone can't route under 1024x1024.
 - Footprint: two RAM tiers with lanes in two bundles (estimate 432x328x413, not prototyped).
-- Clock: false-path handling, once clock-timing reports how much pessimism they cause.
-- Clock: uneven duty cycle. bphist passes at high 200 / low 613 (period 813 vs 1226 symmetric, 1.5x faster) but fails at high 100: an unmodelled minimum high-phase pulse width between 100 and 200 ticks. Model it, then let the server clock use separate high and low phases.
 - Routing: coarse global routing corridors for long edges, tag_rf and select lanes. Failed searches track edge length: under 100 blocks about 0.2% fail, 100-300 blocks 12-16%, 300+ almost all (h1). They don't cluster at RAM pins, so pin-access stubs are not worth trying.
 - Congestion: RUDY can't rank settings or locate failures (`scripts/predict_congestion.py` on worktree-agent-ae2dffb15a5e5ae50, not merged). Unrouted guesses for 1024x1024: fold with width .5 channel 250 (863x305x905), or width .6 channel 250 density .20 (863x306x839).
 - Routing: failed-set PathFinder for hard nets; per-module ABC; stage hierarchy.
@@ -95,4 +93,5 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 - Queue bug fixed (bf28fe9): stale clients at the head stalled everyone. A client runs the code it started with.
 - Predictor proven in gates once: `floweypu_loop` with hold detours (hs/lp2 in scratchpad) prints `aaaanttnttnttcccccccxyxy`, halts edge 212, flip-flops 0, gate vs RTL 0, redpiler at half 2000 only. Real hold limits measured: DFF safe after 2 ticks, DFFE after 5; `[hold] still short` now prints slack and a real shortfall is a `hold` violation.
 - hi1 (density's defaults 6360805 plus hold, live pin and clock fixes): 863x305x585, synth 7 + build 385 = 392s, 0 failed, 0 verify, hold detours left no shortfall, generated half 1591. hi PASS 1 reset in redstone and redpiler at 1591, compare 0. Installed to MCHPRS at its generated half; not tried in game. loop1 (predictor program) pending.
+- User (2026-11-02): faster clock periods are not a goal; redpiler is fast enough. Generated clock only needs to be safe.
 
