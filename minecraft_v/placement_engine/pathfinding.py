@@ -135,6 +135,19 @@ def _can_be_support(
     return _is_air(workspace[pos[0], pos[1], pos[2]])
 
 
+_KINDS: dict[str, int] = {}  # block id -> _BlockIndex.kinds bits
+
+
+def _kind_of(block_id: str) -> int:
+    """_BlockIndex.kinds' bits for a block id: every test it makes reads the id alone."""
+    kind = _KINDS.get(block_id)
+    if kind is None:
+        block = BlockState(block_id)
+        kind = _KINDS[block_id] = ((0 if _is_air(block) else 1) | (2 if _is_redstone_wire(block) else 0)
+                                   | (4 if _is_torch(block) else 0) | (8 if _is_repeater(block) else 0))
+    return kind
+
+
 class _BlockIndex:
     """Sparse sets of signal-relevant cells, built from the Region's raw block array.
 
@@ -191,15 +204,17 @@ class _BlockIndex:
 
     def update(self, pos: tuple[int, int, int], old: BlockState, new: BlockState) -> None:
         """Reflect one block write (old → new); same classification as __init__."""
+        was, now = _kind_of(old.id), _kind_of(new.id)
+        if was == now:
+            return
         grid = self.grid
-        for i, (cells, test) in enumerate(((self.non_air, lambda b: not _is_air(b)), (self.wire, _is_redstone_wire),
-                                           (self.torch, _is_torch), (self.repeater, _is_repeater))):
-            was, now = test(old), test(new)
-            if was and not now:
+        for i, cells in enumerate((self.non_air, self.wire, self.torch, self.repeater)):
+            bit = 1 << i
+            if was & bit and not now & bit:
                 cells.discard(pos)
                 if grid is not None:
                     grid.put(pos, self.grid_bits[i], False)
-            elif now and not was:
+            elif now & bit and not was & bit:
                 cells.add(pos)
                 if grid is not None:
                     grid.put(pos, self.grid_bits[i], True)
@@ -219,7 +234,10 @@ class IndexedWorkspace:
         self._write = palette_writer(region)
 
     def __getitem__(self, pos) -> BlockState:
-        return self.region[pos]
+        # Region.__getitem__ without its coordinate conversion, a no-op for a positive-size region. Saving a schematic
+        # replaces the palette, so it's looked up each time.
+        region = self.region
+        return region._Region__palette[region._Region__blocks[pos]]
 
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
@@ -804,10 +822,13 @@ def _find_wire_path(
     # Fan-out tree routing: existing own-net wire cells are valid branch seeds
     if tree_seeds:
         seed_set = set(seeds)
+        min_x, min_y, min_z, max_x, max_y, max_z = bounds
         for ts in tree_seeds:
-            if ts not in seed_set and _in_bounds(ts, bounds) and ts not in solid:
-                seeds.append(ts)
-                seed_set.add(ts)
+            if ts not in seed_set and ts not in solid:
+                x, y, z = ts
+                if min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z:  # _in_bounds
+                    seeds.append(ts)
+                    seed_set.add(ts)
     if not seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
@@ -821,7 +842,17 @@ def _find_wire_path(
 
     # A* search: seeds in order, with their group (0 = start seeds, then one per tree seed).
     seed_depths = seed_depths or {}
-    seed_nodes = [_pid(seed) << _NODE_SHIFT
+    # _pid of each seed, inline: hundreds per search.
+    seed_ids = []
+    for seed in seeds:
+        i = pos_ids.get(seed)
+        if i is None:
+            i = pos_ids[seed] = len(pos_list)
+            pos_list.append(seed)
+            h_list.append(abs(seed[0] - gx) * x_h_factor + abs(seed[1] - gy) * 4 + abs(seed[2] - gz))  # heuristic
+            move_cache.append(None)
+        seed_ids.append(i)
+    seed_nodes = [seed_ids[i] << _NODE_SHIFT
                   | min(seed_depths.get(seed, 0) if i >= n_start_seeds else 0, _SIG_DEPTH_MASK) << _SIG_SHIFT
                   for i, seed in enumerate(seeds)]
     seed_groups = [0 if i < n_start_seeds else 1 + i - n_start_seeds for i in range(len(seeds))]
@@ -833,9 +864,9 @@ def _find_wire_path(
     def node_str(node: int) -> str:
         return str((pos_list[node >> _NODE_SHIFT], node & _SNAP_MASK))
 
-    best_seed = min(seeds, key=heuristic)
-    best_node = _pid(best_seed) << _NODE_SHIFT
-    best_h: int = heuristic(best_seed)
+    best = min(range(len(seeds)), key=lambda i: h_list[seed_ids[i]])  # the first seed of least heuristic
+    best_node = seed_ids[best] << _NODE_SHIFT
+    best_h: int = h_list[seed_ids[best]]
     group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
     initial_group_best_h = list(group_best_h)
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
