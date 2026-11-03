@@ -54,7 +54,7 @@ _LIVE_PIN_SAFE = frozenset({"minecraft:air", "minecraft:cave_air", "minecraft:gl
 
 @dataclass(frozen=True)
 class Violation:
-    kind: str                 # "open" | "short" | "weak" | "latch" | "inverted" | "unsupported" | "live_pin"
+    kind: str                 # "open" | "short" | "weak" | "latch" | "inverted" | "unsupported" | "live_pin" | "hold"
     nets: frozenset[str]
     pos: Pos
 

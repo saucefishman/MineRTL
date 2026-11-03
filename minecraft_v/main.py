@@ -10,7 +10,7 @@ from minecraft_v.build_utils import save_build_artifacts
 from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
-from minecraft_v.placement_engine.builder import build_macro
+from minecraft_v.placement_engine.builder import build_macro, set_first_fanout
 from minecraft_v.placement_engine.macro import extract_macros
 from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block, group_block, set_block_cache, stack_spec
 from minecraft_v.placement_engine.probes import DEBUG_CELLS, extract_probes
@@ -347,6 +347,7 @@ def main():
     if rams:
         macros = rams
     pathfinding.set_foot_repeaters(not rams)
+    set_first_fanout(64 if rams else 0)
     if args.macros and args.placer == "poisson" and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
