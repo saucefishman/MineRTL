@@ -49,7 +49,7 @@ from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
     _default_io_side, _paste_template, _load_template_region,
 )
-from .hold import fix_hold, flat_terminals, repeater_delay
+from .hold import _HOLD_MARGIN, HoldShort, fix_hold, flat_terminals, hold_violations, repeater_delay
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
 from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
@@ -733,6 +733,8 @@ _BLOCKER_MAX = 4
 _RIP_ROUNDS = 3  # per job: rip-and-retry rounds, each for a sink that hasn't had one yet
 _ESCALATE_RADIUS = 6  # a job out of retries gets this wider ring ripped, once, even nets ripped before
 _ESCALATE_MAX = 8
+_DETOUR_REACH = 8  # blocks to a detour's far end, on top of one per tick short
+_DETOUR_ROUNDS = 4  # of laying short paths again and padding them
 _REPAIR_ROUNDS = 3  # re-routes of nets verify still finds fault with
 _NEAREST_SEEDS = 256  # a sink search starts from this many of the net's wire cells, nearest first
 
@@ -756,6 +758,8 @@ class _RouteJob:
     lead: list[Pos] = field(default_factory=list)  # short of a pin, for a straight last stretch
     avoid: frozenset[Pos] = frozenset()  # cells verify found a fault at, kept out of re-routes
     first: tuple[Pos, ...] = ()    # sinks verify found a fault at, routed first in re-routes
+    detour: dict[Pos, Pos] = field(default_factory=dict)  # sink -> cell its wire has to pass, for room to pad hold
+    replay: dict[Pos, list[Pos]] = field(default_factory=dict)  # target -> a path to lay again as it was, in that order
 
 
 @dataclass
@@ -776,6 +780,15 @@ _NET_CHECKS = os.environ.get("MINECRAFT_V_NET_CHECKS", "1")
 _FAULT_LATCH, _FAULT_INVERTED, _FAULT_GATE = 1, 2, 4  # _astar.NetChecks.faults
 _LOG_SLOW_SEARCH_SECONDS = 5.0
 _LOG_SLOW_JOB_SECONDS = 10.0
+
+
+def _apart(a: Pos, b: Pos) -> int:
+    return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
+
+
+def _touching(p: Pos) -> list[Pos]:
+    """A cell and those around it that wire there could link to, slopes included."""
+    return [(p[0] + dx, p[1] + dy, p[2] + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
 
 
 class _TreeCells:
@@ -964,6 +977,11 @@ class _GreedyRouter:
         targets = [*vias, *sinks]
         if self.resume and not kept:
             targets = self.resume.targets_in_saved_order(job.key, targets)
+        if job.replay:
+            targets = list(job.replay)
+        elif job.detour:  # last, so that no other sink's wire branches off a detour or joins it
+            targets = [*vias, *(s for s in sinks if s not in job.detour),
+                       *(cell for sink, way in job.detour.items() for cell in (way, sink))]
         all_seeds: list[Pos] = net_seeds + [pos for path in paths for pos in path]
         tree = _TreeCells()
         tree.add(all_seeds)
@@ -972,7 +990,8 @@ class _GreedyRouter:
             if kept and dst_index < kept.next_target:
                 continue
             status(f"{job.key} target {dst_index + 1}/{len(targets)}")
-            pending = frozenset(job.sinks) & frozenset(sinks[max(0, dst_index - len(vias)):])
+            pending = frozenset(job.sinks) & frozenset(targets[dst_index:] if job.detour or job.replay
+                                                       else sinks[max(0, dst_index - len(vias)):])
             tree_seeds = all_seeds
             start = job.src
             far_via = next((v for v in reached_vias if (dst[2] - v[2]) * (job.src[2] - v[2]) < 0), None)
@@ -983,6 +1002,14 @@ class _GreedyRouter:
                 near = [c for c in tree_seeds if (c[2] - far_via[2]) * (job.src[2] - far_via[2]) >= 0 and c != far_via]
                 trunk = frozenset(near)
                 tree_seeds = [far_via, *(c for c in tree_seeds if c not in trunk and c != far_via)]
+            way = job.detour.get(dst)
+            if way is not None:  # only from the far end, and clear of the rest of the net, which would be a way round
+                start = way
+                trunk = frozenset(n for c in tree_seeds if c != way for n in _touching(c) if _apart(n, way) > 1 and n != dst)
+                tree_seeds = [way]
+            elif job.detour and not job.replay and dst in job.detour.values():  # on the way out, not past its sink
+                sink = next(s for s, cell in job.detour.items() if cell == dst)
+                trunk = frozenset(n for n in _touching(sink) if n != job.src)
             seed_depths = depths
             self.failed_goal[job.key] = dst  # cleared when the sink is laid
             blocked: set[Pos] = set(job_blocked - {job.src, dst})
@@ -991,7 +1018,7 @@ class _GreedyRouter:
             while True:
                 mark = len(rec.journals[job.key])
                 search_started = time.monotonic()
-                saved = self.resume.path_for(job.key, dst) if self.resume else None
+                saved = job.replay.get(dst) or (self.resume.path_for(job.key, dst) if self.resume else None)
                 try:
                     try:
                         def search(stagnation: int = -1) -> list[Pos]:
@@ -1037,7 +1064,7 @@ class _GreedyRouter:
                             try:
                                 path = search_tight_first()
                             except ValueError:
-                                if start == job.src:
+                                if start == job.src or way is not None:
                                     raise
                                 start, trunk = job.src, frozenset()  # past the via there's no way on: from the whole tree
                                 tree_seeds = all_seeds
@@ -1050,6 +1077,8 @@ class _GreedyRouter:
                     beside_start = saved is None and start != job.src and path[0] != start and path[0] not in tree_seeds
                     if beside_start and path[0][0] == start[0] and path[0][2] == start[2]:
                         # Began right above or below the via: no move links that, so search from the tree instead.
+                        if way is not None:
+                            raise ValueError(f"Net '{job.net_id}': detour can't start from {way}")
                         start, trunk = job.src, frozenset()
                         tree_seeds = all_seeds
                         continue
@@ -1157,7 +1186,7 @@ class _GreedyRouter:
         """Whether a waypoint is free: air with air around it, so no other net's wire is near, and outside other
         nets' terminal keepouts, which a search can never enter."""
         x, y, z = via
-        if not (0 <= x < self.region.width and 0 <= y < self.region.height - 2 and 0 <= z < self.region.length):
+        if not (1 <= x < self.region.width - 1 and 1 <= y < self.region.height - 2 and 1 <= z < self.region.length - 1):
             return False
         if via in job.protected:
             return False
@@ -1175,6 +1204,40 @@ class _GreedyRouter:
                     if self._via_open(cell, job):
                         return cell
         return None
+
+    def detour(self, job: _RouteJob, sink: Pos, reach: int) -> bool:
+        """Lay a sink's wire again by way of a free cell about reach away, so there's wire to pad. False, with the net as
+        it was, if no direction works. The net's other sinks may move: delay only hurts the clock period."""
+        laid = self.laid.get(job.key)
+        if laid is None or sink not in job.sinks:
+            return False
+        as_laid = dict(zip(laid.targets, laid.paths))
+        before = dict(job.detour)
+        job.detour.pop(sink, None)
+        for dx, dz in _HORIZ_DIRS:
+            way = self._open_via((sink[0] + dx * reach, sink[1], sink[2] + dz * reach), job)
+            if way is None:
+                continue
+            self.rip(job.key)
+            job.detour[sink] = way
+            try:
+                with self.rec.recording(job.key):
+                    self.route_job_retrying(job)
+                return True
+            except ValueError as e:
+                debug(f"[hold] {job.key}: no detour by {way}: {e}")
+                self.rip(job.key)
+                job.detour.pop(sink)
+        job.detour = before
+        if job.key in self.paths:  # no direction got as far as ripping it
+            return False
+        job.replay = as_laid
+        try:
+            with self.rec.recording(job.key):
+                self.route_job(job, frozenset())
+        finally:
+            job.replay = {}
+        return False
 
     def route_job_retrying(self, job: _RouteJob) -> None:
         near_terminal = {(x + dx, y + dy, z + dz) for x, y, z in job.terminals
@@ -1489,10 +1552,12 @@ def _route_all_nets(
         terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None,
         placed: list[_Placed] = (),
         resume: ResumeStore | None = None,
+        keep_router: list | None = None,
 ) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]], dict[str, tuple[str, list[list[Pos]]]]]:
     """Greedy routing of every net (_GreedyRouter); returns (failures, inverted cells, paths).
 
     fail_fast: raise on the first net that fails instead of collecting failures.
+    keep_router: gets (router, jobs by key), for hold fixing to re-route.
     """
     inverted_cells = JournaledSet(rec, name="inverted")
     keepouts = _KeepoutMap(all_terminals, terminal_approach)
@@ -1542,6 +1607,8 @@ def _route_all_nets(
                          p.origin[2] + p.component.footprint.depth)) for p in macros]
     failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
                                     HiddenBoxes(frozenset(_component_interior(placed)), boxes), deadline)
+    if keep_router is not None:
+        keep_router.append((router, {job.key: job for job in jobs}))
     return failures, inverted_cells, router.paths
 
 
@@ -1581,6 +1648,51 @@ def _repair_faulty_nets(
         failures += new
         failed |= {key for key, _ in new}
     return failures
+
+
+def _detour_hold_shorts(router: _GreedyRouter, jobs: dict[str, _RouteJob], shorts: list[HoldShort], attempt: int) -> int:
+    """Give each short pin wire to pad: nets laid too short or too steep have no room for repeaters. Picks the net on its
+    path with the fewest sinks, as a whole net is laid again. Returns how many moved."""
+    router.resume = None  # saved paths are the ones that were too short
+    router.rips_blockers = False
+    moved = 0
+    done: set[str] = set()
+    for short in shorts:
+        reach = (_DETOUR_REACH + _HOLD_MARGIN - short.margin) * (attempt + 1)
+        options = [(net_id, sink) for net_id, sink in short.path if net_id in jobs]
+        if any(net_id in done for net_id, _ in options):
+            continue  # its wire just changed: see what that did first
+        for net_id, sink in sorted(options, key=lambda e: len(jobs[e[0]].sinks)):
+            if router.detour(jobs[net_id], sink, reach):
+                log(f"[hold] {short.pin}: {net_id} goes by {jobs[net_id].detour[sink]}, margin was {short.margin}")
+                done.add(net_id)
+                moved += 1
+                break
+    return moved
+
+
+def _hold_with_detours(workspace: Region, flat: ComponentList, ends: dict, failed: set[str], probed: Collection[str],
+                       opaque: Collection, macros: dict | None, requirement: list, shorts: list[HoldShort],
+                       routed: tuple[_GreedyRouter, dict[str, _RouteJob]] | None) -> int:
+    """fix_hold, and while it runs out of wire on a path, that path laid again longer and padded again. Whatever it still
+    can't fix stays in shorts. routed: the router, jobs by key; without it there's only padding."""
+    period = 0
+    for attempt in range(_DETOUR_ROUNDS + 1):
+        shorts.clear()
+        requirement.clear()
+        edits: list = []
+        period = fix_hold(workspace, flat, ends, failed, probed, opaque, macros, requirement, shorts, edits)
+        if not shorts or routed is None or attempt == _DETOUR_ROUNDS:
+            break
+        # Padding is outside the router's books, and a net laid again starts clean: undo it all, and pad again.
+        for pos, block in reversed(edits):
+            workspace[pos] = block
+        if not _detour_hold_shorts(*routed, shorts, attempt):
+            shorts.clear()
+            requirement.clear()
+            period = fix_hold(workspace, flat, ends, failed, probed, opaque, macros, requirement, shorts)
+            break
+    return period
 
 
 def _commit_route(
@@ -2371,6 +2483,7 @@ def build_litematic_from_component_list(
         sorted_nets = sorted(work_nets, key=lambda net: (
             (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout else (1, _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
+    kept_router: list = []
     if route_passes <= 1:
         if route_workers > 1:
             log("[wire] --route-workers ignored: needs --route-passes > 1")
@@ -2384,6 +2497,7 @@ def build_litematic_from_component_list(
             terminal_approach=terminal_approach,
             placed=placed,
             resume=resume,
+            keep_router=kept_router,
         )
     else:
         net_paths = {}  # negotiated mode keeps no ordered paths
@@ -2403,6 +2517,7 @@ def build_litematic_from_component_list(
     failed_nets = {nid for nid, _ in routing_failures}
     flat_period = 0
     clock_requirement: list = []
+    hold_shorts: list[HoldShort] = []
     if capture is None:
         flat = flat_comp or comp
         inner = {(cell, pin): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
@@ -2413,8 +2528,10 @@ def build_litematic_from_component_list(
         # Macro flip-flops aren't in the layout, and settling has to cut their clocks too.
         save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
         # Placement splits multi-bit IO into one component per bit, named after the bit.
-        flat_period = fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
-                                                 inner), failed_nets, probe_components(probes) if probes else frozenset(), opaque, macros, clock_requirement)
+        flat_ends = flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))), inner)
+        probed = probe_components(probes) if probes else frozenset()
+        flat_period = _hold_with_detours(workspace, flat, flat_ends, failed_nets, probed, opaque, macros, clock_requirement,
+                                         hold_shorts, kept_router[0] if kept_router else None)
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)
@@ -2435,6 +2552,12 @@ def build_litematic_from_component_list(
     signal_violations = signal_violations + live_pins
     if live_pins and not allow_routing_failures:
         raise RuntimeError(f"{len(live_pins)} pin(s) with no net drive wire, first: {live_pins[0]}")
+    short_pins = hold_violations(hold_shorts)
+    for violation in short_pins:
+        log(f"[verify] hold {sorted(violation.nets)} can take new data on its own edge, at {violation.pos}")
+    signal_violations = signal_violations + short_pins
+    if short_pins and not allow_routing_failures:
+        raise RuntimeError(f"{len(short_pins)} flip-flop pin(s) short of hold time, first: {short_pins[0]}")
     if signal_violations and not macros and not allow_routing_failures:
         raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
 
