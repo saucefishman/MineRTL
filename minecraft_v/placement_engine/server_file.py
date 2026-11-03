@@ -22,9 +22,13 @@ def schematic_bounds(regions: list[Region]) -> tuple[list[int], list[int]]:
     return low, [hi - lo + 1 for lo, hi in zip(low, high)]
 
 
-def write_server_file(path: Path, size: list[int], probes: list[dict], clock: dict | None) -> None:
-    """`clock` is {"pin", "pos" (a lever), "half_period_ticks" (redstone ticks)}; no key means no server clock."""
+def write_server_file(path: Path, size: list[int], probes: list[dict], clock: dict | None,
+                      levers: list[dict] = ()) -> None:
+    """`clock` is {"pin", "pos" (a lever), "half_period_ticks" (redstone ticks)}; no key means no server clock.
+    `levers` are [{"name", "pos"}], each input pin's lever, for a command that flips one by name."""
     data = {"version": SERVER_FILE_VERSION, "schematic_size": size, "probes": probes}
     if clock:
         data["clock"] = clock
+    if levers:
+        data["levers"] = list(levers)
     path.write_text(json.dumps(data, indent=1) + "\n")

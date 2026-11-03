@@ -2719,9 +2719,23 @@ def build_litematic_from_component_list(
                           for key, rel in macro.drivers.items()})
         resolved_probes, tapped = resolve_probes(probes, positions, workspace, low)
         log(f"[probes] {len(probes)} prints, {tapped} blocks tapped")
+    # Every input's lever by name, for the server to flip on command (`/lever <name>`).
+    levers: list[dict] = []
+    for p in placed:
+        if p.component.type != ComponentType.INPUT_PIN:
+            continue
+        for pin in p.component.pins:
+            side = _default_io_side(p.component, pin)
+            cell = _io_repeater_cell(pin_world_map[(p.component.id, pin.name)], p.origin, p.component.footprint, side,
+                                     bounds=io_bounds)
+            nx, _, nz = _SIDE_NORMAL[side.value]
+            lever = (cell[0] + nx, cell[1] + 1, cell[2] + nz)
+            if workspace[lever].id == "minecraft:lever":
+                levers.append({"name": p.component.id if len(p.component.pins) == 1 else f"{p.component.id}.{pin.name}",
+                               "pos": [c - lo for c, lo in zip(lever, low)]})
     if resolved_probes or clock_entry:
         server_path = out_path.with_suffix(SERVER_FILE_SUFFIX)
-        write_server_file(server_path, size, resolved_probes, clock_entry)
+        write_server_file(server_path, size, resolved_probes, clock_entry, levers)
         log(f"[server] {server_path}")
 
     if settled:
