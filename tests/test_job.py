@@ -1,4 +1,5 @@
 """scripts/job.py against real clients, with memory and swap faked through the environment."""
+import importlib.util
 import os
 import subprocess
 import sys
@@ -117,3 +118,49 @@ def test_status_lists_jobs(tmp_path):
     out = subprocess.run([sys.executable, SCRIPT, "status"], env=env, capture_output=True, text=True).stdout
     assert "listed" in out and "running" in out
     assert job.wait(30) == 0
+
+
+def test_waiting_overtakes_priority():
+    spec = importlib.util.spec_from_file_location("job", SCRIPT)
+    job = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(job)
+    now = time.time()
+    fresh_high = {"priority": 10, "queued": now}
+    old_low = {"priority": -10, "queued": now - 21 * job._AGING}
+    assert job._order(old_low) < job._order(fresh_high)
+    assert job._order({"priority": 10, "queued": now}) < job._order({"priority": -10, "queued": now})
+
+
+def _job_module():
+    spec = importlib.util.spec_from_file_location("job", SCRIPT)
+    job = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(job)
+    return job
+
+
+def _queued(job, state, mem, waited=0.0):
+    return {"name": "n", "mem": mem * GB, "cores": 1, "priority": 0, "exclusive": False, "state": state,
+            "queued": time.time() - waited, "version": job._VERSION}
+
+
+def test_a_long_waiter_that_doesnt_fit_only_holds_its_own_room():
+    job = _job_module()
+    jobs = {"run": _queued(job, "running", 1) | {"rss": GB}, "big": _queued(job, "waiting", 20, 9999),
+            "small": _queued(job, "waiting", 1, 1)}
+    state = {"jobs": jobs, "peaks": {}}
+    assert not job.may_start("small", state, 10 * GB, 8 * GB, 8, time.time())
+    assert job.may_start("small", state, 30 * GB, 8 * GB, 8, time.time())
+
+
+def test_a_client_on_an_older_version_blocks_nobody():
+    job = _job_module()
+    stale = _queued(job, "waiting", 20, 9999) | {"priority": 20}
+    del stale["version"]
+    jobs = {"run": _queued(job, "running", 1) | {"rss": GB}, "stale": stale, "new": _queued(job, "waiting", 1, 1)}
+    assert job.may_start("new", {"jobs": jobs, "peaks": {}}, 8 * GB, 8 * GB, 8, time.time())
+
+
+def test_a_known_peak_replaces_the_declared_size():
+    job = _job_module()
+    assert job._need({"name": "a", "mem": 7 * GB}, {"a": GB}) == int(GB * job._PEAK_MARGIN)
+    assert job._need({"name": "b", "mem": 7 * GB}, {"a": GB}) == 7 * GB

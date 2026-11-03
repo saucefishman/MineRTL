@@ -27,6 +27,7 @@ from pathlib import Path
 import nbtlib
 import numpy as np
 from litemapy import BlockState, Region
+from minecraft_v.placement_engine.verify import find_live_pin_wire
 from settle_schematic import headless_binary
 
 READABLE = ("minecraft:redstone_wire", "minecraft:repeater", "minecraft:comparator", "minecraft:redstone_torch",
@@ -216,6 +217,16 @@ class Netlist:
             self.settle_all()
             self._write_rams()
             self.settle_all()
+
+
+def live_pins_on_wire(build: Path, region: Region, terminals: dict, nets: dict) -> list:
+    """Pins that drive their cell, with no net, and something conductive there: a short no net's samples can show."""
+    taken = {terminals[key] for source, sinks in nets.values() for key in (source, *sinks) if key in terminals}
+    live = {f"{comp['id']}:{pin['name']}": terminals[comp["id"], pin["name"]]
+            for comp in json.load(open(build / "component_layout.json")) if comp["type"] in ("CUSTOM", "INPUT_PIN")
+            for pin in comp["pins"] if pin["direction"] == "OUT" and (comp["id"], pin["name"]) in terminals
+            and terminals[comp["id"], pin["name"]] not in taken}
+    return find_live_pin_wire(region, live)
 
 
 def endpoints(build: Path) -> tuple[dict, dict]:
@@ -444,6 +455,9 @@ def main() -> int:
     terminals, nets = endpoints(build)
     netlist = Netlist(build / "netlist.json")
     region = load_region(litematic)
+    live_pins = live_pins_on_wire(build, region, terminals, nets)
+    for v in live_pins:
+        print(f"[compare] FAULT: {sorted(v.nets)[0]} has no net and drives wire on {v.pos}: {region[v.pos].id}", flush=True)
     cell_names: dict[tuple, str] = {}
     cells: dict[str, tuple] = {}
     unreadable = Counter()
@@ -470,9 +484,11 @@ def main() -> int:
     net_of = {key: net_id for net_id, (source, sinks) in nets.items() for key in (source, *sinks)}
     report["no_wire"] = [dict(net=net_of[key], end=key, cell=pos, block=block) for key, pos, block in no_wire]
     report["summary"]["no_wire"] = len(no_wire)
+    report["live_pins"] = [dict(pin=sorted(v.nets)[0], cell=v.pos) for v in live_pins]
+    report["summary"]["live_pins"] = len(live_pins)
     json.dump(report, open(out_dir / "compare.json", "w"), indent=1, default=str)
     print(f"[compare] wrote {out_dir / 'compare.json'}")
-    return 1 if report["summary"]["wiring"] or report["summary"]["gates"] or report["summary"]["flops"] else 0
+    return 1 if report["summary"]["wiring"] or report["summary"]["gates"] or report["summary"]["flops"] or live_pins else 0
 
 
 def analyse(args, work, netlist, nets, terminals, cell_names, samples, labels) -> dict:
