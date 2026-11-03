@@ -1921,7 +1921,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             m = &cells.moves[taken[k]]
             # Signal state (pathfinding._signal_step): prune moves that would leave a stretch
             # with no cell _place_repeaters_for_net could put a repeater on.
-            step = abs(m.dx) + abs(m.dz)
+            step = abs(<int>m.dx) + abs(<int>m.dz)  # ints: abs of a char goes through Python
             if m.arrive or (m.dy == -4 and step == 0):
                 ndepth = 1
                 ncand = 0
