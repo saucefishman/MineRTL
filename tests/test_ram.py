@@ -234,3 +234,13 @@ def test_a_live_pin_with_no_net_keeps_wire_off_its_cell():
     found = _unused_output_terminals(placed, {"n": {(1, 1, 1), (13, 1, 1)}}, terminals)
     assert found == {"unused:ram:spare": {(5, 1, 1)}, "unused:a[9]:a[9]": {(17, 1, 1)}}
     assert {(5, 1, 1), (5, 2, 1), (5, 1, 2)} <= _terminal_keepout(found["unused:ram:spare"])
+
+
+def test_only_a_group_too_wide_for_a_plot_folds_by_default(monkeypatch):
+    monkeypatch.setattr(ram, "_FOLD_ENV", None)
+    monkeypatch.setattr(ram, "_FOLD", False)
+    wide = [StackSpec(6, 8, 0, 11, 2, [], {})] * 8
+    assert ram._group_width(wide) > ram._FOLD_GROUP_WIDTH
+    predictor_only = [StackSpec(6, 8, 0, 9, 16, [], {}), StackSpec(6, 8, 0, 9, 2, [], {})] + [StackSpec(6, 8, 0, 11, 2, [], {})] * 4
+    assert ram._group_width(predictor_only) <= ram._FOLD_GROUP_WIDTH
+    assert ram._group_width([_spec()]) <= ram._FOLD_GROUP_WIDTH

@@ -710,7 +710,7 @@ _SOUTH_PINS_DENSITY = float(os.environ.get("RAM_GATE_DENSITY", 0.15))
 _SOUTH_PINS_LARGE = 10000  # gates; at or above, a design has to fit a plot, with the tighter settings below
 _SOUTH_PINS_OUTPUT_PITCH = 4
 _SOUTH_PINS_OUTPUT_PITCH_LARGE = 2  # outputs differ in Y, so columns can be tight
-_SOUTH_PINS_CHANNEL_LARGE = 30.0  # Z from the block's clearance to the gates: smaller designs keep the void
+_SOUTH_PINS_CHANNEL_LARGE = 1.0  # Z from the block's clearance to the gates: smaller designs keep the void
 _SOUTH_PINS_WIDTH_LARGE = 0.6
 
 
