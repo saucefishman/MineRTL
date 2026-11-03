@@ -94,4 +94,4 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 - Predictor proven in gates once: `floweypu_loop` with hold detours (hs/lp2 in scratchpad) prints `aaaanttnttnttcccccccxyxy`, halts edge 212, flip-flops 0, gate vs RTL 0, redpiler at half 2000 only. Real hold limits measured: DFF safe after 2 ticks, DFFE after 5; `[hold] still short` now prints slack and a real shortfall is a `hold` violation.
 - hi1 (density's defaults 6360805 plus hold, live pin and clock fixes): 863x305x585, synth 7 + build 385 = 392s, 0 failed, 0 verify, hold detours left no shortfall, generated half 1591. hi PASS 1 reset in redstone and redpiler at 1591, compare 0. Installed to MCHPRS at its generated half; not tried in game. loop1 (predictor program) pending.
 - User (2026-11-02): faster clock periods are not a goal; redpiler is fast enough. Generated clock only needs to be safe.
-
+- Installed floweypu builds live at MCHPRS `schems/floweypu.litematic` and `floweypu.server.json` (renamed from claude.*); currently hi1.
