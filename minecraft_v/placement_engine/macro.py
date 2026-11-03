@@ -59,6 +59,9 @@ class Macro:
     port_net: dict[str, str] = field(default_factory=dict)   # pin -> inner net
     cells: int = 0
     settled: BlockArrays | None = None               # instead of blocks: already shaped and settled, see ram.py
+    edges: dict[str, dict[str, dict[tuple[bool, bool], int]]] = field(default_factory=dict)  # as arcs, per (input up, output up)
+    closing: dict[str, int] = field(default_factory=dict)  # input pin -> ticks until the block is still after it falls
+    guarded: dict[str, list[str]] = field(default_factory=dict)  # such a pin -> pins that mustn't change until then
 
     def arrays_oriented(self, mirrored: bool, rotated: bool) -> BlockArrays:
         """The blocks turned, as arrays for BulkRegion.paste."""

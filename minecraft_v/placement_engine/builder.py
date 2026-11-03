@@ -2385,6 +2385,7 @@ def build_litematic_from_component_list(
 
     failed_nets = {nid for nid, _ in routing_failures}
     flat_period = 0
+    clock_requirement: list = []
     if capture is None:
         flat = flat_comp or comp
         inner = {(cell, pin): macro.world(rel, p.origin, bool(p.component.metadata.get("mirror_x")),
@@ -2396,7 +2397,7 @@ def build_litematic_from_component_list(
         save_artifact("macro_clocks.json", [list(pos) for (_, pin), pos in inner.items() if pin == "C"])
         # Placement splits multi-bit IO into one component per bit, named after the bit.
         flat_period = fix_hold(workspace, flat, flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))),
-                                                 inner), failed_nets, probe_components(probes) if probes else frozenset(), opaque)
+                                                 inner), failed_nets, probe_components(probes) if probes else frozenset(), opaque, macros, clock_requirement)
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)
@@ -2461,6 +2462,8 @@ def build_litematic_from_component_list(
     with phase("[timing] critical path"):
         critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
                                                      probe_components(probes) if probes else frozenset(), flat_period)
+    if clock_requirement and not clock_requirement[0].unclocked:  # static timing edge by edge, where it covers every flip-flop
+        critical_path_ticks = 2 * clock_requirement[0].half_period
     log(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.
@@ -2495,7 +2498,7 @@ def build_litematic_from_component_list(
         lever = (cell[0] + nx, cell[1] + 1, cell[2] + nz)
         if workspace[lever].id != "minecraft:lever":
             raise RuntimeError(f"no room for the server clock lever of '{clock_pin}' at {lever}")
-        half_period = server_clock or max(1, _REPEATER_MAX_DELAY * ceil(critical_path_ticks / _REPEATER_MAX_DELAY / 2))
+        half_period = server_clock or max(1, ceil(critical_path_ticks / 2))
         clock_entry = {"pin": clock_pin, "pos": [c - lo for c, lo in zip(lever, low)], "half_period_ticks": half_period}
         log(f"[clock] server clock on '{clock_pin}': toggles every {half_period} ticks")
 
