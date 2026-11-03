@@ -3,6 +3,18 @@
 Goal: `examples/floweypu` builds in under 20 minutes, faster is better.
 Done means: routes with 0 failures, 0 verify violations, and a test program gives correct output in mchprs_headless.
 
+## Findings summary (2026-11-02)
+Read this first; the State log below has the detail.
+
+- **Result:** hi1, 863x305x585 (fits 1024x1024x376), 392s cold (synth 7 + build 385), 0 failed, 0 verify, `hi` passes in redstone and redpiler at the generated half 1591, gate vs RTL 0. Installed in MCHPRS as `schems/floweypu.*`. Predictor program `examples/floweypu_loop` passes in redpiler on the same settings; redstone run pending.
+- **Source changes to the CPU:** `predict.sv` rewritten as three 4-read 2-write memories (sv2v turned whole-array initialisers into flip-flops), proven equal with ABC at 4 and 8 entries; two lines of `pipe_decode_read.sv` turned a 1-bit array index into a ternary (worth 3,744 cells: sv2v emits a 32-bit offset that yosys builds as a barrel shifter). Wrappers in `examples/floweypu_hi` and `floweypu_loop` add ROMs and `$write` of printed characters.
+- **Footprint (density):** pulling the gate cloud north next to the RAM group (gate channel) set Z: channel 380 to 989, 200 to 784, 100 to 684, 30 to 614, 1 to 585 (default). Folding RAM decoders (ram-stack) set X: group 1086 to 808 wide. Losers: gate width .45 (Z 677), .8 (3 failed nets), 12 banks per stack (759x369x601, height near limit, 1 failed net), density .30 (legalization over 1200s). RUDY congestion couldn't rank settings.
+- **Speed:** cold RAM group 491s to about 10s (parallel settle); post-route 357s to 28s (`_signals.pyx` kernel); routing kernel about 1.37x then a further 10% (compiled net checks, bucket queue, merged tables); fewer nets from adder folding and ABC `&syn2` (15,230 to 12,621); simulator (MCHPRS) redpiler 506s to 29s, redstone 158s to 119s.
+- **Correctness faults found and fixed:** torch latches and pass-by pins missed by verify; repeaters on sink pin cells; live pins with no net driving into wire (the predictor fault: q1, t1, s1 all had it), now kept out and checked as `live_pin`; hold paths too short to pad (derailed `floweypu_loop`), now detoured and checked as `hold`; hold ignored gated clocks; `examples/cpu --no-macros` regression from fanout-first ordering, now RAM designs only.
+- **Clock:** generated half period from edge-aware static timing with measured RAM arcs and a write-closing limit; safe in every sweep on small examples, no false-path slack on floweypu. Faster clocks aren't a goal. Random-input sweeps don't exercise floweypu; use a real program.
+- **Unverified:** in game, more than one seed, redstone on the loop program (pending), MCHPRS server loading this size (other session).
+- **Open branches not merged:** split long edges (global-routing session, 3d8708f, checks pending), routing kernel reuse (multi-sink session), opt-in false-path proof (dde54ee, not wanted).
+
 ## User's rules
 - Source edits allowed if proven equivalent. Hist keeps all bits, behaviour unchanged: no trimming, no bug fix.
 - Stay on branch claude/floweypu-example-checklist-ca457a. Commit here, merge children here, merge main in when useful. No push, no merge to main.
