@@ -375,6 +375,31 @@ def test_hold_arrival_counts_a_repeaters_delay():
     assert arrival[(3, 1, 1)] == 3
 
 
+def test_hold_finds_clock_inputs_through_a_gate():
+    # examples/memread: _clk & switch drives every clock pin, and hold fixing used to skip the design without a word.
+    from types import SimpleNamespace as NS
+
+    from litemapy import Region
+
+    from minecraft_v.placement_engine.hold import _HoldTiming
+    from minecraft_v.placement_engine.ir import ComponentType as T
+    from minecraft_v.placement_engine.verify import _World
+
+    def end(cid, pin):
+        return NS(component_id=cid, pin_name=pin)
+
+    kinds = {"clk": T.INPUT_PIN, "en": T.INPUT_PIN, "data": T.INPUT_PIN, "ff": T.DFF, "gate": T.AND, "div": T.DFF, "ff2": T.DFF}
+    comp = NS(components=[NS(id=c, type=k) for c, k in kinds.items()], nets=[
+        NS(net_id="a", source=end("clk", "Y"), sinks=[end("gate", "A"), end("div", "C")]),
+        NS(net_id="b", source=end("en", "Y"), sinks=[end("gate", "B")]),
+        NS(net_id="c", source=end("gate", "Y"), sinks=[end("ff", "C")]),
+        NS(net_id="d", source=end("data", "Y"), sinks=[end("ff", "D")]),
+        NS(net_id="e", source=end("div", "Q"), sinks=[end("ff2", "C")]),  # a flip-flop stops the walk back
+    ])
+    timing = _HoldTiming(_World(Region(0, 0, 0, 2, 2, 2), frozenset(), frozenset()), comp, {}, set())
+    assert timing.roots == {"clk", "en"}
+
+
 def test_hold_only_converts_dust_on_a_straight_run():
     from litemapy import BlockState, Region
 
