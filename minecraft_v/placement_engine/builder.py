@@ -801,6 +801,15 @@ class _TreeCells:
         return [tuple(c) for c in cells[np.argpartition(h, k)[:k]].tolist()]
 
 
+_first_fanout = [int(os.environ.get("ROUTE_FIRST_FANOUT", 64))]
+
+
+def set_first_fanout(fanout: int) -> None:
+    """Nets of this fanout or more route first and aren't ripped up as blockers. RAM blocks need it, but on a design
+    without them it walls in later nets: examples/cpu --no-macros fails on seed 0. ROUTE_FIRST_FANOUT overrides it."""
+    _first_fanout[0] = int(os.environ.get("ROUTE_FIRST_FANOUT", fanout))
+
+
 class _GreedyRouter:
     """Greedy, journaled routing of _RouteJobs with the retry layers that make it robust:
 
@@ -1278,7 +1287,7 @@ class _GreedyRouter:
         if self.resume:
             jobs = self.resume.in_saved_order(jobs)
         failures: list[tuple[str, Exception]] = []
-        keep_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 64))
+        keep_fanout = _first_fanout[0]
         # Blockers to rip: not nets routed first for being huge. Redoing one costs more than the sink it would free.
         pool = jobs if pool is None else pool
         keys = {job.key for job in pool if not keep_fanout or len(job.sinks) < keep_fanout}
@@ -2367,7 +2376,7 @@ def build_litematic_from_component_list(
             f.unlink()
     snapshot_dir = DEFAULT_SNAPSHOT_DIR if snapshots else None
     with phase("[wire] ordering nets"):
-        first_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 64))  # clock and big selects first, while there's room
+        first_fanout = _first_fanout[0]  # clock and big selects first, while there's room
         sorted_nets = sorted(work_nets, key=lambda net: (
             (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout else (1, _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
