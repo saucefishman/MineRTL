@@ -1429,6 +1429,40 @@ def _bank_pin_leads(
     return list(dict.fromkeys(leads))
 
 
+_LONG_EDGE_SPLIT = int(os.environ.get("ROUTE_SPLIT", 0))  # edges longer than this get soft waypoints
+
+
+def _long_edge_leads(src: Pos, sinks: list[Pos], split: int) -> list[Pos]:
+    """Soft waypoints along the long edges of the terminals' spanning tree, every split blocks.
+
+    A search has a fixed budget of positions, so a long edge fails where a chain of short ones doesn't.
+    """
+    points = np.array([src, *sinks], dtype=np.int32)
+    n = len(points)
+    if n < 2:
+        return []
+    best = np.abs(points - points[0]).sum(axis=1)
+    parent = np.zeros(n, dtype=np.int32)
+    done = np.zeros(n, dtype=bool)
+    done[0] = True
+    leads = []
+    for _ in range(n - 1):
+        i = int(np.argmin(np.where(done, 1 << 30, best)))
+        done[i] = True
+        length = int(best[i])
+        if length > split:
+            a, b = points[parent[i]], points[i]
+            parts = length // split + 1
+            for k in range(1, parts):
+                c = a + (b - a) * k / parts
+                leads.append((int(c[0]), int(c[1]), int(c[2])))
+        d = np.abs(points - points[i]).sum(axis=1)
+        closer = d < best
+        best[closer] = d[closer]
+        parent[closer] = i
+    return leads
+
+
 def _wall_vias(
         net: NetConnection,
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
@@ -1506,6 +1540,9 @@ def _route_all_nets(
             )
             for i, net in enumerate(sorted_nets, 1)
         ]
+        if _LONG_EDGE_SPLIT:
+            for job in jobs:
+                job.lead = list(dict.fromkeys([*job.lead, *_long_edge_leads(job.src, job.sinks, _LONG_EDGE_SPLIT)]))
 
     def snapshot(i: int, job: _RouteJob) -> None:
         if snapshot_dir is not None and i % 10 == 0:
@@ -2352,7 +2389,8 @@ def build_litematic_from_component_list(
     with phase("[wire] ordering nets"):
         first_fanout = int(os.environ.get("ROUTE_FIRST_FANOUT", 64))  # clock and big selects first, while there's room
         sorted_nets = sorted(work_nets, key=lambda net: (
-            (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout else (1, _net_sort_key(net, pin_terminal))))
+            (0, -len(net.sinks)) if first_fanout and len(net.sinks) >= first_fanout
+            else (1, -_net_sort_key(net, pin_terminal) if os.environ.get("ROUTE_LONG_FIRST") else _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     if route_passes <= 1:
         if route_workers > 1:
