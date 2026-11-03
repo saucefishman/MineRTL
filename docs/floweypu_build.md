@@ -72,6 +72,7 @@ Rule: if the machine is strained (swap filling, stalled processes), write ideas 
 - Footprint: fold + `RAM_STACK_BANKS=12` with gate width about .55 if fold alone can't route under 1024x1024.
 - Footprint: two RAM tiers with lanes in two bundles (estimate 432x328x413, not prototyped).
 - Clock: false-path handling, once clock-timing reports how much pessimism they cause.
+- Clock: uneven duty cycle. bphist passes at high 200 / low 613 (period 813 vs 1226 symmetric, 1.5x faster) but fails at high 100: an unmodelled minimum high-phase pulse width between 100 and 200 ticks. Model it, then let the server clock use separate high and low phases.
 - Routing: coarse global routing corridors for long edges, tag_rf and select lanes. Failed searches track edge length: under 100 blocks about 0.2% fail, 100-300 blocks 12-16%, 300+ almost all (h1). They don't cluster at RAM pins, so pin-access stubs are not worth trying.
 - Congestion: RUDY can't rank settings or locate failures (`scripts/predict_congestion.py` on worktree-agent-ae2dffb15a5e5ae50, not merged). Unrouted guesses for 1024x1024: fold with width .5 channel 250 (863x305x905), or width .6 channel 250 density .20 (863x306x839).
 - Routing: failed-set PathFinder for hard nets; per-module ABC; stage hierarchy.
