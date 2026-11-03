@@ -89,3 +89,7 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 - Faster `mchprs_headless` from MineRTL session, uncommitted on MCHPRS master, copy at `~/.cache/mcv-jobs/mchprs_headless` (use `MCHPRS_HEADLESS`): t1 PASS in both modes, about 140s total; hf3 redstone still FAIL.
 - s1 (new synthesis recipe, density's branch): 8+501s, 863x305x954, 12,621 nets, passes the bar after a repair pass on net_2 (1086 sinks). t1 is still faster.
 - Predictor fault found (preload-fault): not lost preload. Live pins with no net (unused block outputs, unused inputs) drive the cell in front of them; router treated it as free, verify can't see it. bpmem `next_pc1` and wpc1 shorts fixed by keepouts (`_unused_output_terminals`). q1 has it on `s2_rc[0]`; t1 not checked yet. Earlier notes blaming preload or power-up are wrong. `memread` tiled was separate: hold ignored gated clocks, fixed.
+- Longer predictor test `examples/floweypu_loop` (RTL prints `aaaanttnttnttcccccccxyxy`, halts edge 212) FAILS on a fixed build: flip-flop `slice$25910` hold margin -14 logged as `[hold] still short` and ignored, wrong from clock 35, not speed. So `still short` lines are real faults and t1, p200, p100 are unproven until hold-leftovers finishes. New `live_pin` verify violation; `scripts/check_bpmem.py`.
+- Best footprint so far p100: 863x305x684, passes hi at 1500 and generated half, compare 0, live pins and hold leftovers (0, 0, 4) still to clear.
+- Queue bug fixed (bf28fe9): stale clients at the head stalled everyone. A client runs the code it started with.
+
