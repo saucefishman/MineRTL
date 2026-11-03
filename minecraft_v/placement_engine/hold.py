@@ -108,8 +108,41 @@ class _HoldTiming:
         self.cache: dict[str, tuple] = {}
         clock_nets = [n for n in self.nets.values() if any(s.pin_name == "C" for s in n.sinks)]
         self.clock_net_ids = {n.net_id for n in clock_nets}
-        self.roots = {n.source.component_id for n in clock_nets
-                      if self.by_id[n.source.component_id].type == ComponentType.INPUT_PIN}
+        self.roots = self._clock_inputs(clock_nets)
+
+    def _clock_inputs(self, clock_nets: list) -> set[str]:
+        """Input pins whose edges can reach a clock pin: directly, or through gates such as clk & enable."""
+        drivers: dict[str, list[str]] = defaultdict(list)
+        for n in self.nets.values():
+            for s in n.sinks:
+                drivers[s.component_id].append(n.source.component_id)
+        roots: set[str] = set()
+        seen: set[str] = set()
+        todo = [n.source.component_id for n in clock_nets]
+        while todo:
+            cid = todo.pop()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            kind = self.by_id[cid].type
+            if kind == ComponentType.INPUT_PIN:
+                roots.add(cid)
+            elif kind not in _SEQUENTIAL:
+                todo.extend(drivers[cid])
+        return roots
+
+    def _clock_pins(self, root: str) -> dict[tuple[str, str], int]:
+        return self.propagate({root: 1}, self.gate)[0]
+
+    def clock_arrivals(self) -> dict[str, int]:
+        """Each flip-flop's clock arrival. Through a gate, any of several inputs may be the clock, so the latest counts:
+        an arrival taken from a quick enable path would understate how long data has to hold."""
+        clock: dict[str, int] = {}
+        for root in self.roots:
+            for (cid, pin), t in self._clock_pins(root).items():
+                if pin == "C":
+                    clock[cid] = max(clock.get(cid, 0), t)
+        return clock
 
     def forget(self, net_id: str) -> None:
         """A net's wire changed. Other nets keep what they found until they change too."""
@@ -163,8 +196,7 @@ class _HoldTiming:
         return into, via
 
     def margins(self) -> tuple[dict[str, int], dict[tuple[str, str], int], dict]:
-        pins, _ = self.propagate({cid: 1 for cid in self.roots}, self.gate)
-        clock = {cid: t for (cid, pin), t in pins.items() if pin == "C"}
+        clock = self.clock_arrivals()
         launches = {cid: t + _FASTEST_GATE for cid, t in clock.items()}
         data, via = self.propagate(launches, lambda _: _FASTEST_GATE)
         margins = {(c, p): t - clock[c] for (c, p), t in data.items() if c in clock and p != "C"}
@@ -508,9 +540,11 @@ class _KernelTiming(_HoldTiming):
         found = self.kernel.propagate([(self.gate_of[cid], t) for cid, t in starts.items()], delays)
         return {self.pin_keys[pin]: t for pin, t in found}
 
+    def _clock_pins(self, root: str) -> dict[tuple[str, str], int]:
+        return self._pins({root: 1}, self.real_delay)
+
     def margins(self) -> tuple[dict[str, int], dict[tuple[str, str], int], dict]:
-        pins = self._pins({cid: 1 for cid in self.roots}, self.real_delay)
-        clock = {cid: t for (cid, pin), t in pins.items() if pin == "C"}
+        clock = self.clock_arrivals()
         launches = {cid: t + _FASTEST_GATE for cid, t in clock.items()}
         data = self._pins(launches, self.fast_delay)
         margins = {(c, p): t - clock[c] for (c, p), t in data.items() if c in clock and p != "C"}

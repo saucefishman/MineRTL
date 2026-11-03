@@ -88,3 +88,4 @@ All builds and simulations go through `python3 scripts/job.py run --mem 7G --nam
 
 - Faster `mchprs_headless` from MineRTL session, uncommitted on MCHPRS master, copy at `~/.cache/mcv-jobs/mchprs_headless` (use `MCHPRS_HEADLESS`): t1 PASS in both modes, about 140s total; hf3 redstone still FAIL.
 - s1 (new synthesis recipe, density's branch): 8+501s, 863x305x954, 12,621 nets, passes the bar after a repair pass on net_2 (1086 sinks). t1 is still faster.
+- Predictor fault found (preload-fault): not lost preload. Live pins with no net (unused block outputs, unused inputs) drive the cell in front of them; router treated it as free, verify can't see it. bpmem `next_pc1` and wpc1 shorts fixed by keepouts (`_unused_output_terminals`). q1 has it on `s2_rc[0]`; t1 not checked yet. Earlier notes blaming preload or power-up are wrong. `memread` tiled was separate: hold ignored gated clocks, fixed.

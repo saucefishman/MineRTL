@@ -570,6 +570,22 @@ def _build_terminal_map(
     return all_terminals
 
 
+def _unused_output_terminals(
+        placed: list,
+        all_terminals: dict[str, set[tuple[int, int, int]]],
+        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
+) -> dict[str, set[tuple[int, int, int]]]:
+    """A block's output or a top-level input with no net still drives its pin cell, and wire there would be shorted to it,
+    unseen by verify as it belongs to no net. Keep every net off these cells, as if each were another net's terminal.
+    Never routed."""
+    taken = {cell for cells in all_terminals.values() for cell in cells}
+    return {f"unused:{p.component.id}:{pin.name}": {pin_terminal[p.component.id, pin.name]}
+            for p in placed if p.component.type in (ComponentType.CUSTOM, ComponentType.INPUT_PIN)
+            for pin in p.component.pins
+            if pin.direction == Direction.OUT and (p.component.id, pin.name) in pin_terminal
+            and pin_terminal[p.component.id, pin.name] not in taken}
+
+
 def _compute_net_protected(
         net_id: str,
         all_terminals: dict[str, set[tuple[int, int, int]]],
@@ -2324,6 +2340,7 @@ def build_litematic_from_component_list(
             envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
         )
         all_terminals = _build_terminal_map(work_nets, pin_terminal)
+        all_terminals.update(_unused_output_terminals(placed, all_terminals, pin_terminal))
 
     save_artifact("component_layout.json", [
         {
