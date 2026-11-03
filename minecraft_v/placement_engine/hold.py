@@ -22,14 +22,19 @@ from litemapy import BlockState, Region
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from .block_utils import Box
 from .ir import ComponentList, ComponentType
-from .verify import (Excluding, HiddenBoxes, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH,
+from .verify import (Excluding, HiddenBoxes, Violation, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH,
                      _WALL_TORCH, _World, _signals, cell_byte, signal_grid)
 
 Pos = tuple[int, int, int]
 _SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
 _MAX_DELAY = 4          # a repeater's longest setting
-_HOLD_MARGIN = 6        # ticks data must arrive after the clock pin: a flip-flop locks its master a few ticks after C
+_HOLD_MARGIN = 6        # what padding aims for: ticks data arrives after the clock pin, with every launch taken as _FASTEST_GATE
 _FASTEST_GATE = 1       # ticks through any cell's fastest path; the library's delay is its slowest, too late for hold
+# Measured from the cells (tests/test_hold.py). Ticks after C reaches its pin's cell: when D may change without getting in,
+# and when Q changes. A margin is safe if data that left Q this late, then through gates at _FASTEST_GATE, still clears the
+# hold time. So padding's target has slack: DFF to DFF fails below -1, DFF to DFFE below 2, DFFE to DFF below -3.
+_HOLD_TICKS = {ComponentType.DFF: 2, ComponentType.DFFE: 5}
+_CLOCK_TO_Q = {ComponentType.DFF: 4, ComponentType.DFFE: 6}
 _ROUNDS = 40            # passes over the failing pins; each one pads every failing path
 _UNREACHED = 1 << 30
 _SETUP_TICKS = 1        # data settled at a flip-flop before its clock rises
@@ -60,6 +65,16 @@ class ClockRequirement:
     @property
     def half_period(self) -> int:
         return max(ceil(self.full / 2), self.half_cycle, self.write_floor)
+
+
+@dataclass
+class HoldShort:
+    """A pin padding left under _HOLD_MARGIN. slack is against what the flip-flop really needs: negative can latch wrong data."""
+    pin: tuple[str, str]
+    pos: Pos
+    margin: int
+    slack: int
+    path: list[tuple[str, Pos]]  # (net, sink cell) from the pin back to the launching flip-flop, clock nets left out
 
 
 def repeater_delay(block: BlockState) -> int:
@@ -201,6 +216,16 @@ class _HoldTiming:
         data, via = self.propagate(launches, lambda _: _FASTEST_GATE)
         margins = {(c, p): t - clock[c] for (c, p), t in data.items() if c in clock and p != "C"}
         return clock, margins, via
+
+    def _data_arrivals(self, launches: dict[str, int]) -> dict[tuple[str, str], int]:
+        return self.propagate(launches, lambda _: _FASTEST_GATE)[0]
+
+    def slacks(self, clock: dict[str, int]) -> dict[tuple[str, str], int]:
+        """Per pin, ticks past what its flip-flop really needs, launches at their measured clock to Q. Margins take every
+        launch as the fastest gate, so this is what can truly fail. Other kinds of flip-flop keep the padding target."""
+        launches = {cid: t + _CLOCK_TO_Q.get(self.by_id[cid].type, _FASTEST_GATE) for cid, t in clock.items()}
+        return {(c, p): t - clock[c] - _HOLD_TICKS.get(self.by_id[c].type, _HOLD_MARGIN)
+                for (c, p), t in self._data_arrivals(launches).items() if c in clock and p != "C"}
 
     def min_period(self, clock: dict[str, int], probed: Collection[str] = ()) -> int:
         """Longest flip-flop to flip-flop time, with each one's own clock arrival: the slowest safe clock period.
@@ -550,6 +575,9 @@ class _KernelTiming(_HoldTiming):
         margins = {(c, p): t - clock[c] for (c, p), t in data.items() if c in clock and p != "C"}
         return clock, margins, {}  # path_nets reads the kernel's last run
 
+    def _data_arrivals(self, launches: dict[str, int]) -> dict[tuple[str, str], int]:
+        return self._pins(launches, self.fast_delay)
+
     def path_nets(self, pin: tuple[str, str], via: dict) -> list[tuple[str, Pos]]:
         out = []
         step = self.kernel.via_of_pin(self.pin_of[pin])
@@ -616,8 +644,9 @@ def _straight_run(world: _World, p: Pos) -> tuple[Pos, Pos] | None:
     return (a, b) if a[0] + b[0] == 2 * x and a[2] + b[2] == 2 * z else None
 
 
-def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: frozenset[Pos], counts: dict) -> int:
-    """Add up to need ticks on a net, nearest the sink first; returns what was added."""
+def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: frozenset[Pos], counts: dict,
+             edits: list[tuple[Pos, BlockState]] | None = None) -> int:
+    """Add up to need ticks on a net, nearest the sink first; returns what was added. edits gets each cell's old block."""
     world = timing.world
     region = world.region
     cells = [p for p in timing.cells_back(net_id, sink) if p not in terminals]
@@ -627,6 +656,8 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
             break
         if world.kind(p) == _REPEATER and repeater_delay(world.block(p)) < _MAX_DELAY:
             ticks = min(_MAX_DELAY - repeater_delay(world.block(p)), need - added)
+            if edits is not None:
+                edits.append((p, world.block(p)))
             region[p] = world.block(p).with_properties(delay=str(repeater_delay(world.block(p)) + ticks))
             world.changed(p)
             added += ticks
@@ -642,6 +673,8 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
             continue
         delta = (upstream[0] - p[0], upstream[2] - p[2])
         ticks = min(_MAX_DELAY, need - added)
+        if edits is not None:
+            edits.append((p, world.block(p)))
         region[p] = BlockState("minecraft:repeater", facing=_DELTA_TO_FACING[delta], delay=str(ticks))
         world.changed(p)
         added += ticks
@@ -653,10 +686,12 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
 
 def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str],
              probed: Collection[str] = (), opaque: Collection[Box] = (), macros: dict | None = None,
-             requirement: list[ClockRequirement] | None = None) -> int:
+             requirement: list[ClockRequirement] | None = None, shorts: list[HoldShort] | None = None,
+             edits: list[tuple[Pos, BlockState]] | None = None) -> int:
     """Pad every data path that beats its flip-flop's clock; returns the slowest flip-flop to flip-flop time. comp is the
     flat netlist, terminals its gate pins' cells, probed the cells prints read, opaque boxes that net searches stop at.
-    `requirement` gets what the clock has to be, from the wire as padded: macros time the blocks in the netlist."""
+    `requirement` gets what the clock has to be, from the wire as padded: macros time the blocks in the netlist.
+    `shorts` gets the pins padding couldn't bring to target, `edits` each changed cell's old block, to undo this."""
     if not any(c.type in _SEQUENTIAL for c in comp.components):
         return 0
     protected = frozenset(terminals.values())
@@ -686,7 +721,7 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
             for net_id, sink in timing.path_nets(pin, via):
                 if net_id in timing.clock_net_ids:
                     continue
-                got = _pad_net(timing, net_id, sink, need, protected, counts)
+                got = _pad_net(timing, net_id, sink, need, protected, counts, edits)
                 need -= got
                 progress += got
                 if need <= 0:
@@ -700,19 +735,32 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
     print(f"[hold] clock arrives {min(clock.values())}..{max(clock.values())} ticks at {len(clock)} flip-flops; "
           f"{first_bad} of {len(margins)} pins short (worst {first_worst}), added {total} ticks "
           f"({counts['raised']} repeaters slowed, {counts['new']} new); {len(left)} left")
-    for pin, m in sorted(left.items(), key=lambda kv: kv[1])[:10]:
-        print(f"[hold] still short: {pin} margin {m}")
+    found = [HoldShort(pin, terminals[pin], m, 0, [e for e in timing.path_nets(pin, via) if e[0] not in timing.clock_net_ids])
+             for pin, m in sorted(left.items(), key=lambda kv: (kv[1], kv[0]))]
+    if found:
+        slack = timing.slacks(clock)
+        for short in found:
+            short.slack = slack[short.pin]
+    for short in found[:10]:
+        print(f"[hold] still short: {short.pin} margin {short.margin}, slack {short.slack}")
+    if shorts is not None:
+        shorts.extend(found)
     period = timing.min_period(clock, probed)
     print(f"[hold] slowest flip-flop to flip-flop or print path {period} ticks")
     if requirement is not None:
-        found = timing.clock_requirement(macros, probed)
-        requirement.append(found)
-        print(f"[timing] half period {found.half_period}: paths of a whole period {found.full}, half a period {found.half_cycle}, "
-              f"RAM writes closing {found.write_floor}; worst {found.worst}"
-              + (f"; {found.unclocked} flip-flops on clocks made by logic not counted" if found.unclocked else ""))
-        for kind, route in found.paths.items():
+        needed = timing.clock_requirement(macros, probed)
+        requirement.append(needed)
+        print(f"[timing] half period {needed.half_period}: paths of a whole period {needed.full}, half a period {needed.half_cycle}, "
+              f"RAM writes closing {needed.write_floor}; worst {needed.worst}"
+              + (f"; {needed.unclocked} flip-flops on clocks made by logic not counted" if needed.unclocked else ""))
+        for kind, route in needed.paths.items():
             print(f"[timing] {kind} path: {route}")
     return period
+
+
+def hold_violations(shorts: Collection[HoldShort]) -> list[Violation]:
+    """Pins whose data can beat their clock even at the flip-flop's measured timing."""
+    return [Violation("hold", frozenset({f"{short.pin[0]}.{short.pin[1]}"}), short.pos) for short in shorts if short.slack < 0]
 
 
 def flat_terminals(comp: ComponentList, top_terminal: Callable[[str, str], Pos],

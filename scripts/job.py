@@ -28,13 +28,13 @@ _GB = 1 << 30
 _DEFAULT_MEM = 2 * _GB
 _RESERVE = 1 * _GB  # kept free for everything not in the queue
 # Most jobs aren't urgent, so running slowly on swap beats waiting. --exclusive is for the ones whose time matters.
-_OVERCOMMIT = int(float(os.environ.get("JOB_OVERCOMMIT_GB", 6)) * _GB)
+_OVERCOMMIT = int(float(os.environ.get("JOB_OVERCOMMIT_GB", 10)) * _GB)
 _SWAP_CAP = 16 * _GB  # the system grows swap as needed, so the limit is on how much is in use
 _SWAP_LOW = 1 * _GB  # less room than this under the cap: nothing new starts, and the lowest priority job pauses
 _SWAP_OK = 2 * _GB  # paused jobs carry on once this much is free
 _PEAK_MARGIN = 1.1
 _MAX_BACKFILL_WAIT = 600  # seconds the head of the queue waits before smaller jobs stop passing it
-_VERSION = 2
+_VERSION = 4
 _AGING = 60.0  # seconds of waiting worth one level of priority
 _POLL = 2.0
 _SAMPLE = 5.0
@@ -143,15 +143,15 @@ def may_start(key: str, state: dict, free: int, swap: int, cores: int, now: floa
         return False
     if me is not head and head["exclusive"]:
         return False
-    budget = free + _OVERCOMMIT - _RESERVE - sum(max(0, _need(j, peaks) - j.get("rss", 0)) for j in running)
+    budget = free + _OVERCOMMIT - _RESERVE - sum(max(0, _need(j, peaks) - j.get("high", 0)) for j in running)
     if sum(j["cores"] for j in running) + me["cores"] > cores:
         return False
-    # Anyone ahead who fits goes first, so don't take their room. Nor that of anyone who has waited long, fitting or not:
-    # smaller jobs may pass them, but not forever.
+    # Anyone ahead who fits goes first, so don't take their room. Nor that of the first in line once it has waited long,
+    # fitting or not: smaller jobs may pass it, but not forever.
     for job in waiting:
         if job is me:
             break
-        if _need(job, peaks) <= budget or now - job["queued"] > _MAX_BACKFILL_WAIT:
+        if _need(job, peaks) <= budget or (job is head and now - job["queued"] > _MAX_BACKFILL_WAIT):
             budget -= _need(job, peaks)
     return _need(me, peaks) <= budget
 
@@ -220,6 +220,7 @@ def run(args: argparse.Namespace) -> int:
         with _state() as state:
             mine = state["jobs"][key]
             mine["rss"] = rss
+            mine["high"] = peak  # idle pages get compressed, so what it holds now can read far below what it needs
             if not paused and swap < _SWAP_LOW and _pause_choice(state) == key:
                 paused = True
                 mine["state"] = "paused"

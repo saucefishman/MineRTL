@@ -145,7 +145,7 @@ def _queued(job, state, mem, waited=0.0):
 
 def test_a_long_waiter_that_doesnt_fit_only_holds_its_own_room():
     job = _job_module()
-    jobs = {"run": _queued(job, "running", 1) | {"rss": GB}, "big": _queued(job, "waiting", 20, 9999),
+    jobs = {"run": _queued(job, "running", 1) | {"high": GB}, "big": _queued(job, "waiting", 20, 9999),
             "small": _queued(job, "waiting", 1, 1)}
     state = {"jobs": jobs, "peaks": {}}
     assert not job.may_start("small", state, 10 * GB, 8 * GB, 8, time.time())
@@ -156,7 +156,7 @@ def test_a_client_on_an_older_version_blocks_nobody():
     job = _job_module()
     stale = _queued(job, "waiting", 20, 9999) | {"priority": 20}
     del stale["version"]
-    jobs = {"run": _queued(job, "running", 1) | {"rss": GB}, "stale": stale, "new": _queued(job, "waiting", 1, 1)}
+    jobs = {"run": _queued(job, "running", 1) | {"high": GB}, "stale": stale, "new": _queued(job, "waiting", 1, 1)}
     assert job.may_start("new", {"jobs": jobs, "peaks": {}}, 8 * GB, 8 * GB, 8, time.time())
 
 
