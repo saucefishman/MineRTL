@@ -1517,7 +1517,14 @@ def _bank_pin_leads(
     return list(dict.fromkeys(leads))
 
 
-_LONG_EDGE_SPLIT = int(os.environ.get("ROUTE_SPLIT", 100))  # edges longer than this get soft waypoints; 0 off
+_long_edge_split = [int(os.environ.get("ROUTE_SPLIT", 0))]  # edges longer than this get soft waypoints; 0 off
+_SPLIT_MIN_GATES = 10_000
+
+
+def set_long_edge_split(gates: int) -> None:
+    """Split long edges every 100 blocks on designs of _SPLIT_MIN_GATES or more. floweypu routes 5% faster; examples/cpu
+    routes 19% slower and bpmem a little slower, so small designs keep it off. ROUTE_SPLIT overrides it."""
+    _long_edge_split[0] = int(os.environ.get("ROUTE_SPLIT", 100 if gates >= _SPLIT_MIN_GATES else 0))
 
 
 def _long_edge_leads(src: Pos, sinks: list[Pos], split: int) -> list[Pos]:
@@ -1631,9 +1638,9 @@ def _route_all_nets(
             )
             for i, net in enumerate(sorted_nets, 1)
         ]
-        if _LONG_EDGE_SPLIT:
+        if split := _long_edge_split[0]:
             for job in jobs:
-                job.lead = list(dict.fromkeys([*job.lead, *_long_edge_leads(job.src, job.sinks, _LONG_EDGE_SPLIT)]))
+                job.lead = list(dict.fromkeys([*job.lead, *_long_edge_leads(job.src, job.sinks, split)]))
 
     def snapshot(i: int, job: _RouteJob) -> None:
         if snapshot_dir is not None and i % 10 == 0:
