@@ -78,10 +78,10 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
 We recommend running builds in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS) instead of vanilla Minecraft. MCHPRS is a redstone-only server, and its redpiler compiler runs large circuits many times faster than vanilla. The fork also reads the `<out>.server.json` that each build writes next to its `.litematic`:
 
 - **Server clock:** with `--server-clock` (on by default when `synth.sh` finds `mchprs_headless`), the server toggles the clock lever itself, so the build doesn't need a generated clock.
-- **`/watch`:** shows the values of `$display`/`$write` debug prints as the circuit runs.
+- **Debug prints:** `$display`/`$write` output appears in chat and the server log.
 - **`/lever <input> [on|off|toggle]`:** sets inputs by their Verilog name.
 
-To load a build, copy the `.litematic` and its `.server.json` into the server's `schems/` folder, then `//load <name>` and `//paste` on a plot. See the fork's README for setup and the full command list.
+To load a build, copy the `.litematic` and its `.server.json` into the server's `schems/` folder, stand on a plot and run `/load <name>.litematic -c`, or `/watch <name>.litematic -c` to re-paste on every rebuild. (WorldEdit's `//load` pastes the blocks only, without the server file.) `/rtps halfclock` runs large builds much faster. See the fork's README for setup and the full command list.
 
 ## Testing Builds Without the Game
 
