@@ -1,13 +1,7 @@
 # distutils: language = c++
 """The A* search of _find_wire_path: the loop (search) and cells' static moves (World).
 
-This is the maintained implementation. pathfinding._search_py and _static_moves are deprecated
-Python versions (MINECRAFT_V_ASTAR=py/check, and the fallback when this isn't built); they
-were exact twins when this was written but are no longer kept in sync. Without a World,
-search() falls back to the Python expand() callback for moves.
-
-Floating point: g, f and costs are doubles combined in the same order as the Python loop, so
-every comparison (heap order, f-cap, h-radius) matches it exactly.
+pathfinding._find_wire_path sets up a search and calls search(), which needs a World for its moves.
 """
 from libc.stdint cimport int64_t, uint16_t, uint32_t
 from libc.stdlib cimport calloc, free
@@ -1756,7 +1750,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False,
            double h_radius_factor=-1, int stagnation=-1, int budget=1):
-    """See pathfinding._search_py. With world, cells' static moves are generated here instead of
+    """With world, cells' static moves are generated here instead of
     by expand(); verify additionally checks each against expand(). stagnation: this search's limit
     (negative: _ROUTE_STAGNATION). h_radius_factor: the h-radius
     cull for this search (0: off; negative: _H_RADIUS_FACTOR). budget: multiplies the stagnation,

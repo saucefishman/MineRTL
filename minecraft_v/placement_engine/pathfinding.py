@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import heapq
 import os
 import sys
 import time
@@ -13,7 +12,7 @@ from litemapy import BlockState, Region
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
 from .wire import LayConflict, _foot_repeaters
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
-    _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _HORIZ_DIRS_8, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
+    _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
 
@@ -71,8 +70,7 @@ def set_foot_repeaters(on: bool) -> None:
     catch, but without them a design of routed banks can't find routes: examples/cpu fails on every seed tried. Off for
     designs with RAM blocks, where nearly every net has to be right first time."""
     _foot_repeaters[0] = on
-    if _astar is not None:
-        _astar.set_foot_repeaters(on)
+    _astar.set_foot_repeaters(on)
 
 
 def _signal_step(depth: int, cand: int, d: tuple[int, int, int]) -> tuple[int, int]:
@@ -254,7 +252,7 @@ class IndexedWorkspace:
         """Have searches over this workspace read an _astar.CellGrid of these containers, which
         from here on keep it current. Containers that don't (plain sets) leave searches reading
         them directly. MINECRAFT_V_ASTAR_GRID: 0 no grid, check compares every cell's moves."""
-        if (_astar is None or _ASTAR_MODE != "kernel" or _ASTAR_GRID == "0"
+        if (_ASTAR_GRID == "0"
                 or not all(hasattr(c, "_grid") for c in (solid, dust_owner, inverted_cells))):
             return
         region = self.region
@@ -428,10 +426,6 @@ def _find_wire_path(
     ix_non_air, ix_wire, ix_torch, ix_repeater = (
         block_index.non_air, block_index.wire, block_index.torch, block_index.repeater)
 
-    def can_support(pos: tuple[int, int, int]) -> bool:
-        # Same as _can_be_support, via the index.
-        return _in_bounds(pos, bounds) and (pos in solid or pos not in ix_non_air)
-
     def walkable(
             pos: tuple[int, int, int],
             exempt: frozenset[tuple[int, int, int]] = _no_exempt,
@@ -447,63 +441,13 @@ def _find_wire_path(
             )
         return walk_cache[key]
 
-    mid_cache: dict[tuple[tuple[int, int, int], frozenset[tuple[int, int, int]]], bool] = {}
-
-    def mid_walkable(pos: tuple[int, int, int], exempt: frozenset[tuple[int, int, int]]) -> bool:
-        # 2x-slope intermediate cell: plain _wire_walkable (no inverted/footprint args), cached.
-        key = (pos, exempt)
-        if key not in mid_cache:
-            mid_cache[key] = _wire_walkable(block_index, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt)
-        return mid_cache[key]
-
-    def _is_powered_block(pos: tuple[int, int, int]):
-        if not _in_bounds(pos, bounds) or pos not in solid:
-            return False
-        has_input_repeater = False
-        for dx, dz in _HORIZ_DIRS:
-            b = (pos[0] + dx, pos[1], pos[2] + dz)
-            if not _in_bounds(b, bounds):
-                continue
-            if b not in ix_repeater:
-                continue
-            block = workspace[*b]
-            if block['facing'] == _DELTA_TO_FACING[(dx, dz)]:
-                has_input_repeater = True
-                break
-
-        return has_input_repeater
-
-    def _torch_below(support_pos: tuple[int, int, int]) -> bool:
-        """True if a torch at support_pos-1Y would power the support block → unintended signal."""
-        bx, by, bz = support_pos
-        below = (bx, by - 1, bz)
-        if not _in_bounds(below, bounds):
-            return False
-        return below in ix_torch
-
     def heuristic(pos: tuple[int, int, int]) -> int:
         dx = abs(pos[0] - goal[0]) * x_h_factor
         dz = abs(pos[2] - goal[2])
         dy = abs(pos[1] - goal[1])
         return dx + dy * 4 + dz
 
-    # DEPRECATED (_static_moves and its helpers below, and _wire_walkable): the compiled
-    # _astar.World is the maintained move generation. This Python version only serves the
-    # deprecated MINECRAFT_V_ASTAR=py/check modes and the no-extension fallback; it is not kept
-    # in sync and may drift. (Seed and goal walkability above still use walkable().)
-    #
-    # Moves from a cell depend on the path only through the local snapshot (and whether the
-    # cell was entered by a tower move); everything else reads the static world. A cell is
-    # expanded once per distinct snapshot (~15x on mid designs), so each cell's moves are
-    # worked out once, recording per move the snapshot bits that would forbid it.
-    # Move entry: (dest_id, cost, forbid_bits, tower_gate, extra_cell, snap_tables, flat_dir, h, near, arrive_flag)
-    #   tower_gate: 0 always, 1 not right after a tower move, 2 only right after one
-    #   extra_cell: 2x-slope intermediate, added to every neighbour's snapshot when the move is taken
-    #   flat_dir: (dx, dz) for same-Y moves of at most one XZ step (direction-change penalty), else None
-    #   arrive_flag: _TOWER_FLAG for tower moves, else 0 (part of the destination node key)
-    # Powered -4 is one move with alternatives: the first side whose bits are clear wins.
-    #
-    # Cells get small int ids (pos_list[id] = cell) so a search node is one int,
+    # Move generation is the compiled _astar.World. Cells get small int ids (pos_list[id] = cell) so a search node is one int,
     # id << _NODE_SHIFT | tower flag | snapshot, instead of a nested tuple that is re-hashed on every lookup.
     pos_list: list[tuple[int, int, int]] = []
     h_list: list[int] = []  # heuristic(pos_list[id])
@@ -518,296 +462,6 @@ def _find_wire_path(
             h_list.append(heuristic(p))
             move_cache.append(None)
         return i
-
-    def expand(cid: int) -> tuple[list[tuple], tuple | None]:
-        static = move_cache[cid]
-        if static is None:
-            static = move_cache[cid] = _static_moves(pos_list[cid])
-        return static
-
-    def _entry(pos, dest, cost, forbid, gate=0, extra=None):
-        x, y, z = pos
-        dx, dy, dz = dest[0] - x, dest[1] - y, dest[2] - z
-        flat_dir = (dx, dz) if dy == 0 and abs(dx) <= 1 and abs(dz) <= 1 else None
-        h = heuristic(dest)
-        near = ((abs(goal[0] - dest[0]) + abs(goal[2] - dest[2])) < _HORIZ_RADIUS_MIN
-                and abs(goal[1] - dest[1]) < _Y_RADIUS_MIN)
-        arrive_flag = _TOWER_FLAG if dy == 4 and (dx, dz) in _TOWER_2BLOCK else 0
-        return _pid(dest), cost, forbid, gate, extra, _snap_shift_tables((dx, dy, dz)), flat_dir, h, near, arrive_flag
-
-    def _static_moves(pos: tuple[int, int, int]) -> tuple[list[tuple], tuple | None]:
-        if pos in inverted_cells:
-            return [], None
-        x, y, z = pos
-        moves: list[tuple] = []
-
-        for dx, dz, b_lo, b_mid, b_hi in _HORIZ_SNAP_BITS:
-            nx, nz = x + dx, z + dz
-
-            # Flat move
-            flat = (nx, y, nz)
-            if walkable(flat) and not _is_powered_block((nx, y + 1, nz)):
-                if y <= min_y:
-                    moves.append(_entry(pos, flat, 1, b_hi | b_mid))
-                elif can_support((nx, y - 1, nz)) and not _torch_below((nx, y - 1, nz)):
-                    moves.append(_entry(pos, flat, 1, b_hi | b_mid | b_lo))
-
-            # Slope-up (disallowed immediately after a tower move — tower top already
-            # has a dedicated +1Y move)
-            if y < max_bridge_y:
-                up = (nx, y + 1, nz)
-                if (x, y + 1, z) not in ix_non_air and walkable(up) and not _is_powered_block((nx, y + 2, nz)): # ensure no block will cut off slope connection and up pos is valid
-                    ramp = (nx, y, nz)
-                    if (
-                        ramp in solid or (_in_bounds(ramp, bounds) and ramp not in ix_non_air)
-                    ) and not _torch_below(ramp):
-                        # TODO: this discourages ramping so we get torch towers for vertical signal extension, but we should guarantee that vertical extension no matter what path is chosen
-                        moves.append(_entry(pos, up, 3, b_hi | b_mid, gate=1))
-
-            # Slope-down
-            if y > min_y:
-                down = (nx, y - 1, nz)
-                above_down = (nx, y, nz)
-                # (nx, y+1, nz) is the ancestor wire that would place a support at above_down,
-                # blocking the slope — hence its bit in the forbid mask.
-                above_clear = (
-                    above_down not in solid
-                    and _in_bounds(above_down, bounds)
-                    and above_down not in ix_non_air
-                    and not _is_powered_block(above_down)
-                )
-                exempt: set[tuple[int, int, int]] = set()
-                # current dust might generate support, which would cut off connections to foreign dust below
-                if can_support((x, y - 1, z)):
-                    exempt.add((x, y - 2, z))
-                if above_clear and walkable(down, frozenset(exempt)):
-                    if y - 1 <= min_y or (
-                        can_support((nx, y - 2, nz))
-                        and not _torch_below((nx, y - 2, nz))
-                    ):
-                        below_owner = dust_owner.get((nx, y - 3, nz))
-                        breaks_slope = (
-                            below_owner is not None
-                            and below_owner != net_id
-                            and any(
-                                dust_owner.get((nx + sdx, y - 2, nz + sdz)) == below_owner
-                                for sdx, sdz in _HORIZ_DIRS
-                            )
-                        )
-                        if not breaks_slope:
-                            moves.append(_entry(pos, down, 2, b_lo | b_mid | b_hi))
-
-        for dx, dz, b_lo, b_mid, b_hi in _HORIZ_SNAP_BITS:
-            nx2, nz2 = x + 2 * dx, z + 2 * dz
-            exempt_top = frozenset([(nx2, y, nz2)])
-
-            # 2x slope-up (disallowed immediately after tower move)
-            if y + 2 <= max_bridge_y:
-                mid = (x + dx, y + 1, z + dz)
-                above_mid = (x + dx, y + 2, z + dz)
-                top = (nx2, y + 2, nz2)
-                mid_support = (x + dx, y, z + dz)
-                mid_ok = (
-                    (x, y + 1, z) not in ix_non_air
-                    and mid not in protected
-                    and mid not in footprint_blocked
-                    and _in_bounds(mid, bounds)
-                    and above_mid not in solid
-                    and mid not in solid
-                    and mid not in ix_non_air
-                    and mid_walkable(mid, exempt_top)
-                )
-                if mid_ok and walkable(top):
-                    if can_support(mid_support) and not _torch_below(mid_support):
-                        moves.append(_entry(pos, top, 7, b_hi | b_mid, gate=1, extra=mid))
-
-            # 2x slope-down
-            if y - 2 >= min_y:
-                mid_dn = (x + dx, y - 1, z + dz)
-                top_dn = (nx2, y - 2, nz2)
-                exempt_dn = frozenset([(x, y - 2, z)])
-                above_mid = (x + dx, y, z + dz)
-                above_clear = (
-                    above_mid not in solid
-                    and _in_bounds(above_mid, bounds)
-                    and above_mid not in ix_non_air
-                )
-                mid_dn_ok = (
-                    above_clear
-                    and mid_dn not in protected
-                    and mid_dn not in footprint_blocked
-                    and _in_bounds(mid_dn, bounds)
-                    and mid_dn not in solid
-                    and mid_dn not in ix_non_air
-                    and mid_walkable(mid_dn, exempt_dn)
-                )
-                if mid_dn_ok and walkable(top_dn):
-                    if y - 2 <= min_y or (
-                        can_support((nx2, y - 3, nz2))
-                        and not _torch_below((nx2, y - 3, nz2))
-                    ):
-                        moves.append(_entry(pos, top_dn, 7, b_lo | b_mid | b_hi, extra=mid_dn))
-
-        # +1Y from tower top: only valid when this position was reached via a tower move
-        up = (x, y + 1, z)
-        if y + 1 <= max_bridge_y and walkable(up):
-            moves.append(_entry(pos, up, 1, 0, gate=2))
-
-        # Tower-up: 2 blocks to the side + 4 blocks up.
-        for tower_top, snap_bits in _tower_candidates(pos):
-            moves.append(_entry(pos, tower_top, 8, snap_bits))
-
-        return moves, _powered_minus4_move(pos)
-
-    def _tower_candidates(pos: tuple[int, int, int]) -> list[tuple[tuple[int, int, int], int]]:
-        """Tower-up moves from pos legal against the static world: (tower_top, snapshot bits of
-        the repeater, its support and the cell above it). (The cell below the tower base and the
-        column itself are outside the snapshot window; the finished path is checked for those.)"""
-        x, y, z = pos
-        out: list[tuple[tuple[int, int, int], int]] = []
-        if y + 4 > max_bridge_y:
-            return out
-        for tdx, tdz in _HORIZ_DIRS:
-            tower_top = (x + 2 * tdx, y + 4, z + 2 * tdz)
-            if not walkable(tower_top):
-                continue
-            rep = (x + tdx, y, z + tdz)
-            if not _in_bounds(rep, bounds) or rep in footprint_blocked or rep in protected:
-                continue
-            if rep in ix_non_air:
-                continue
-            rep_support = (x + tdx, y - 1, z + tdz)
-            if not can_support(rep_support):
-                continue
-            below_rep_support = (x + tdx, y - 2, z + tdz)
-            rep_support_cuts_slope = False
-            if _in_bounds(below_rep_support, bounds) and below_rep_support in ix_wire:
-                for dx, dz in _HORIZ_DIRS:
-                    maybe_next = (below_rep_support[0] + dx, below_rep_support[1] + 1, below_rep_support[2] + dz)
-                    if _in_bounds(maybe_next, bounds) and maybe_next in ix_wire:
-                        rep_support_cuts_slope = True
-                        break
-            if rep_support_cuts_slope:
-                continue
-
-            col_clear = True
-            for cdy in range(5):
-                cp = (x + 2 * tdx, y + cdy, z + 2 * tdz)
-                if not _in_bounds(cp, bounds) or cp in footprint_blocked or cp in protected:
-                    col_clear = False
-                    break
-                if cp in ix_non_air:
-                    col_clear = False
-                    break
-                for dx, dz in _HORIZ_DIRS:
-                    cp_side = (cp[0] + dx, cp[1], cp[2] + dz)
-                    if _in_bounds(cp_side, bounds) and cp_side in ix_wire:
-                        # If it's our own connection, we create a loop, if its others', we're interfering
-                        col_clear = False
-                        break
-                if not col_clear:
-                    break
-
-            if not col_clear:
-                continue
-            # Tower base will be powered — check cell below base has no foreign wire
-            below_base = (x + 2 * tdx, y - 1, z + 2 * tdz)
-            if _in_bounds(below_base, bounds):
-                below_owner = dust_owner.get(below_base)
-                if below_owner is not None and below_owner != net_id:
-                    continue
-                # If it's our own connection, we create a loop, if its others', we're interfering
-                if below_base in ix_wire:
-                    continue
-            out.append((tower_top, _snap_bit(tdx, 0, tdz) | _snap_bit(tdx, -1, tdz) | _snap_bit(tdx, 1, tdz)))
-        return out
-
-    m4_clear_cache: dict[tuple[int, int, int], bool] = {}
-
-    def m4_cell_clear(cp: tuple[int, int, int]) -> bool:
-        """Path-independent part of a -4 side cell check: no protected cell or foreign
-        owner among its cardinal neighbours at Y-1/0/+1, and not foreign-owned itself."""
-        if cp not in m4_clear_cache:
-            ok = True
-            for ddx, ddz in _HORIZ_DIRS:
-                for ddy in (-1, 0, 1):
-                    sp = (cp[0] + ddx, cp[1] + ddy, cp[2] + ddz)
-                    owner = dust_owner.get(sp)
-                    if sp in protected or (owner is not None and owner != net_id):
-                        ok = False
-                        break
-                if not ok:
-                    break
-            if ok:
-                owner = dust_owner.get(cp)
-                ok = owner is None or owner == net_id
-            m4_clear_cache[cp] = ok
-        return m4_clear_cache[cp]
-
-    def _powered_minus4_move(pos: tuple[int, int, int]) -> tuple | None:
-        """(move entry, [(forbid_bits, move_cells)] per side legal against the static world),
-        or None. Taken through the first side whose bits are clear of the snapshot."""
-        x, y, z = pos
-        if y - 4 < min_y:
-            return None
-        dest = (x, y - 4, z)
-        if not walkable(dest):
-            return None
-
-        # Support block at (x,y-1,z): permanent solid block — must not land in any
-        # footprint or protected zone (goal relief is for wire approach, not solid structures).
-        below_launch = (x, y - 1, z)  # own column: never in the snapshot window
-        if below_launch == goal or below_launch in terminal_positions or below_launch in footprint_blocked or below_launch in protected:
-            return None
-        if below_launch in solid:
-            if workspace[below_launch[0], below_launch[1], below_launch[2]] == GLASS:
-                return None
-        elif not (_in_bounds(below_launch, bounds) and below_launch not in ix_non_air):
-            return None
-
-        sides: list[tuple[int, tuple[tuple[int, int, int], ...]]] = []
-        for dx, dz, b_lo, b_mid, b_hi in _HORIZ_SNAP_BITS:
-            nx, nz = x + dx, z + dz
-
-            # All side/clearance cells must be air, unblocked, and unowned by foreign net.
-            # Use full protected (not effective_protected) — goal relief is for wire approach only,
-            # not for permanent solid blocks or torches placed by this move.
-            side_cells = (
-                (nx, y - 1, nz),  # first wall torch (inverted)
-                (nx, y - 2, nz),  # inverted dust
-                (nx, y - 3, nz),  # second support block
-                (x,  y - 3, z),   # second wall torch (active)
-                (nx, y,     nz),  # clearance above first torch
-                (x,  y - 2, z),   # clearance above second torch
-            )
-            ok = True
-            for cp in side_cells:  # cheap checks first
-                if (not _in_bounds(cp, bounds) or cp == goal or cp in terminal_positions
-                        or cp in footprint_blocked or cp in protected
-                        or cp in solid or cp in ix_non_air):
-                    ok = False
-                    break
-            if not ok or not all(m4_cell_clear(cp) for cp in side_cells):
-                continue
-
-            # Inverted dust at (nx,y-2,nz) must have no wire at slope-adjacent positions
-            # (horizontal cardinal ±1 Y) — dust connects slopingly and would pick up wrong signal.
-            for ddx, ddz in _HORIZ_DIRS:
-                for ddy in (-1, 1):
-                    sp = (nx + ddx, y - 2 + ddy, nz + ddz)
-                    if dust_owner.get(sp) is not None:
-                        ok = False
-                        break
-                if not ok:
-                    break
-            if ok:
-                # Side cells (and the cells above them) that fall in the snapshot window are
-                # (nx, y-1..y+1, nz). move_cells: cells this move fills besides the path cells.
-                # They go into the dest's path snapshot so later moves don't step into them
-                # (e.g. sloping up onto the second support block).
-                sides.append((b_lo | b_mid | b_hi, (below_launch, *side_cells)))
-
-        return (_entry(pos, dest, 8, 0), sides) if sides else None
 
 # Seed cells: prefer start itself; fall back to neighbors when blocked
     seeds: list[tuple[int, int, int]] = []
@@ -870,14 +524,14 @@ def _find_wire_path(
     group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
     initial_group_best_h = list(group_best_h)
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
-                   weight, time_limit, pos_list, h_list, expand, congestion_cost)
+                   weight, time_limit, pos_list, h_list, None, congestion_cost)
 
     def make_world():
-        """The kernel's own move generation over this search's world (None: the deprecated
-        Python expand, for container types the kernel can't read)."""
+        """The kernel's move generation over this search's world."""
         eprot, prot = _keepout_spec(effective_protected), _keepout_spec(protected)
         if eprot is None or prot is None or not isinstance(dust_owner, dict):
-            return None
+            raise TypeError("the A* kernel reads protected cells as a set or a _ForeignKeepout and dust_owner as a dict, "
+                            f"not {type(effective_protected).__name__}, {type(protected).__name__}, {type(dust_owner).__name__}")
         return _astar.World(
             ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
             goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,
@@ -894,7 +548,7 @@ def _find_wire_path(
         reached, best_node, _, early_stop_reason, came_from = _run_search(
             search_args, net_id, make_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
     if _SEARCH_LOG:
-        _log_search(net_id, best_seed, goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
+        _log_search(net_id, seeds[best], goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -951,203 +605,19 @@ def _check_tower_self_overlap(path: list[tuple[int, int, int]], net_id: str) -> 
                                   (c, (bx, by, bz)))
 
 
-def _search_py(seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
-               weight, time_limit, pos_list, h_list, expand, congestion_cost):
-    """DEPRECATED: Python version of the A* loop; _astar.search is the maintained one. Used only by
-    MINECRAFT_V_ASTAR=py/check and when the extension isn't built; not kept in sync.
-
-    Same arguments and results as _astar.search. Returns (reached node or None, best node, h_radius_pruned, early stop reason or
-    None, came_from mapping node -> parent node).
-
-    group_best_h is updated in place. expand(cell_id) returns the cell's static moves (see
-    _find_wire_path) and may grow pos_list/h_list.
-    """
-    # came_from is write-only during search (set at expansion, not push) and used
-    # only for final path reconstruction. All history-dependent move checks use
-    # path_snapshot carried per heap entry instead, so different paths to the same
-    # cell don't corrupt each other's move conditions.
-    came_from: dict[int, int] = {}  # node -> parent node
-    # Heap entry: (f, -h, g, counter, g_wire, node, parent_node, group). g_wire excludes conflict
-    # penalties so the f-cap only bounds real wire length, not negotiation cost.
-    # group: the seed group a node descends from (0 = start seeds, then one per tree seed).
-    # f-cap and h-radius budgets are per group: with one shared budget sized to the nearest
-    # tree seed, a boxed-in near branch starves every farther seed (and the start itself).
-    # counter is unique per push so comparison never falls through to node/parent.
-    # Nodes are (cell id << _NODE_SHIFT | tower flag | local_snapshot), so paths with different local histories
-    # coexist — a cheaper path with a restrictive snapshot does not block a more
-    # expensive path whose snapshot enables moves the cheaper one can't make.
-    # A seed's parent is _NO_PARENT.
-    counter = 0
-    open_heap = []
-    g_score: dict[int, int] = {}
-    for seed_key, group in zip(seed_nodes, seed_groups):
-        # Local snap of seed is empty — seed is never in its own window.
-        g_score[seed_key] = 0
-        h0 = h_list[seed_key >> _NODE_SHIFT]
-        heapq.heappush(open_heap, (weight * h0, -h0, 0, counter, 0, seed_key, _NO_PARENT, group))
-        counter += 1
-
-    reached: int | None = None
-    max_f: int = max(group_max_f)
-    explored: set[int] = set()
-    explored_xyz: set[int] = set()  # cell ids
-    stagnation = 0
-    h_radius_pruned = 0
-    early_stop_reason: str | None = None
-    deadline = time.monotonic() + time_limit if time_limit is not None else None
-    pops = 0
-    while open_heap:
-        pops += 1
-        if deadline is not None and pops & 255 == 0 and time.monotonic() > deadline:
-            early_stop_reason = f"timeout ({time_limit}s)"
-            break
-        f, _, g, _, g_wire, current_node, parent, group = heapq.heappop(open_heap)
-        # f-cap: prune nodes whose total estimated cost exceeds their group's budget; stop once
-        # past every group's. Catches runaway detours around impossible obstacles without
-        # burning _ROUTE_MAX_NODES.
-        f_wire = f - g + g_wire
-        if f_wire > group_max_f[group]:
-            if f_wire > max_f:
-                early_stop_reason = f"f-cap exceeded (f={f_wire} > max_f={max_f})"
-                break
-            continue
-        if g > g_score.get(current_node, 10 ** 9):
-            continue
-        # Record parent for path reconstruction. First expansion wins: subsequent
-        # expansions of the same cell (different local_snap) don't overwrite, so
-        # came_from forms a tree with strictly decreasing g toward the seed — no cycles.
-        if current_node not in came_from:
-            came_from[current_node] = parent
-        cid = current_node >> _NODE_SHIFT
-        cur_pos = pos_list[cid]
-        h = h_list[cid]
-        if h < best_h:
-            best_h = h
-            best_node = current_node
-        if h < group_best_h[group]:
-            group_best_h[group] = h
-        # Stagnation = consecutive re-expansions of already-explored (pos,snap) pairs.
-        # New territory always resets it; detours away from goal don't penalize.
-        if current_node in explored:
-            stagnation += 1
-            if stagnation >= _ROUTE_STAGNATION:
-                early_stop_reason = f"stagnated ({stagnation} re-expansions without new territory)"
-                break
-        else:
-            stagnation = 0
-            explored.add(current_node)
-            explored_xyz.add(cid)
-            # Unique-XYZ cap: more meaningful than (pos,snap) pair count.
-            if len(explored_xyz) >= _ROUTE_MAX_NODES:
-                early_stop_reason = f"node cap ({_ROUTE_MAX_NODES} unique positions)"
-                break
-        if cid in goal_ids:
-            reached = current_node
-            break
-        cur_snap = current_node & _SNAP_MASK
-        par_pos = pos_list[parent >> _NODE_SHIFT] if parent != _NO_PARENT else None
-        came_from_tower = bool(current_node & _TOWER_FLAG)
-        moves, m4 = expand(cid)
-        taken: list[tuple] = []
-        additional_blocked: list[tuple[int, int, int]] = []
-        for move in moves:
-            if cur_snap & move[2]:
-                continue
-            gate = move[3]
-            if gate and (gate == 1) == came_from_tower:
-                continue
-            taken.append(move)
-            if move[4] is not None:
-                additional_blocked.append(move[4])
-        m4_cells: tuple[tuple[int, int, int], ...] = ()
-        if m4 is not None:
-            for forbid, cells in m4[1]:
-                if not cur_snap & forbid:
-                    m4_cells = cells
-                    break
-        # Re-centre the snapshot (plus current itself and the cells this expansion's moves
-        # fill) onto each neighbour's window.
-        cb0, cb1, cb2 = cur_snap & 255, cur_snap >> 8 & 255, cur_snap >> 16
-        in_dir = (cur_pos[0] - par_pos[0], cur_pos[2] - par_pos[2]) if par_pos is not None else None
-        h_limit = group_best_h[group] * _H_RADIUS_FACTOR
-        if m4_cells:
-            taken.append(m4[0])
-        last = len(taken) - 1
-        for i, (nid, cost, _, _, _, (t0, t1, t2, self_bit), flat_dir, h, near, arrive_flag) in enumerate(taken):
-            # Penalise XZ direction change on flat moves only (avoids disrupting slope/tower costs).
-            if in_dir is not None and flat_dir is not None and flat_dir != in_dir:
-                cost += 1
-            new_g_wire = g_wire + cost
-            if congestion_cost is not None:
-                cost += congestion_cost(pos_list[nid])
-            new_g = g + cost
-            neighbor_snap = t0[cb0] | t1[cb1] | t2[cb2] | self_bit
-            move_cells = m4_cells if i == last else ()
-            if additional_blocked or move_cells:
-                nx, ny, nz = pos_list[nid]
-                for c in additional_blocked:
-                    neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
-                for c in move_cells:
-                    neighbor_snap |= _SNAP_BIT.get((c[0] - nx, c[1] - ny, c[2] - nz), 0)
-            nkey = nid << _NODE_SHIFT | arrive_flag | neighbor_snap
-            if new_g < g_score.get(nkey, 10 ** 9):
-                g_score[nkey] = new_g
-                if h <= h_limit or near:
-                    heapq.heappush(
-                        open_heap,
-                        (new_g + weight * h, -h, new_g, counter, new_g_wire, nkey, current_node, group),
-                    )
-                    counter += 1
-                else:
-                    h_radius_pruned += 1
-
-    return reached, best_node, h_radius_pruned, early_stop_reason, came_from
-
-
-# Which A* runs: MINECRAFT_V_ASTAR = kernel (default; the compiled _astar). Deprecated, kept
-# for now and not maintained: py (the Python loop and move generation) and check (both on every
-# search, raising on any difference). Without the extension, the Python version runs with a
-# warning.
-_ASTAR_MODE = os.environ.get("MINECRAFT_V_ASTAR", "kernel")
-if _ASTAR_MODE not in ("kernel", "py", "check"):
-    raise ValueError(f"MINECRAFT_V_ASTAR must be kernel, py or check, not {_ASTAR_MODE!r}")
-if _ASTAR_MODE != "kernel":
-    print(f"[astar] MINECRAFT_V_ASTAR={_ASTAR_MODE} is deprecated: the Python A* is no longer "
-          "maintained and may differ from the kernel", file=sys.stderr)
 _ASTAR_GRID = os.environ.get("MINECRAFT_V_ASTAR_GRID", "1")
 try:
     from . import _astar
 except ImportError as exc:
-    _astar = None
-    if _ASTAR_MODE != "py":
-        print(f"[astar] compiled kernel unavailable ({exc}); falling back to the deprecated Python A* "
-              "(run `uv sync` to build it)", file=sys.stderr)
-else:
-    if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
-        atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
-    # MINECRAFT_V_ASTAR_SUBSET=0: no subset dominance (_astar.set_subset_dominance), for the paths from before it.
-    # The Python search hasn't got it, so check mode goes without.
-    _astar.set_subset_dominance(os.environ.get("MINECRAFT_V_ASTAR_SUBSET", "1") != "0" and _ASTAR_MODE == "kernel")
-    _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
-                _ROUTE_MAX_EXPANSIONS, _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN,
-                _SIG_SHIFT, _REPEATER_INTERVAL)
-
-_check_stats = {"searches": 0, "py": 0.0, "kernel": 0.0}
-
-
-def _report_check_stats() -> None:
-    st = _check_stats
-    if st["searches"]:
-        print(f"[astar-check] {st['searches']} searches identical; loop time py {st['py']:.2f}s, "
-              f"kernel {st['kernel']:.2f}s ({st['py'] / max(st['kernel'], 1e-9):.1f}x)", file=sys.stderr)
-
-
-def _came_from_chain(came_from, node: int) -> list[int]:
-    chain = []
-    while node is not None and node != _NO_PARENT and len(chain) < 10 ** 7:
-        chain.append(node)
-        node = came_from.get(node)
-    return chain
+    raise ImportError(f"the compiled A* kernel (minecraft_v.placement_engine._astar) is missing: {exc}. "
+                      "Run `uv sync` to build it.") from exc
+if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
+    atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
+# MINECRAFT_V_ASTAR_SUBSET=0: no subset dominance (_astar.set_subset_dominance), for the paths from before it.
+_astar.set_subset_dominance(os.environ.get("MINECRAFT_V_ASTAR_SUBSET", "1") != "0")
+_astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
+            _ROUTE_MAX_EXPANSIONS, _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN,
+            _SIG_SHIFT, _REPEATER_INTERVAL)
 
 
 def _with_blocked(keepout, blocked: frozenset[tuple[int, int, int]]):
@@ -1170,7 +640,7 @@ _SEARCH_LOG = os.environ.get("ROUTE_SEARCH_LOG")
 
 
 def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
-    last = _astar.LAST if _astar is not None else {}
+    last = _astar.LAST
     with open(_SEARCH_LOG, "a") as f:
         f.write(f"{net_id},{seed[0]},{seed[1]},{seed[2]},{goal[0]},{goal[1]},{goal[2]},{int(ok)},"
                 f"{(reason or '').split(' ')[0]},{last.get('exp', 0)},{last.get('pos', 0)},{seconds:.4f}\n")
@@ -1179,30 +649,4 @@ def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,
                 budget: int = 1):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
-    if _astar is None or _ASTAR_MODE == "py":
-        return _search_py(*args)
-    world = make_world()
-    if _ASTAR_MODE == "kernel":
-        return _astar.search(*args, world, h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget)
-    # check: both loops from the same start state (group_best_h is updated in place).
-    group_best_h = args[3]
-    t0 = time.perf_counter()
-    ref = _search_py(*args[:3], list(group_best_h), *args[4:])
-    t1 = time.perf_counter()
-    got = _astar.search(*args, world, True, h_radius_factor=h_radius_factor)
-    t2 = time.perf_counter()
-    timed_out = any(r[3] is not None and r[3].startswith("timeout") for r in (ref, got))
-    if not timed_out:
-        for name, a, b in (("reached", ref[0], got[0]), ("best_node", ref[1], got[1]),
-                           ("h_radius_pruned", ref[2], got[2]), ("stop reason", ref[3], got[3])):
-            if a != b:
-                raise AssertionError(f"A* kernel mismatch on net {net_id}: {name} py={a!r} kernel={b!r}")
-        end = ref[0] if ref[0] is not None else ref[1]
-        if _came_from_chain(ref[4], end) != _came_from_chain(got[4], end):
-            raise AssertionError(f"A* kernel mismatch on net {net_id}: came_from chains differ")
-    if not _check_stats["searches"]:
-        atexit.register(_report_check_stats)
-    _check_stats["searches"] += 1
-    _check_stats["py"] += t1 - t0
-    _check_stats["kernel"] += t2 - t1
-    return got
+    return _astar.search(*args, make_world(), h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget)

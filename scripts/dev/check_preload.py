@@ -6,6 +6,10 @@ import os
 import random
 import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/
+from settle_schematic import headless_binary  # noqa: E402
 
 d, seed, H, modes = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 r = random.Random(seed)
@@ -18,9 +22,12 @@ def bus(name: str, width: int, value: int) -> None:
     L.extend(f"set {name}[{i}] {value >> i & 1}" for i in range(width))
 
 
+INVERTED = {int(p) for p in os.environ.get("INVERT_A", "").split(",") if p}  # ports whose m address is ~addr (variant)
+
+
 def check(addrs: list[int]) -> None:
     for p, a in enumerate(addrs):
-        word_a = M[a]
+        word_a = M[a ^ 15 if p in INVERTED else a]
         L.extend(f"expect a{p}[{i}] {word_a >> i & 1}" for i in range(2))
         L.extend(f"expect b{p}[{i}] {N[a] >> i & 1}" for i in range(3))
 
@@ -56,5 +63,5 @@ for _ in range(int(os.environ.get("STEPS", 30))):
     check(addrs)
 with open(f"{d}/p.script", "w") as f:
     f.write("\n".join(L) + "\n")
-sys.exit(subprocess.run([os.path.expanduser("~/Projects/MCHPRS/target/release/mchprs_headless"), "test", f"{d}/out.litematic", f"{d}/pins",
-                         f"{d}/p.script", "--modes", modes]).returncode)
+sys.exit(subprocess.run([headless_binary(), "test", f"{d}/out.litematic", f"{d}/pins",
+                         f"{d}/p.script", "--modes", modes, "--add-lever", "clk"]).returncode)

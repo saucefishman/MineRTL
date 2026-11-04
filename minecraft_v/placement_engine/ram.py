@@ -460,6 +460,22 @@ class StackSpec:
     nets: dict[str, object]  # input pin -> the net on it
 
 
+def _lone_lower_pin(specs: list[StackSpec]) -> tuple[int, str, str] | None:
+    """A (stack, lower pin, upper pin) whose lower read-address pin has a net to itself under a shared upper one. The
+    unfolded layout can't build it: the upper pin's tower reaches down its lane through the lower pin's line out."""
+    users: dict[object, int] = {}
+    for spec in specs:
+        for net in spec.nets.values():
+            users[net] = users.get(net, 0) + 1
+    for k, spec in enumerate(specs):
+        for bit in range(spec.abits):
+            for lower, upper in (("aa", "ac"), ("ab", "ad")):
+                alone, above = spec.nets.get(f"{lower}[{bit}]"), spec.nets.get(f"{upper}[{bit}]")
+                if alone is not None and above is not None and users[alone] == 1 and users[above] > 1:
+                    return k, f"{lower}[{bit}]", f"{upper}[{bit}]"
+    return None
+
+
 def build_group(name: str, specs: list[StackSpec], banks_out: list | None = None
                 ) -> tuple[Macro, dict[str, tuple[int, str]], dict[object, str]]:
     """Stacks side by side, every net two or more of them share on a prebuilt lane below them. Other inputs stay on their
@@ -475,12 +491,10 @@ def build_group(name: str, specs: list[StackSpec], banks_out: list | None = None
         for pin, net in spec.nets.items():
             users.setdefault(net, []).append((k, pin))
     shared = [net for net, ends in users.items() if len(ends) > 1]
-    for k, spec in enumerate(specs):
-        for bit in range(spec.abits):  # the upper pin's tower reaches down its lane through the lower pin's line out
-            for lower, upper in (("aa", "ac"), ("ab", "ad")):
-                alone, above = spec.nets.get(f"{lower}[{bit}]"), spec.nets.get(f"{upper}[{bit}]")
-                if not _FOLD and alone is not None and above is not None and len(users[alone]) == 1 and len(users[above]) > 1:
-                    raise ValueError(f"{name}: stack {k} has {lower}[{bit}] alone but {upper}[{bit}] shared")
+    if not _FOLD:
+        lone = _lone_lower_pin(specs)
+        if lone:
+            raise ValueError(f"{name}: stack {lone[0]} has {lone[1]} alone but {lone[2]} shared")
     lane_pins = {net: f"lane{n}" for n, net in enumerate(shared)}
     towers: list[dict[str, tuple[int, int, int]]] = [{} for _ in specs]
     local: list[list] = [[] for _ in specs]
@@ -874,7 +888,7 @@ def _group_width(specs: list[StackSpec]) -> int:
 def group_block(specs: list[StackSpec]) -> tuple[Macro, dict[str, tuple[int, str]], dict[object, str]]:
     global _FOLD
     if _FOLD_ENV is None:
-        _FOLD = _group_width(specs) > _FOLD_GROUP_WIDTH
+        _FOLD = _group_width(specs) > _FOLD_GROUP_WIDTH or _lone_lower_pin(specs) is not None
     numbers: dict[object, int] = {}  # a block depends on which pins share a net, not on what nets are called
     shape = [(s.row_bits, s.banks, s.base, s.abits, s.width, s.init,
               [(pin, numbers.setdefault(net, len(numbers))) for pin, net in s.nets.items()]) for s in specs]

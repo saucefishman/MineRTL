@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ from litemapy import Schematic
 from minecraft_v.placement_engine.probes import PROBE_MARKER, parse_format
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+from settle_schematic import headless_binary  # noqa: E402
 QUIET = "module main(input clk, input a, output reg o);\n    always @(posedge clk) o <= a;\nendmodule\n"
 DESIGN = """module main(input clk, input en, input [3:0] a, output reg o);
     wire [3:0] sum = a + 4'd3;
@@ -38,7 +41,7 @@ def build(tmp_path, *flags, design=DESIGN, env=None):
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src/main.v").write_text(design)
     out = tmp_path / "out.litematic"
-    subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--artifacts-dir", tmp_path / "art", "--no-settle",
+    subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--no-tiled-ram", "--artifacts-dir", tmp_path / "art", "--no-settle",
                     "--out-litematic", out, "--no-server-clock", *flags], cwd=ROOT, check=True, env=env)
     return out
 
@@ -71,7 +74,7 @@ def test_probes_tap_marked_blocks(tmp_path):
                 assert "repeater" in region[tuple(entry["pos"])].id or "torch" in region[tuple(entry["pos"])].id
 
 
-HEADLESS = Path(os.environ.get("MCHPRS_HEADLESS", Path.home() / "Projects/MCHPRS/target/release/mchprs_headless"))
+HEADLESS = Path(headless_binary())
 # Word 2 is a flip-flop in the macro; `read` comes through the read mux. Neither has a wire to anything but the print.
 IN_MACRO = """module main(input clk, output reg [2:0] a);
     initial a = 0;
@@ -94,7 +97,7 @@ def test_prints_read_inside_macros(tmp_path, bits, macro, flags):
     (tmp_path / "src").mkdir()
     (tmp_path / "src/main.v").write_text(IN_MACRO.format(d=bits - 1))
     out = tmp_path / "out.litematic"
-    run = subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--artifacts-dir", tmp_path / "art", "--out-litematic", out,
+    run = subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--no-tiled-ram", "--artifacts-dir", tmp_path / "art", "--out-litematic", out,
                           "--server-clock", "--macro-cache", tmp_path / "cache", *flags],
                          cwd=ROOT, env={**os.environ, "PYTHONHASHSEED": "0", "MCHPRS_HEADLESS": str(HEADLESS)},
                          capture_output=True, text=True, check=True)
@@ -161,7 +164,7 @@ def synth_auto(tmp_path, headless, design=QUIET):
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src/main.v").write_text(design)
     out = tmp_path / "out.litematic"
-    subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--artifacts-dir", tmp_path / "art", "--no-settle",
+    subprocess.run([ROOT / "synth.sh", tmp_path / "src", "--no-tiled-ram", "--artifacts-dir", tmp_path / "art", "--no-settle",
                     "--out-litematic", out], cwd=ROOT, check=True, env={**os.environ, "MCHPRS_HEADLESS": str(headless)})
     return out
 

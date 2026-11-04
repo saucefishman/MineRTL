@@ -11,9 +11,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from settle_schematic import headless_binary
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/
+from settle_schematic import headless_binary  # noqa: E402
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT = "set switch 1\nsettle 250\n" + "expect q 1\npulse _clk 200\nsettle 250\n" * 4
 INVERTED_SCRIPT = ("settle 250\nexpect q[0] 1\nexpect q[1] 0\nexpect q[2] 1\nexpect q[3] 0\n"
                    "pulse _clk 200\nsettle 250\nexpect q[0] 0\nexpect q[1] 1\nexpect q[2] 0\nexpect q[3] 1\n")

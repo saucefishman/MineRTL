@@ -1,5 +1,5 @@
 // Clocks that rest high at power-up, with one input per flip-flop kind: settling must keep every initial value.
-// The enabled pair has enable high at rest, so it would capture too if the clock weren't held. See scripts/check_powerup.py.
+// The enabled pair has enable high at rest, so it would capture too if the clock weren't held. See scripts/dev/check_powerup.py.
 module main(input _clk, input d, input hold, output [3:0] q);
 
     wire clk = ~_clk;

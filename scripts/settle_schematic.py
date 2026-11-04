@@ -7,6 +7,7 @@ Usage: settle_schematic.py <in.litematic> <component_layout.json> <out.litematic
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,11 +20,12 @@ with phase("[settle] starting"):
     from litemapy import Schematic
 
 def headless_binary() -> str:
-    """MCHPRS's headless runner: $MCHPRS_HEADLESS, else under $MCHPRS_DIR (default ~/Projects/MCHPRS)."""
+    """MCHPRS's headless runner: $MCHPRS_HEADLESS, else under $MCHPRS_DIR if set, else `mchprs_headless` on PATH."""
     if "MCHPRS_HEADLESS" in os.environ:
         return os.environ["MCHPRS_HEADLESS"]
-    root = Path(os.environ.get("MCHPRS_DIR", Path.home() / "Projects/MCHPRS"))
-    return str(root / "target/release/mchprs_headless")
+    if "MCHPRS_DIR" in os.environ:
+        return str(Path(os.environ["MCHPRS_DIR"]) / "target/release/mchprs_headless")
+    return shutil.which("mchprs_headless") or "mchprs_headless"
 
 
 # Template x, z -> properties in the clock-low state, for the blocks whose saved state differs.

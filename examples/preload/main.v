@@ -1,5 +1,5 @@
 // Two preloaded memories on shared addresses: a RAM group whose contents must read back before any write.
-// Build with --tiled-ram, check with scripts/check_preload.py.
+// Check with scripts/dev/check_preload.py.
 module main(input clk, input [3:0] addr0, input [3:0] addr1, input [3:0] addr2, input [3:0] addr3,
     output [1:0] a0, output [1:0] a1, output [1:0] a2, output [1:0] a3,
     output [2:0] b0, output [2:0] b1, output [2:0] b2, output [2:0] b3,

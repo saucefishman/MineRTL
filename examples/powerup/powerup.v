@@ -1,5 +1,5 @@
 // Smallest circuit found that loses state at power-up when pasted unsettled: on --place-seed 7, a false
-// clock pulse and a false enable pulse overlap on one word, which overwrites its 1. See scripts/check_powerup.py.
+// clock pulse and a false enable pulse overlap on one word, which overwrites its 1. See scripts/dev/check_powerup.py.
 module main(input _clk, input switch, input wen, output q);
 
     wire clk = _clk & switch;

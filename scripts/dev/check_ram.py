@@ -13,9 +13,10 @@ from litemapy import Region, Schematic
 
 from minecraft_v.placement_engine.ir import Direction
 from minecraft_v.placement_engine.ram import build_ram, build_stack
-from settle_schematic import headless_binary
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/
+from settle_schematic import headless_binary  # noqa: E402
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 MODES = "noupdate,redstone,redpiler"
 ARRAY_SETTLE = 300  # towers add up in a tall stack
 HALF_PERIOD = 40

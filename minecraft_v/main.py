@@ -293,7 +293,7 @@ def main():
     args = parser.parse_args()
 
     set_debug(args.debug)
-    if args.debug and pathfinding._astar is not None:
+    if args.debug:
         atexit.register(lambda: print(f"[astar-stats] {pathfinding._astar.stats()}", file=sys.stderr))
 
     out_litematic = Path(args.out_litematic)

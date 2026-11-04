@@ -3,7 +3,7 @@
 Simulate net power states for N clock cycles from component_list.json.
 
 Usage:
-    uv run simulate.py [options]
+    uv run python scripts/simulate.py [options]
 
 Options:
     --component-list PATH   component_list.json path (default: build/artifacts/component_list.json)
@@ -13,8 +13,8 @@ Options:
     --show-all              print all nets each cycle (default: only output pins)
 
 Example:
-    uv run simulate.py --cycles 4 --show-all
-    uv run simulate.py --cycles 8 --inputs reset.reset=1
+    uv run python scripts/simulate.py --cycles 4 --show-all
+    uv run python scripts/simulate.py --cycles 8 --inputs reset.reset=1
 """
 
 import argparse

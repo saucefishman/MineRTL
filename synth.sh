@@ -17,7 +17,7 @@ out_litematic_dir=""
 out_litematic="build/result.litematic"
 synth_only=false
 debug_prints=true
-tiled_ram=false
+tiled_ram=true
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,8 +37,12 @@ while [[ $# -gt 0 ]]; do
             out_litematic_dir="${1#*=}"
             shift
             ;;
-        --tiled-ram)  # memories with a supported port layout become tiled arrays
+        --tiled-ram)  # memories with a supported port layout become tiled arrays (the default)
             tiled_ram=true
+            shift
+            ;;
+        --no-tiled-ram)  # every memory becomes flip-flops and muxes
+            tiled_ram=false
             shift
             ;;
         --synth-only)  # stop after writing the netlist
@@ -97,7 +101,13 @@ if [[ -f "$default_pin_targets_json" && "$has_output_pin_targets_flag" == false 
 fi
 
 # An MCHPRS with clock support can drive the clock, which saves the generated clock's space. An explicit clock flag wins.
-headless="${MCHPRS_HEADLESS:-${MCHPRS_DIR:-$HOME/Projects/MCHPRS}/target/release/mchprs_headless}"
+if [[ -n "${MCHPRS_HEADLESS:-}" ]]; then
+    headless="$MCHPRS_HEADLESS"
+elif [[ -n "${MCHPRS_DIR:-}" ]]; then
+    headless="$MCHPRS_DIR/target/release/mchprs_headless"
+else
+    headless="$(command -v mchprs_headless || true)"
+fi
 has_clock_flag=false
 for arg in "$@"; do
     case "$arg" in
@@ -107,7 +117,7 @@ for arg in "$@"; do
             ;;
     esac
 done
-if [[ -x "$headless" && "$has_clock_flag" == false ]] && [[ "$("$headless" test --help 2>/dev/null || true)" == *--run-clock* ]]; then
+if [[ -n "$headless" && -x "$headless" && "$has_clock_flag" == false ]] && [[ "$("$headless" test --help 2>/dev/null || true)" == *--run-clock* ]]; then
     set -- "$@" --server-clock
     echo "[clock] MCHPRS drives the clock. If it stays still: rebuild and restart the server, and stand on the plot (plots only tick with a player)." >&2
 fi

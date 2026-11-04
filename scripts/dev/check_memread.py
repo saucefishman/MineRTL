@@ -12,9 +12,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from settle_schematic import headless_binary
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/
+from settle_schematic import headless_binary  # noqa: E402
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 WORDS = [int(line, 16) for line in (ROOT / "examples/memread/memread.hex").read_text().split()]
 CLOCK_WIDTH, SETTLE = 200, 250
 
