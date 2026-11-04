@@ -178,7 +178,7 @@ def test_blockers_finds_jobs_near_a_goal():
 
 # --- signal depth (repeater slots) -----------------------------------------------------------
 
-# A stretch net_859 (video) was routed on: every move steps down, so no cell can hold a repeater.
+# A stretch a net was routed on: every move steps down, so no cell can hold a repeater.
 _ALL_DOWN = [(109, 51, 127), (109, 50, 128), (111, 48, 128), (113, 46, 128), (113, 45, 127),
              (111, 43, 127), (109, 41, 127), (108, 40, 127), (107, 39, 127), (107, 38, 126)]
 
@@ -220,7 +220,7 @@ def test_router_breaks_long_descent_for_repeaters(drop, horiz):
 
 
 def test_router_gets_past_a_wall_on_a_wider_budget():
-    # cpu net_104: source and sink at either X end of a memory bank. A clear route exists, but the search
+    # Source and sink at either X end of a memory bank. A clear route exists, but the search
     # spends a normal budget on states along the near face.
     bounds = (0, 0, 0, 29, 44, 104)
     rec = Recorder()
@@ -521,7 +521,7 @@ def test_repair_reroutes_a_net_verify_finds_fault_with():
 
 
 def test_repair_runs_on_a_layout_with_a_macro(monkeypatch):
-    # floweypu: one RAM block turned repair off for the whole design, so faults only surfaced at the flat verify.
+    # One RAM block turned repair off for the whole design, so faults only surfaced at the flat verify.
     from types import SimpleNamespace
 
     from minecraft_v.placement_engine.ir import ComponentType, NetConnection, NetEndpoint
@@ -547,7 +547,7 @@ def test_repair_runs_on_a_layout_with_a_macro(monkeypatch):
 
 
 def test_no_repeater_at_a_slopes_foot():
-    # floweypu net_2891, net_8652: it reads the block under the slope, which can be glass or powered by other wire.
+    # A repeater there reads the block under the slope, which can be glass or powered by other wire.
     assert pathfinding._signal_step(3, 0, (1, -1, 0)) == (4, 0)
     region = Region(0, 0, 0, 40, 6, 3)
     path = [(x, 3, 1) for x in range(1, 3)] + [(x, 2, 1) for x in range(3, 17)]
@@ -560,7 +560,7 @@ def test_no_repeater_at_a_slopes_foot():
 
 
 def test_repeater_at_a_slopes_foot_when_allowed():
-    # examples/cpu, routed banks: without these it fails routing on every seed tried. main.py turns them on without RAM blocks.
+    # Routed banks without RAM blocks fail routing without these; main.py turns them on for such designs.
     pathfinding.set_foot_repeaters(True)
     try:
         assert pathfinding._signal_step(3, 0, (1, -1, 0)) == (4, 1)
@@ -576,7 +576,7 @@ def test_repeater_at_a_slopes_foot_when_allowed():
 
 
 def test_no_repeater_at_a_sinks_pin_cell():
-    # floweypu net_2367: a later branch leaves from a sink's pin cell and runs straight on, and the repeater search
+    # A later branch leaves from a sink's pin cell and runs straight on, and the repeater search
     # picked that cell, so the gate read the repeater's output side and never switched.
     sink = (_REPEATER_INTERVAL - 1, 2, 1)
     first = [(x, 2, 1) for x in range(0, sink[0] + 1)]
@@ -598,7 +598,7 @@ def test_long_edge_leads_split_only_long_tree_edges():
 
 
 def test_long_edge_split_only_on_large_designs(monkeypatch):
-    # examples/cpu (4509 gates) and bpmem (345) route slower split, floweypu (12448) faster.
+    # Mid-size designs (hundreds to a few thousand gates) route slower split, large ones faster.
     monkeypatch.setattr(builder, "_long_edge_split", [0])
     builder.set_long_edge_split(4509)
     assert builder._long_edge_split[0] == 0

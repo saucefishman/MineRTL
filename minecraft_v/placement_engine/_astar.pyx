@@ -609,7 +609,7 @@ cdef class CellGrid:
     one read. It lives as long as a router, kept current by the containers' writers
     (JournaledSet, JournaledDict, _BlockIndex.update call put / put_owner), so nothing is rebuilt
     per search. Filled up front, region blocks from an array since walking millions of tuples is
-    slow, except the footprint set: 13M tuples on the full CPU, three minutes to walk on a loaded
+    slow, except the footprint set: millions of tuples on a large design, minutes to walk on a loaded
     machine, so each cell asks it once, when first read. Keepouts come from a count dict that
     doesn't change once built (load_keepout). Only cells with blocks are written, leaving other
     pages untouched. Cells outside the grid aren't mirrored; World reads those from the containers."""
@@ -2059,7 +2059,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
 # verify._inverted_contacts and verify.find_gate_contacts over the same powers relation as
 # verify._World, read from the region's array. All they say is whether a check has something to
 # report. Next to no net does, and for those verify works out what, so what they report stays
-# verify's: change the rules there and here together (MINECRAFT_V_NET_CHECKS=check compares them).
+# verify's: change the rules there and here together (setting builder._NET_CHECKS to "check" compares them).
 
 cdef enum:  # verify's _AIR, _DUST, ...
     K_AIR, K_DUST, K_REPEATER, K_TORCH, K_WALL_TORCH, K_OPAQUE, K_OTHER

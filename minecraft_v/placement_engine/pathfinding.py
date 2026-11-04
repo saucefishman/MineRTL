@@ -64,7 +64,7 @@ def _snap_shift_tables(d: tuple[int, int, int]) -> tuple[tuple[int, ...], tuple[
 
 def set_foot_repeaters(on: bool) -> None:
     """Allow repeaters at a slope's foot. They can read a glass or powered block under the slope, which verify and repair
-    catch, but without them a design of routed banks can't find routes: examples/cpu fails on every seed tried. Off for
+    catch, but without them a design of routed banks can fail routing on every seed. Off for
     designs with RAM blocks, where nearly every net has to be right first time."""
     _foot_repeaters[0] = on
     _astar.set_foot_repeaters(on)

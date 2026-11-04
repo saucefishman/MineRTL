@@ -36,4 +36,5 @@ pythonpath = ["."]
 dev = [
     "pytest>=9.0.3",
     "Cython>=3.0",
+    "nbtlib",
 ]

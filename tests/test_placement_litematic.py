@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -157,6 +158,7 @@ def test_dffe_template_fits_its_footprint_and_keeps_the_clock_dust():
     assert template[x0 + 5, y0 + 1, z0 + 3].id == "minecraft:redstone_wire"
 
 
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
 def test_synth_works_without_mchprs_headless(tmp_path: Path):
     import os
     import subprocess
@@ -165,6 +167,21 @@ def test_synth_works_without_mchprs_headless(tmp_path: Path):
     run = subprocess.run(
         ["./synth.sh", "examples/counter", "--artifacts-dir", str(tmp_path / "artifacts"),
          "--out-litematic", str(out)],
+        cwd=Path(__file__).resolve().parent.parent,
         env={**os.environ, "MCHPRS_HEADLESS": str(tmp_path / "missing")}, capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
     assert out.exists()
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_synth_runs_on_a_project_path_with_spaces(tmp_path: Path):
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    project = tmp_path / "my project"
+    project.mkdir()
+    (project / "main.v").write_text((root / "examples/counter/counter.v").read_text())
+    run = subprocess.run([root / "synth.sh", project, "--synth-only", "--artifacts-dir", tmp_path / "art dir"],
+                         cwd=root, capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+    assert (tmp_path / "art dir" / "netlist.json").exists()

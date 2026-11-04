@@ -166,6 +166,7 @@ def test_cached_macro_keeps_print_drivers_and_old_caches_rebuild(tmp_path):
     assert load_macro("m", tmp_path) is None
 
 
+@needs_yosys
 def test_macros_are_on_by_default(tmp_path):
     out = tmp_path / "result.litematic"
     run = subprocess.run(

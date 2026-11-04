@@ -814,7 +814,7 @@ _first_fanout = [64]
 
 def set_first_fanout(fanout: int) -> None:
     """Nets of this fanout or more route first and aren't ripped up as blockers. RAM blocks need it, but on a design
-    without them it walls in later nets: examples/cpu --no-macros fails on seed 0."""
+    without them it walls in later nets and can fail routing."""
     _first_fanout[0] = fanout
 
 
@@ -1516,15 +1516,15 @@ _SPLIT_MIN_GATES = 10_000
 
 
 def set_long_edge_split(gates: int) -> None:
-    """Split long edges every 100 blocks on designs of _SPLIT_MIN_GATES or more. floweypu routes 5% faster; examples/cpu
-    routes 19% slower and bpmem a little slower, so small designs keep it off."""
+    """Split long edges every 100 blocks on designs of _SPLIT_MIN_GATES or more. it routes large designs a few percent
+    faster and small ones slower, so small designs keep it off."""
     _long_edge_split[0] = 100 if gates >= _SPLIT_MIN_GATES else 0
 
 
 def _long_edge_leads(src: Pos, sinks: list[Pos], split: int) -> list[Pos]:
     """Soft waypoints along the long edges of the terminals' spanning tree, every split blocks.
 
-    On floweypu a search over 100 blocks failed 16% of the time, one under 50 about 1%. Waypoints are leads: one that
+    On a large design a search over 100 blocks failed 16% of the time, one under 50 about 1%. Waypoints are leads: one that
     can't be reached is skipped, and the sink is searched for from the wire laid so far.
     """
     points = np.array([src, *sinks], dtype=np.int32)

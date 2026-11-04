@@ -180,12 +180,12 @@ opt_clean
 peepopt
 opt -full -purge
 memory_collect
-techmap -map ${here}/techmap/ram_2r1w.v -map ${here}/techmap/ram_4r2w.v t:\$mem_v2"
+techmap -map \"${here}/techmap/ram_2r1w.v\" -map \"${here}/techmap/ram_4r2w.v\" t:\$mem_v2"
 fi
 abc_step=""
 if [[ "$tiled_ram" == true ]]; then
     # A full adder with a tied input folds to gates first, then &syn2 restructures: 18% fewer nets, about half the gate delay.
-    abc_step="techmap -map ${here}/techmap/fa_const.v
+    abc_step="techmap -map \"${here}/techmap/fa_const.v\"
 techmap
 opt -nosdff
 opt_clean
@@ -194,8 +194,8 @@ opt_clean"
 fi
 yosys_status=0
 yosys -q -l "$yosys_log" -p "
-read_verilog -sv ${dir}/*.v
-read_verilog -lib ${here}/techmap/ram_cells.v
+read_verilog -sv \"${dir}/*.v\"
+read_verilog -lib \"${here}/techmap/ram_cells.v\"
 hierarchy -check -top ${top}
 flatten -noscopeinfo
 proc
@@ -203,19 +203,19 @@ ${strip_debug}
 ${map_tiled_ram}
 memory_map
 dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
-techmap -map ${here}/techmap/dlatch_map.v
+techmap -map \"${here}/techmap/dlatch_map.v\"
 opt
-techmap -map ${here}/techmap/sdff_decompose.v -map ${here}/techmap/sdffe_decompose.v
-techmap -map ${here}/techmap/fa_map.v
+techmap -map \"${here}/techmap/sdff_decompose.v\" -map \"${here}/techmap/sdffe_decompose.v\"
+techmap -map \"${here}/techmap/fa_map.v\"
 techmap
 dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
-techmap -map ${here}/techmap/dffe_pn_decompose.v
+techmap -map \"${here}/techmap/dffe_pn_decompose.v\"
 opt -nosdff
-techmap -map ${here}/techmap/sdff_decompose.v -map ${here}/techmap/sdffe_decompose.v
-techmap -map ${here}/techmap/dffe_pn_decompose.v
+techmap -map \"${here}/techmap/sdff_decompose.v\" -map \"${here}/techmap/sdffe_decompose.v\"
+techmap -map \"${here}/techmap/dffe_pn_decompose.v\"
 opt_clean
 ${abc_step}
-write_json ${artifacts_dir}/netlist.json
+write_json \"${artifacts_dir}/netlist.json\"
 stat
 " > "$yosys_err" 2>&1 || yosys_status=$?
 stop_spinner

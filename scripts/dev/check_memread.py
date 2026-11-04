@@ -4,7 +4,7 @@ Counts through the preloaded words several times, then stores the count on some 
 on the same edge, so a word that holds badly stores count + 1. The clock is gated (_clk & switch), and hold fixing has to
 see through that gate.
 
-Usage: check_memread.py <netlist.json> <out_dir> <seed> [minecraft_v args...]
+Usage: check_memread.py <netlist.json> <out_dir> <seed> [minecraft_v args...]. Env: QUIET=1 hides the build output.
 """
 import os
 import random

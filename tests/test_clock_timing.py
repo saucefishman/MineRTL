@@ -132,7 +132,7 @@ def test_window_arcs_are_a_pulse_on_the_falling_edge():
     edges = build_window().edges["clk"]["window"]
     assert edges.keys() == {(False, True), (False, False)}
     assert edges[False, True] < edges[False, False]
-    # Routed wire ends outside the pin repeater, so an arc counts it: examples/mem failed at its clock by these ticks.
+    # Routed wire ends outside the pin repeater, so an arc counts it; leaving it out made a design fail at its generated clock by these ticks.
     assert edges[False, True] == 7 and edges[False, False] == 25
 
 

@@ -87,6 +87,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "cython" },
+    { name = "nbtlib" },
     { name = "pytest" },
 ]
 
@@ -102,6 +103,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "cython", specifier = ">=3.0" },
+    { name = "nbtlib" },
     { name = "pytest", specifier = ">=9.0.3" },
 ]
 

@@ -44,7 +44,7 @@ _REFINE_POPS = 60
 _STATUS_EVERY = 50           # gates between progress line updates
 _IO_COLUMN_CLEAR = 4         # a gate this close in X is in an IO column's way: nearer, a pin lands in the
                              # keepout of the gate's terminal and its wire can't start
-_DENSE_GATES = 700           # at or above: dense spacing, regsbig and video
+_DENSE_GATES = 700           # at or above: dense spacing
 _LOOSE, _DENSE = (6, 6), (8, 8)
 
 _IO_TYPES = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)

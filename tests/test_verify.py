@@ -407,7 +407,7 @@ def test_wire_on_a_live_pin_with_no_net_is_a_violation():
 
     region = Region(0, 0, 0, 8, 4, 4)
     region[1, 1, 1] = BlockState("minecraft:redstone_wire")
-    region[2, 1, 1] = BlockState("minecraft:red_wool")  # bpmem, t1: a repeater strongly powers a wire's support
+    region[2, 1, 1] = BlockState("minecraft:red_wool")  # a repeater strongly powers a wire's support
     region[3, 1, 1] = BlockState("minecraft:glass")
     pins = {"dust": (1, 1, 1), "wool": (2, 1, 1), "glass": (3, 1, 1), "clear": (4, 1, 1), "outside": (9, 1, 1)}
     found = find_live_pin_wire(region, pins)
@@ -432,7 +432,7 @@ def test_hold_only_converts_dust_on_a_straight_run():
 
 
 def test_hold_keeps_dust_that_powers_a_torch_below():
-    # cpu net_118: a repeater on a powered -4 drop's launch cell leaves the drop's torch stuck.
+    # A repeater on a powered -4 drop's launch cell leaves the drop's torch stuck.
     from litemapy import BlockState, Region
 
     from minecraft_v.placement_engine.hold import _straight_run
@@ -480,7 +480,7 @@ def _torch_drop(region: Region, owner: dict) -> None:
 
 
 def test_torch_drop_feeding_its_own_input_is_a_latch():
-    """hf3's net_1820: the wire after a drop joined the wire before it, and stuck high from power-up."""
+    """The wire after a drop joined the wire before it, and stuck high from power-up."""
     region, owner = _region(), {}
     _torch_drop(region, owner)
     _wire(region, owner, "a", _line_x(2, 7, 3, 8) + _line_z(6, 7, 3, 2))
@@ -497,7 +497,7 @@ def test_torch_drop_going_on_is_not_a_latch():
 
 
 def test_repeater_across_a_pin_cell_is_open():
-    """hf3's net_2367 and three nets on h1: wire ran past a gate's pin with a repeater on the pin's cell, and the gate
+    """Wire ran past a gate's pin with a repeater on the pin's cell, and the gate
     never switched."""
     region, owner = _region(), {}
     _wire(region, owner, "a", _line_x(2, 3, 3, 5) + _line_x(5, 6, 3, 5))

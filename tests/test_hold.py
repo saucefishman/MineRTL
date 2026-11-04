@@ -118,7 +118,7 @@ def _skewed_world(region):
 
 
 def test_short_path_with_no_room_is_a_hold_violation():
-    # floweypu_loop: a few sloped cells between flip-flops 24 ticks apart in clock, nowhere to put a repeater.
+    # A few sloped cells between flip-flops 24 ticks apart in clock, nowhere to put a repeater.
     for bulk in (True, False):
         region = (BulkRegion if bulk else Region)(0, 0, 0, 40, 8, 60)
         components, clock, terminals = _skewed_world(region)

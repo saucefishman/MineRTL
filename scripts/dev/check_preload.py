@@ -1,6 +1,7 @@
 """A preloaded RAM read back from a settled build before any write, then random traffic, against its model.
 
 Usage: check_preload.py <dir with out.litematic and pins> <seed> <half period> <modes>. For a build of examples/preload.
+Env: STEPS sets the random write steps (default 30).
 """
 import os
 import random
@@ -22,12 +23,9 @@ def bus(name: str, width: int, value: int) -> None:
     L.extend(f"set {name}[{i}] {value >> i & 1}" for i in range(width))
 
 
-INVERTED = {int(p) for p in os.environ.get("INVERT_A", "").split(",") if p}  # ports whose m address is ~addr (variant)
-
-
 def check(addrs: list[int]) -> None:
     for p, a in enumerate(addrs):
-        word_a = M[a ^ 15 if p in INVERTED else a]
+        word_a = M[a]
         L.extend(f"expect a{p}[{i}] {word_a >> i & 1}" for i in range(2))
         L.extend(f"expect b{p}[{i}] {N[a] >> i & 1}" for i in range(3))
 

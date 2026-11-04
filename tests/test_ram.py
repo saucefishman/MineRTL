@@ -215,8 +215,8 @@ def test_group_settled_bank_by_bank_equals_settled_whole(monkeypatch, workers):
 
 
 def test_a_live_pin_with_no_net_keeps_wire_off_its_cell():
-    # bpmem: takes' bit 0 is never read on two ports and wpc1[15:9] go nowhere, but those pins still drive their cells.
-    # next_pc1's select was routed over the first, wpc1[8]'s wire over the second.
+    # An unused read bit and unused high write bits go nowhere, but those pins still drive their cells.
+    # A select was routed over the first, another wire over the second.
     from types import SimpleNamespace as NS
 
     from minecraft_v.placement_engine.builder import _terminal_keepout, _unused_output_terminals
@@ -244,3 +244,15 @@ def test_only_a_group_too_wide_for_a_plot_folds_by_default(monkeypatch):
     predictor_only = [StackSpec(6, 8, 0, 9, 16, [], {}), StackSpec(6, 8, 0, 9, 2, [], {})] + [StackSpec(6, 8, 0, 11, 2, [], {})] * 4
     assert ram._group_width(predictor_only) <= ram._FOLD_GROUP_WIDTH
     assert ram._group_width([_spec()]) <= ram._FOLD_GROUP_WIDTH
+
+
+def test_a_lone_lower_read_pin_under_a_shared_upper_one_is_found():
+    """The unfolded group layout can't build it, so group_block folds instead of failing."""
+    from minecraft_v.placement_engine.ram import StackSpec, _lone_lower_pin
+
+    def spec(nets):
+        return StackSpec(2, 1, 0, 1, 1, [0, 0, 0, 0], nets)
+
+    shared = spec({"aa[0]": 1, "ac[0]": 2})
+    assert _lone_lower_pin([shared, spec({"aa[0]": 1, "ac[0]": 2})]) is None
+    assert _lone_lower_pin([shared, spec({"aa[0]": 3, "ac[0]": 2})]) == (0, "aa[0]", "ac[0]")

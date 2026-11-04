@@ -227,7 +227,7 @@ def _bank(height: int, **metadata) -> Component:
 
 
 def test_routed_banks_stay_in_one_stack():
-    """examples/cpu's banks: a second stack doubled the width and walled nets off from pins on the banks' faces."""
+    """Routed banks: a second stack doubled the width and walled nets off from pins on the banks' faces."""
     gates = [_bank(h) for h in (67, 67, 41, 41)]
     fixed, width, height = poisson._stack_banks(gates, list(range(4)), 24)
     assert {origin[0] for origin in fixed.values()} == {0.0}

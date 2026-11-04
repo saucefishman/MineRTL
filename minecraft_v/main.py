@@ -336,7 +336,7 @@ def main():
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")
         if any(c.metadata.get("bank") for c in component_list.components):
-            # Gates around a bank stack: what mem and regsbig route clean with. Without banks, the usual auto spacing.
+            # Gates around a bank stack: what routes clean around banks. Without banks, the usual auto spacing.
             spacing = {"gutter": _BANK_GUTTER, "component_depth_spacing": _BANK_ROUTING_GUTTER,
                        "additional_component_height_spacing": _BANK_Y_SPACING}
 
