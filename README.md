@@ -50,7 +50,7 @@ This takes about a second and writes `build/result.litematic`, about 35×32×27 
 
 > If you've installed the MCHPRS fork's `mchprs_headless` (below), `synth.sh` leaves the clock out, so that MCHPRS can drive it, and the counter won't count in normal Minecraft. Add `--no-server-clock` to build a clock in.
 
-[`examples/README.md`](examples/README.md) lists the other examples, from `helloworld` (one gate) to `video` (a frame buffer of over 1,100 wires that takes a few minutes).
+[`examples/README.md`](examples/README.md) lists the other examples, from `helloworld` (one gate) to `video` (an animation played from one preloaded memory onto a screen of lamps).
 
 ## Your Own Design
 
@@ -60,7 +60,7 @@ Make a directory with your `.v` files, where the top module is called `main` (or
 ./synth.sh path/to/mydesign
 ```
 
-The design has to be synthesizable Verilog: no `#` delays, and `initial` only for starting values of registers and memories. Its inputs and outputs become levers and lamps. A clock input named `clk` or `_clk` gets the built-in clock. If the directory has a `pin_targets.json`, outputs are routed to the positions it lists (see `examples/sevenseg`).
+The design has to be synthesizable Verilog: no `#` delays, and `initial` only for starting values of registers and memories. Its inputs and outputs become levers and lamps. A clock input named `clk` or `_clk` gets the built-in clock. If the directory has a `pin_targets.json`, outputs are routed to the positions it lists (see `examples/sevenseg`). A position given as `{"x": 0, "y": 1, "tile": 3}` gets a 3x3 tile of lamps, lit while the output is low, which can touch its neighbours (see `examples/video`).
 
 **If a build fails:** the build prints lines starting with `[verify]` for wires it couldn't connect or that interfere. Routing depends on where gates were placed, so the first thing to try is another placement: `--place-seed 1`, `--place-seed 2`, and so on.
 
@@ -116,7 +116,7 @@ Script commands: `settle N` (run N ticks), `set NAME 0|1`, `pulse NAME N`, `expe
 
 ## Limitations
 
-- Memories become RAM blocks only with two read ports and one write port, or four read ports and two write ports, and without partial (byte-enable) writes. Other memories are built from flip-flops. 2-read/1-write blocks can't start out filled. A RAM input tied to constant 1 (say, a write enable that's always on) fails the build; use `--no-tiled-ram` or drive it from logic.
+- Memories become RAM blocks only with two read ports and one write port, four read ports and two write ports, or one read port and no writes (a ROM, filled from its initial value), and without partial (byte-enable) writes. Other memories are built from flip-flops. 2-read/1-write blocks can't start out filled. A RAM input tied to constant 1 (say, a write enable that's always on) fails the build; use `--no-tiled-ram` or drive it from logic.
 - `--flat` doesn't route output pin targets; use it with `--no-pin-extensions`.
 
 ## Development

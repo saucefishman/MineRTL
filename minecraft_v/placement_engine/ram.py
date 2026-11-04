@@ -46,6 +46,7 @@ from .verify import verify_support
 Pos = tuple[int, int, int]
 
 _COLUMN_PITCH = 6
+_ROM_PITCH = 3  # a read-only column: the stored bit, its comparator, the bitline
 _ROW_PITCH = 6
 _REPEAT_EVERY = 2  # rows or columns between line repeaters; dust from a repeater reaches 15 cells
 
@@ -74,9 +75,11 @@ _TOWER_Z_PITCH = 3  # Z between a column's towers when folded
 _GLASS = BlockState("minecraft:glass")
 _STONE = BlockState("minecraft:smooth_quartz")
 _DUST = BlockState("minecraft:redstone_wire")
+_REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
 # TODO: other port counts: more read ports need another S per pair, more write ports a per-bit OR.
 RAM_CELL = "ram_2r1w"
 RAM4_CELL = "ram_stack"
+ROM_CELL = "ram_rom"
 DELAY_CELL = "ram_delay"
 # Chain cells before each tap of build_delay, 4 ticks a cell. After clk falls: the first write's window; a gap, since an
 # idle port's flip-flops hold 0 and switching to them as the window closes could reach its latches; settling for the second
@@ -85,7 +88,7 @@ _DELAY_TAPS = {12: "t0", 24: "t1", 84: "t2", 96: "t3"}
 _DELAY_CELLS = 97
 WINDOW_CELL = "ram_window"
 WINDOW_MACRO = "ram_window"
-BLOCK_CELLS = (RAM_CELL, RAM4_CELL, WINDOW_CELL, DELAY_CELL)
+BLOCK_CELLS = (RAM_CELL, RAM4_CELL, ROM_CELL, WINDOW_CELL, DELAY_CELL)
 
 
 def _repeater(facing: str) -> BlockState:
@@ -173,14 +176,20 @@ def build_window() -> Macro:
 
 def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int] | None = None,
               high_bits: int = 0, high: int = 0, measure: bool = True) -> Macro:
-    """``reads`` is 2 or 4. ``init`` holds a preloaded word per row. With ``high_bits``, addresses have that many more
-    bits, and this array answers only when they equal ``high``: several can share address lines and OR their bitlines.
+    """``reads`` is 1, 2 or 4. ``init`` holds a preloaded word per row. One read makes a read-only array: no write port,
+    and each bit is a redstone block or a plain one behind its comparator, so nothing below plane 4 and columns 3 apart.
+    With ``high_bits``, addresses have that many more bits, and this array answers only when they equal ``high``: several
+    can share address lines and OR their bitlines.
     ``measure``: time it, by shape, or leave that to a caller who only wants the blocks."""
     row_bits = depth.bit_length() - 1
     if row_bits < 1 or depth != 1 << row_bits:
         raise ValueError(f"{name}: depth {depth} is not a power of two above 1")
     abits = row_bits + high_bits
-    decoder_x = _COLUMN_PITCH * width + 2
+    rom = reads == 1
+    pitch = _ROM_PITCH if rom else _COLUMN_PITCH
+    gap_x = 2 if rom else 0  # X mod pitch of row line repeaters: the bitline's column, or the write bitline's
+    # Two cells past the last column's repeater column, so the row lines' last repeater sits there.
+    decoder_x = pitch * width + gap_x + 2
     read_a_x = decoder_x
     read_b_x = read_a_x + _ADDR_PITCH * abits
     enable_x = read_b_x + _ADDR_PITCH * abits  # write lines have their own X, so each pin can have its own tower
@@ -193,6 +202,8 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
         write_x, enable_x = read_a_x, read_b_x
         write_end = enable_x + _LINE_PITCH
         size_x = read_b_x + _ADDR_PITCH * abits
+    if rom:
+        size_x = read_b_x
     # Past the last row: the complement torch, the stub to it, the pin.
     last_row_gap = _ROW_PITCH * depth
     size_z = last_row_gap + 4
@@ -202,7 +213,7 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
     pins: list[PinRef] = []
 
     def column_x(i: int) -> int:
-        return _COLUMN_PITCH * i + 3
+        return pitch * i + (0 if rom else 3)
 
     def row_z(k: int) -> int:
         return _ROW_PITCH * k + 3
@@ -217,8 +228,8 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
         for x in range(end_x):
             blocks[(x, y - 1, z)] = _STONE
             if x < decoder_x:
-                gap = x % _COLUMN_PITCH == 0
-                repeat = gap and (x == decoder_x - 2 or x // _COLUMN_PITCH % _REPEAT_EVERY == 0)
+                gap = x % pitch == gap_x
+                repeat = gap and (x == decoder_x - 2 or x // pitch % (_REPEAT_EVERY * _COLUMN_PITCH // pitch) == 0)
             else:
                 repeat = (x - decoder_x) % _DECODER_REPEAT == 0
             if repeat:
@@ -252,8 +263,8 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
         for k, z in rows:
             tap(x if (k | high << row_bits) >> bit & 1 else x + 2, y, z)
 
-    lock_rows = [(k, row_z(k) - 2) for k in range(depth)]
-    ports = [("a", 0, -2, read_a_x), ("b", 0, 2, read_b_x)]
+    lock_rows = [] if rom else [(k, row_z(k) - 2) for k in range(depth)]
+    ports = [("a", 0, -2, read_a_x)] + ([] if rom else [("b", 0, 2, read_b_x)])
     if reads == 4:
         ports += [("c", _READ_PLANES, -2, read_a_x), ("d", _READ_PLANES, 2, read_b_x)]
     for port, up, side, line_x in ports:
@@ -264,14 +275,28 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
             address_lines(line_x + _ADDR_PITCH * bit, _Y_READ_ADDR + up, f"a{port}[{bit}]", rows, bit)
     for _, z in lock_rows:
         row_line(_Y_LOCK, z, write_end, high=True)
-    for bit in range(abits):
-        address_lines(write_x + _ADDR_PITCH * bit, _Y_READ, f"wa[{bit}]", lock_rows, bit)
-    bitline(enable_x, _Y_READ, size_z - 1)
-    add_pin("we", Direction.IN, CardinalDirection.SOUTH, (enable_x, _Y_READ, size_z - 1))
-    for _, z in lock_rows:
-        tap(enable_x, _Y_READ, z)
+    if not rom:
+        for bit in range(abits):
+            address_lines(write_x + _ADDR_PITCH * bit, _Y_READ, f"wa[{bit}]", lock_rows, bit)
+        bitline(enable_x, _Y_READ, size_z - 1)
+        add_pin("we", Direction.IN, CardinalDirection.SOUTH, (enable_x, _Y_READ, size_z - 1))
+        for _, z in lock_rows:
+            tap(enable_x, _Y_READ, z)
 
-    for i in range(width):
+    for i in range(width if rom else 0):
+        sx = column_x(i)
+        bitline(sx + 2, _Y_READ, last_row_gap)
+        add_pin(f"ra[{i}]", Direction.OUT, CardinalDirection.NORTH, (sx + 2, _Y_READ, 0))
+        for k in range(depth):
+            z = row_z(k)
+            # The read tap of the other arrays, its S a redstone block for a 1.
+            blocks[(sx, _Y_CELL, z)] = _REDSTONE_BLOCK if init and init[k] >> i & 1 else _STONE
+            blocks[(sx + 1, _Y_READ, z)] = _GLASS
+            blocks[(sx + 1, _Y_READ, z - 1)] = _GLASS
+            blocks[(sx + 1, _Y_CELL, z)] = _comparator("west")
+            blocks[(sx + 1, _Y_CELL, z - 1)] = _repeater("north")
+            blocks[(sx + 2, _Y_CELL, z)] = _STONE
+    for i in range(0 if rom else width):
         sx = column_x(i)
         bitline(sx - 3, _Y_WRITE, size_z - 1)
         add_pin(f"wd[{i}]", Direction.IN, CardinalDirection.SOUTH, (sx - 3, _Y_WRITE, size_z - 1))
@@ -310,6 +335,12 @@ def build_ram(name: str, depth: int, width: int, reads: int = 2, init: list[int]
                 blocks[(sx, _Y_WORD, z)] = _torch(not stored)
                 blocks[(sx, _Y_WORD + 1, z)] = _STONE
 
+    if rom:  # nothing below the read bitlines' floor
+        drop = _Y_READ - 1
+        blocks = {(x, y - drop, z): block for (x, y, z), block in blocks.items()}
+        pins = [PinRef(name=p.name, direction=p.direction, side=p.side, offset=(p.offset[0], p.offset[1] - drop, p.offset[2]))
+                for p in pins]
+        size_y -= drop
     edges, closing = _array_timing(depth, width, reads, high_bits).edges_closing() if measure else ({}, {})
     block = _opaque(name, (size_x, size_y, size_z), blocks, pins, edges, depth * width, closing)
     if closing:
@@ -859,6 +890,12 @@ def block_for_cell(cell_type: str, parameters: dict[str, str]) -> Macro:
     elif cell_type == RAM_CELL:
         depth, width = int(parameters["DEPTH"], 2), int(parameters["WIDTH"], 2)
         block = build_ram(f"ram_{depth}x{width}", depth, width)
+    elif cell_type == ROM_CELL:
+        depth, width, words = rom_contents(parameters)
+        name = f"rom_{depth}x{width}_{hashlib.sha256(repr(words).encode()).hexdigest()[:8]}"
+        if name in _built:
+            return _built[name]
+        block, _ = _cached(("rom", depth, width, words), lambda: (build_ram(name, depth, width, 1, words), None))
     else:
         spec = stack_spec(parameters, {})
         words = len(spec.init)
@@ -869,6 +906,13 @@ def block_for_cell(cell_type: str, parameters: dict[str, str]) -> Macro:
         block, _ = _cached(("stack", spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init),
                            lambda: (build_stack(name, spec.row_bits, spec.banks, spec.base, spec.abits, spec.width, spec.init), None))
     return _built.setdefault(block.name, block)
+
+
+def rom_contents(parameters: dict[str, str]) -> tuple[int, int, list[int]]:
+    """Depth, width and a word per row of a ram_rom cell. Rows past INIT, and undefined bits, read 0."""
+    depth, width = int(parameters["DEPTH"], 2), int(parameters["WIDTH"], 2)
+    value = int(parameters["INIT"].replace("x", "0") or "0", 2)
+    return depth, width, [value >> (k * width) & ((1 << width) - 1) for k in range(depth)]
 
 
 def stack_spec(parameters: dict[str, str], nets: dict[str, object]) -> StackSpec:

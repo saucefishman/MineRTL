@@ -87,6 +87,9 @@ def measure_array(block: Macro, depth: int, width: int, abits: int, ports: str, 
                     bench.toggle(f"{name}[{bit}]", True, outs)
                     bench.toggle(f"{name}[{bit}]", False, outs)
         bench.bus(name, row_bits, 0, outs)
+    if "we" not in bench.cells:  # read-only
+        _fill_columns(bench.edges, width, columns, ports)
+        return bench.edges, {}
 
     def read_all(k: int) -> None:
         for port in ports:

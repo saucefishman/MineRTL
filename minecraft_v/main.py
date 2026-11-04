@@ -28,18 +28,21 @@ from minecraft_v.placement_engine.ir import (
 )
 
 
-def _load_output_pin_targets(path: str) -> dict[str, tuple[int, int]]:
+def _load_output_pin_targets(path: str) -> dict[str, tuple[int, ...]]:
+    """Pin -> (x, y), or (x, y, 3) where {"tile": 3} asks for a 3x3 tile of lamps (lit while the pin is low)."""
     payload = json.loads(Path(path).read_text())
     if not isinstance(payload, dict):
         raise SystemExit("--output-pin-targets-json must contain a JSON object")
 
-    normalized: dict[str, tuple[int, int]] = {}
+    normalized: dict[str, tuple[int, ...]] = {}
     for pin_name, coord in payload.items():
         if not isinstance(pin_name, str) or not pin_name:
             raise SystemExit("output pin target keys must be non-empty strings")
+        tile = 1
         if isinstance(coord, dict):
             x = coord.get("x")
             y = coord.get("y")
+            tile = coord.get("tile", 1)
         elif isinstance(coord, (list, tuple)) and len(coord) == 3:
             x, y, _z_ignored = coord
         else:
@@ -48,7 +51,9 @@ def _load_output_pin_targets(path: str) -> dict[str, tuple[int, int]]:
             )
         if not isinstance(x, int) or not isinstance(y, int):
             raise SystemExit(f"Invalid coord for '{pin_name}': x and y must be integers")
-        normalized[pin_name] = (x, y)
+        if tile not in (1, 3):
+            raise SystemExit(f"Invalid tile for '{pin_name}': 1 or 3, not {tile!r}")
+        normalized[pin_name] = (x, y) if tile == 1 else (x, y, tile)
     return normalized
 
 

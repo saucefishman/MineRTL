@@ -56,34 +56,33 @@ module _ram_4r2w (RD_CLK, RD_EN, RD_ARST, RD_SRST, RD_ADDR, RD_DATA, WR_CLK, WR_
     localparam STACK_BANKS = 8;  // what fits under the world's height
     localparam STACKS = (BANKS + STACK_BANKS - 1) / STACK_BANKS;
 
-    wire clk = WR_CLK[0];
-    wire [ABITS-1:0] waddr0, waddr1;
-    wire [WIDTH-1:0] wdata0, wdata1;
-    wire wen0, wen1;
-    \$dff #(.WIDTH(ABITS), .CLK_POLARITY(1'b1)) waddr0_reg (.CLK(clk), .D(WR_ADDR[ABITS-1:0]), .Q(waddr0));
-    \$dff #(.WIDTH(WIDTH), .CLK_POLARITY(1'b1)) wdata0_reg (.CLK(clk), .D(WR_DATA[WIDTH-1:0]), .Q(wdata0));
-    \$dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) wen0_reg (.CLK(clk), .D(WR_EN[0]), .Q(wen0));
-    \$dff #(.WIDTH(ABITS), .CLK_POLARITY(1'b1)) waddr1_reg (.CLK(clk), .D(WR_ADDR[WR_PORTS*ABITS-1:(WR_PORTS-1)*ABITS]), .Q(waddr1));
-    \$dff #(.WIDTH(WIDTH), .CLK_POLARITY(1'b1)) wdata1_reg (.CLK(clk), .D(WR_DATA[WR_PORTS*WIDTH-1:(WR_PORTS-1)*WIDTH]), .Q(wdata1));
-    \$dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) wen1_reg (.CLK(clk), .D(WR_EN[(WR_PORTS-1)*WIDTH]), .Q(wen1));
-
-    // After clk falls: the first port's window until t0 falls; a gap until t1 falls, then the second port is selected and
-    // its address settles until t2 falls; its window until t3 falls. All closed long before clk rises, so the flip-flops
-    // changing can't reach an open latch.
-    wire t0, t1, t2, t3;
-    ram_delay write_turns (.clk(clk), .t0(t0), .t1(t1), .t2(t2), .t3(t3));
-    wire second = !clk && !t1;
-    wire we = (wen0 && !clk && t0) || (wen1 && !clk && !t2 && t3);
-    wire [ABITS-1:0] waddr = second ? waddr1 : waddr0;
-    wire [WIDTH-1:0] wdata = second ? wdata1 : wdata0;
-
     localparam OUT_BITS = RD_PORTS*WIDTH;
     wire [(STACKS+1)*OUT_BITS-1:0] stack_out;
     assign stack_out[OUT_BITS-1:0] = 0;
     assign RD_DATA = stack_out[STACKS*OUT_BITS +: OUT_BITS];
     genvar s;
     generate
-        if (RD_PORTS == 4) begin : map
+        if (RD_PORTS == 4 && WR_PORTS == 2) begin : map
+            wire clk = WR_CLK[0];
+            wire [ABITS-1:0] waddr0, waddr1;
+            wire [WIDTH-1:0] wdata0, wdata1;
+            wire wen0, wen1;
+            \$dff #(.WIDTH(ABITS), .CLK_POLARITY(1'b1)) waddr0_reg (.CLK(clk), .D(WR_ADDR[ABITS-1:0]), .Q(waddr0));
+            \$dff #(.WIDTH(WIDTH), .CLK_POLARITY(1'b1)) wdata0_reg (.CLK(clk), .D(WR_DATA[WIDTH-1:0]), .Q(wdata0));
+            \$dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) wen0_reg (.CLK(clk), .D(WR_EN[0]), .Q(wen0));
+            \$dff #(.WIDTH(ABITS), .CLK_POLARITY(1'b1)) waddr1_reg (.CLK(clk), .D(WR_ADDR[WR_PORTS*ABITS-1:(WR_PORTS-1)*ABITS]), .Q(waddr1));
+            \$dff #(.WIDTH(WIDTH), .CLK_POLARITY(1'b1)) wdata1_reg (.CLK(clk), .D(WR_DATA[WR_PORTS*WIDTH-1:(WR_PORTS-1)*WIDTH]), .Q(wdata1));
+            \$dff #(.WIDTH(1), .CLK_POLARITY(1'b1)) wen1_reg (.CLK(clk), .D(WR_EN[(WR_PORTS-1)*WIDTH]), .Q(wen1));
+
+            // After clk falls: the first port's window until t0 falls; a gap until t1 falls, then the second port is selected and
+            // its address settles until t2 falls; its window until t3 falls. All closed long before clk rises, so the flip-flops
+            // changing can't reach an open latch.
+            wire t0, t1, t2, t3;
+            ram_delay write_turns (.clk(clk), .t0(t0), .t1(t1), .t2(t2), .t3(t3));
+            wire second = !clk && !t1;
+            wire we = (wen0 && !clk && t0) || (wen1 && !clk && !t2 && t3);
+            wire [ABITS-1:0] waddr = second ? waddr1 : waddr0;
+            wire [WIDTH-1:0] wdata = second ? wdata1 : wdata0;
             for (s = 0; s < STACKS; s = s + 1) begin : stack
                 localparam SBANKS = BANKS - s*STACK_BANKS < STACK_BANKS ? BANKS - s*STACK_BANKS : STACK_BANKS;
                 wire [OUT_BITS-1:0] out;

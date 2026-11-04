@@ -256,3 +256,40 @@ def test_a_lone_lower_read_pin_under_a_shared_upper_one_is_found():
     shared = spec({"aa[0]": 1, "ac[0]": 2})
     assert _lone_lower_pin([shared, spec({"aa[0]": 1, "ac[0]": 2})]) is None
     assert _lone_lower_pin([shared, spec({"aa[0]": 3, "ac[0]": 2})]) == (0, "aa[0]", "ac[0]")
+
+
+_ROM = """module main(input [2:0] a, output [4:0] x);
+    reg [4:0] m[0:{last}];
+    initial begin {init} end
+    assign x = m[a];
+endmodule"""
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+@pytest.mark.parametrize("last", [7, 5])  # rows past the memory's size read 0
+def test_a_preloaded_memory_with_no_writes_is_a_rom(tmp_path, last):
+    (tmp_path / "main.v").write_text(_ROM.format(last=last, init=" ".join(f"m[{k}] = {3 * k + 1};" for k in range(last + 1))))
+    out = tmp_path / "out.json"
+    subprocess.run(["yosys", "-q", "-p", f"read_verilog -sv {tmp_path}/main.v; read_verilog -lib {ROOT}/techmap/ram_cells.v; "
+                    f"hierarchy -top main; proc; opt; memory_collect; techmap -map {ROOT}/techmap/ram_2r1w.v "
+                    f"-map {ROOT}/techmap/ram_4r2w.v -map {ROOT}/techmap/ram_rom.v t:$mem_v2; write_json {out}"],
+                   check=True, capture_output=True)
+    cells = [c for c in json.loads(out.read_text())["modules"]["main"]["cells"].values()]
+    assert [c["type"] for c in cells] == ["ram_rom"]
+    from minecraft_v.placement_engine.ram import rom_contents
+    depth, width, words = rom_contents(cells[0]["parameters"])
+    assert (depth, width) == (8, 5)
+    assert words == [3 * k + 1 if k <= last else 0 for k in range(8)]
+
+
+def test_rom_reads_every_row():
+    from minecraft_v.placement_engine.ram_timing import _Bench
+    words = [0b10110, 0b00001, 0b11111, 0, 0b01010, 0b10000, 0b00111, 0b11000]
+    rom = settled_block(build_ram("rom", 8, 5, reads=1, init=words))
+    assert {p.name for p in rom.pins} == {f"aa[{b}]" for b in range(3)} | {f"ra[{i}]" for i in range(5)}
+    assert rom.footprint.height == 6 and not rom.guarded
+    bench = _Bench(rom)
+    for k in [5, 0, 7, 2, 3, 6, 1, 4]:
+        bench.bus("aa", 3, k)
+        read = sum(1 << i for i in range(5) if bench.sim.power[bench.cells[f"ra[{i}]"]])
+        assert read == words[k], k

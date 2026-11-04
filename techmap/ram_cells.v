@@ -25,3 +25,10 @@ endmodule
 (* blackbox *)
 module ram_delay (input clk, output t0, t1, t2, t3);
 endmodule
+
+// A read-only array: one read port, its rows preloaded from INIT (row 0 in the low bits).
+(* blackbox *)
+module ram_rom #(parameter DEPTH = 2, parameter ABITS = 1, parameter WIDTH = 1, parameter INIT = 0) (
+    input [ABITS-1:0] aa,
+    output [WIDTH-1:0] ra);
+endmodule

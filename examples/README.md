@@ -26,4 +26,4 @@ Build any of these with `./synth.sh examples/<name>`. Each directory holds the V
 | Example | Shows |
 | --- | --- |
 | `cpu` | A single-cycle 8-bit CPU: four registers in a tiled RAM block, a carry flag, and 16-bit instructions (load immediate, add/sub/and/or/xor/mov, add immediate, out, jump, jump on carry or zero) from a 16-word ROM loaded with `$readmemh`. Its program shows Fibonacci numbers on the `out` lamps. Builds in seconds; `scripts/dev/check_cpu.py` runs it against a model of the ISA. |
-| `video` | A 16x12 frame buffer loaded 8 bits at a time, its outputs laid out as a screen by `pin_targets.json`. Over 1,100 nets: it takes minutes, so `scripts/bench_examples.py` skips it unless named. |
+| `video` | A ball bouncing on a 16x12 screen: 32 frames of 192 bits in one preloaded read-only RAM block, a frame per clock. Each pixel is a 3x3 tile of lamps (`"tile": 3` in `pin_targets.json`), so the screen is 48x36 lamps. `make_frames.py` writes the frames and the targets, and `scripts/dev/check_video.py` plays it. |

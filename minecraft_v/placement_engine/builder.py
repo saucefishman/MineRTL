@@ -265,13 +265,29 @@ def _place_io_repeaters(
 
 
 _EXT_TUBE_DEPTH = 3  # cells of straight approach lane kept clear in front of each output pin target
+_DISPLAY_TILE = Path(__file__).resolve().parent.parent.parent / "schematics" / "display_tile.litematic"
+_display_tile_blocks: dict[tuple[int, int, int], BlockState] = {}
+
+
+def _lamp_tile(x: int, y: int, z: int) -> tuple[dict[tuple[int, int, int], BlockState], tuple[int, int, int]]:
+    """schematics/display_tile.litematic: a 3x3 of lamps in the plane z, lower left at (x, y), and the cell the signal
+    has to reach, behind the tile. The lamps light while the signal is low. Only its middle lamp is powered directly, so
+    tiles can touch: one 3 above another, or 3 beside it."""
+    if not _display_tile_blocks:
+        region = next(iter(Schematic.load(str(_DISPLAY_TILE)).regions.values()))
+        _display_tile_blocks.update(((bx, by, bz), region[bx, by, bz]) for bx in region.xrange() for by in region.yrange()
+                                    for bz in region.zrange() if region[bx, by, bz].id != "minecraft:air")
+    depth = max(bz for _, _, bz in _display_tile_blocks) + 1
+    # The tile's lowest layer holds supports, under its bottom row of lamps.
+    blocks = {(x + bx, y - 1 + by, z + bz): block for (bx, by, bz), block in _display_tile_blocks.items()}
+    return blocks, (x + 1, y, z + depth)
 
 
 def _route_output_pin_extensions(
         workspace: Region,
         solid: set[tuple[int, int, int]],
         dust_owner: dict[tuple[int, int, int], str],
-        output_pin_targets: dict[str, tuple[int, int]],
+        output_pin_targets: dict[str, tuple[int, ...]],
         output_repeater_lookup: dict[str, tuple[tuple[int, int, int], str, tuple[str, str]]],
         net_id_by_output_endpoint: dict[tuple[str, str], str],
         ext_bounds: tuple[int, int, int, int, int, int],
@@ -284,6 +300,9 @@ def _route_output_pin_extensions(
         net_paths: dict[str, tuple[str, list[list[tuple[int, int, int]]]]] | None = None,
 ) -> list[tuple[str, Exception]]:
     """Route each output pin's net on to its target in the z=layer_z output layer.
+
+    A target is (x, y), or (x, y, 3) for a 3x3 tile of lamps there (_lamp_tile), lit while the pin is low, which the
+    wire reaches from behind.
 
     One _GreedyRouter job per pin (journal key "<net>><pin>"), branching off the net's
     existing wire. net_paths: the core router's paths, so repeater placement counts signal
@@ -303,18 +322,42 @@ def _route_output_pin_extensions(
     # Validate all targets upfront and build target position map for cross-pin protection.
     ext_target_positions: dict[str, tuple[int, int, int]] = {}
     repeater_cells_by_pin: dict[str, tuple[int, int, int]] = {}
-    for pin_name, (tx, ty) in output_pin_targets.items():
+    tile_blocks: dict[tuple[int, int, int], BlockState] = {}
+    for pin_name, (tx, ty, *tile) in output_pin_targets.items():
         if output_repeater_lookup.get(pin_name) is None:
             known = ", ".join(sorted(output_repeater_lookup))
             raise ValueError(f"Unknown output pin target '{pin_name}'. Known keys: {known}")
+        if tile not in ([], [1], [3]):
+            raise ValueError(f"Output target for '{pin_name}': a tile is 3 lamps across, not {tile[0]}")
         etx = tx + pin_target_x_offset
-        if not (min_x <= etx <= max_x and min_y <= ty <= max_y):
+        near, far = ((0, 1), (2, 2, 7)) if tile == [3] else ((0, 0), (0, 0, 0))
+        if not (min_x <= etx and etx + far[0] <= max_x and min_y + near[1] <= ty and ty + far[1] <= max_y
+                and layer_z + far[2] <= max_z):
             raise ValueError(
                 f"Output target for '{pin_name}' is out of bounds: ({etx}, {ty}) not in "
                 f"x=[{min_x},{max_x}], y=[{min_y},{max_y}]"
             )
-        ext_target_positions[pin_name] = (etx, ty, layer_z)
+        if tile == [3]:
+            blocks, ext_target_positions[pin_name] = _lamp_tile(etx, ty, layer_z)
+            for pos, block in blocks.items():
+                if pos in tile_blocks:
+                    raise ValueError(f"Output target for '{pin_name}': its lamp tile overlaps another at {pos}")
+                tile_blocks[pos] = block
+        else:
+            ext_target_positions[pin_name] = (etx, ty, layer_z)
         repeater_cells_by_pin[pin_name] = output_repeater_lookup[pin_name][0]
+    # Where each target landed, lower left lamp of a tile, for tests that read the lamps.
+    save_artifact("pin_targets_placed.json", {pn: [t[0] + pin_target_x_offset, t[1], layer_z, *t[2:]]
+                                              for pn, t in output_pin_targets.items()})
+    # The tiles go in first. Wire stays a cell clear of them, except at their inputs.
+    tile_keepout: set[tuple[int, int, int]] = set()
+    for (x, y, z), block in tile_blocks.items():
+        workspace[x, y, z] = block
+        if block.id in ("minecraft:smooth_quartz", "minecraft:sandstone", "minecraft:redstone_lamp"):
+            solid.add((x, y, z))
+        tile_keepout.update((x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1))
+    tile_keepout -= {(x, y + dy, z) for x, y, z in ext_target_positions.values() for dy in (0, -1)}  # the wire's end
+    footprint_blocked = footprint_blocked | tile_keepout
     if not (min_z <= layer_z <= max_z):
         raise ValueError(f"Output layer z={layer_z} outside workspace z=[{min_z},{max_z}]")
 
@@ -2059,7 +2102,7 @@ def build_litematic_from_component_list(
         routing_headroom: int = 5,
         bridge_height: int = 1,
         allow_routing_failures: bool = False,
-        output_pin_targets: dict[str, tuple[int, int]] | None = None,
+        output_pin_targets: dict[str, tuple[int, ...]] | None = None,
         pin_targets_space=50,
         clock_pin: str = 'clk',
         route_deadline: float | None = None,
@@ -2089,7 +2132,7 @@ def build_litematic_from_component_list(
         bridge_height = max(bridge_height, macro_headroom - 4)
     comp = _expand_multibit_io(comp)
     # Order output pins like their extension targets, so extensions don't have to cross.
-    output_x_order = {pn: float(tx) for pn, (tx, _ty) in (output_pin_targets or {}).items()}
+    output_x_order = {pn: float(target[0]) for pn, target in (output_pin_targets or {}).items()}
     if resume is not None and resume.load_placed(place_seed) is not None:
         placed = resume.load_placed(place_seed)
         log(f"[resume] placement from {resume.dir}")

@@ -1,4 +1,5 @@
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,51 @@ def test_output_pin_target_layer_wiring(tmp_path: Path, capsys):
     tx, ty = target
     etx = tx + (region.width - 1) // 2
     assert "redstone_wire" in str(region[etx, ty, 0])
+
+
+def test_output_pin_target_lamp_tile(tmp_path: Path, capsys):
+    target = (2, 5, 3)
+    region = _build(_inverter_module(), tmp_path / "test_inv_tile.litematic", capsys,
+                    output_pin_targets={"y_out": target})
+    etx = target[0] + (region.width - 1) // 2
+    lamps = {(etx + i, target[1] + j, 0) for i in range(3) for j in range(3)}
+    assert all(region[p].id == "minecraft:redstone_lamp" for p in lamps)
+    assert region[etx + 1, target[1], 6].id == "minecraft:repeater"  # the tile's input
+    assert "redstone_wire" in str(region[etx + 1, target[1], 7])  # wire up to it
+
+
+def test_lamp_tiles_touch_without_lighting_each_other(tmp_path: Path):
+    """Tiles side by side and stacked, each from its own lever: every lamp follows its own tile's input, inverted."""
+    import itertools
+    import subprocess
+    from litemapy import Region as LmRegion
+    from minecraft_v.placement_engine.builder import _lamp_tile
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    from settle_schematic import headless_binary
+    binary = headless_binary()
+    if not Path(binary).is_file() and not shutil.which(binary):
+        pytest.skip("needs mchprs_headless")
+    region = LmRegion(0, 0, 0, 11, 12, 10)
+    pins, tiles = [], [f"{c}{r}" for c in range(3) for r in range(3)]
+    for c, r in itertools.product(range(3), range(3)):
+        blocks, (ix, iy, iz) = _lamp_tile(1 + 3 * c, 1 + 3 * r, 0)
+        for pos, block in blocks.items():
+            assert region[pos].id == "minecraft:air"
+            region[pos] = block
+        pins.append(f"in{c}{r} {ix} {iy} {iz - 1} 0 1")
+        pins += [f"l{c}{r}_{i}{j} {1 + 3 * c + i} {1 + 3 * r + j} 0 0 -1" for i in range(3) for j in range(3)]
+    Schematic(name="tiles", regions={"t": region}).save(str(tmp_path / "tiles.litematic"))
+    (tmp_path / "pins.txt").write_text("\n".join(pins) + "\n")
+    lines = []
+    for state in [{t: 0 for t in tiles}] + [{t: int(t == one) for t in tiles} for one in tiles] + \
+                 [{t: int(t != one) for t in tiles} for one in tiles]:
+        lines += [f"set in{t} {v}" for t, v in state.items()] + ["settle 20"]
+        lines += [f"expect l{t}_{i}{j} {1 - v}" for t, v in state.items() for i in range(3) for j in range(3)]
+    (tmp_path / "script.txt").write_text("\n".join(lines) + "\n")
+    result = subprocess.run([binary, "test", tmp_path / "tiles.litematic", tmp_path / "pins.txt", tmp_path / "script.txt",
+                             "--modes", "noupdate,redstone,redpiler", *(a for t in tiles for a in ("--add-lever", f"in{t}"))],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout[-2000:]
 
 
 @pytest.mark.parametrize(
