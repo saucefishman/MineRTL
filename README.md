@@ -2,92 +2,98 @@
 
 # MineRTL: Verilog to Minecraft Redstone Synthesis
 
-**MineRTL** is a hardware synthesis toolchain that takes standard Verilog HDL code and compiles it into functional 3D Minecraft redstone circuits.
+**MineRTL** turns circuit code written in Verilog into working Minecraft redstone. You describe what the circuit does, and MineRTL designs the redstone, lays it out in 3D, wires it, and saves it as a schematic you paste into your world. A 4-bit counter builds in about a second; a basic CPU in minutes.
+
+New to the terms? **Verilog** is a text language for describing digital circuits, the one used to design real chips. **Yosys** is an open-source tool that turns Verilog into logic gates; MineRTL runs it for you. **Litematica** is a Minecraft mod that loads and pastes saved builds (`.litematic` files). **MCHPRS** is a Minecraft server made only for redstone, which runs it far faster than the normal game.
 
 ## Features
 
-- **Write Verilog, get redstone:** Describe a circuit in Verilog, the language used to design real chips, and get a redstone build that does the same thing. [Yosys](https://github.com/yosyshq/yosys) turns the code into logic gates first.
+- **Write Verilog, get redstone:** Describe a circuit in Verilog and get a redstone build that does the same thing.
 - **Redstone building blocks:** Each gate is a small prebuilt redstone circuit: AND, OR, XOR, NOT, multiplexers, adders, and flip-flops that store bits.
 - **Automatic layout and wiring:** Gates are placed in 3D, on several levels, and wired together with redstone dust, repeaters and torches. A final check reports wires that are broken, touch each other, run too far without a repeater, or change at the wrong moment relative to the clock.
 - **Repeated parts built once:** When a design repeats the same circuit many times (the bits of a register, say), it's wired once and copied, which makes big builds faster.
 - **Memory:** Arrays in your Verilog become compact redstone RAM instead of one flip-flop per bit, and can start out filled with data (`$readmemh`).
 - **Clock and printing:** The build gets a redstone clock that's slow enough for its longest path, so you don't have to work out the timing. `$display` messages from your Verilog show up in chat when you run the build in MCHPRS.
-- **Ready to paste:** The output is a `.litematic` file you paste into a world with the Litematica mod, or load into the MCHPRS redstone server to run it much faster. Inputs become levers and outputs become lamps.
+- **Ready to paste:** The output is a `.litematic` file you paste into a world with Litematica, or load into MCHPRS. Inputs become levers and outputs become lamps.
 - **Scale:** Builds a complete basic CPU in minutes.
 
 ## Prerequisites
 
 macOS or Linux (on Windows, use WSL). Builds target Minecraft 1.20.4.
 
-1. Install [yosys](https://github.com/yosyshq/yosys) (Required for Verilog synthesis; developed against 0.64)
-2. Install [uv](https://github.com/astral-sh/uv) (Fast Python package manager; it fetches Python 3.13+ if needed)
-3. A C++17 compiler (Xcode command line tools, GCC or Clang), to build the A* kernel
-4. Optional: [our MCHPRS fork](https://github.com/saucefishman/MCHPRS), for testing builds without the game (`mchprs_headless`), the server clock, debug print output and `/lever` by input name. Upstream [MCHPRS](https://github.com/MCHPR/MCHPRS) doesn't have these.
+1. [Yosys](https://github.com/yosyshq/yosys) (developed against 0.64)
+2. [uv](https://github.com/astral-sh/uv), a Python package manager; it fetches Python 3.13+ if needed
+3. A C++17 compiler (Xcode command line tools, GCC or Clang): part of the router is compiled on install
+4. To play the build: Minecraft 1.20.4 with [Litematica](https://www.curseforge.com/minecraft/mc-mods/litematica) (a Fabric mod; it also needs MaLiLib), or [our MCHPRS fork](https://github.com/saucefishman/MCHPRS) (see [Running Builds in MCHPRS](#running-builds-in-mchprs))
 5. Optional: [sv2v](https://github.com/zachjs/sv2v), to convert SystemVerilog designs to Verilog first
 
-## Getting Started
+## Quick Start
 
-1. **Install Python dependencies:**
+1. **Install the Python dependencies** (this also compiles the router):
 
 ```sh
 uv sync
 ```
 
-This also builds the Cython A* kernel; `uv run` rebuilds it when a `.pyx` file changes.
-
-2. **Generate a schematic:**
-   We provide several examples in the `examples/` directory, from the smallest (`helloworld`, `counter`, `multimodule`, `sevenseg`) to `video`; [`examples/README.md`](examples/README.md) lists what each one shows. Synthesize the counter example with:
+2. **Build the counter example:**
 
 ```sh
 ./synth.sh examples/counter
 ```
 
-The resulting schematic will be saved to `build/result.litematic`. Paste it into a world with the [Litematica](https://www.curseforge.com/minecraft/mc-mods/litematica) mod (Fabric, with MaLiLib, for 1.20.4): put the file in `.minecraft/schematics/`, load it there, and paste in creative mode. Or load it in MCHPRS (below), which is much faster for large builds. Each input gets a lever on a stone block and each output a redstone lamp, at the edges of the build. A generated clock starts on its own once pasted.
+This takes about a second and writes `build/result.litematic`, about 35×32×27 blocks.
 
-3. **Synthesis Flags & Configuration:**
-   The `synth.sh` script automatically wraps our Python-based layout engine (`minecraft_v/main.py`) alongside Yosys. It supports several flags that you can pass directly:
-   - `--out-litematic <path>`: Specifies custom output path for the `.litematic` file (Default: `build/result.litematic`).
-   - `--out-litematic-dir <dir>`: Writes the `.litematic` to `<dir>/<project-dir name>.litematic` (e.g. `examples/counter` → `<dir>/counter.litematic`). Handled by `synth.sh`.
-   - `--artifacts-dir <dir>`: Where the netlist and build artifacts go (Default: `build/artifacts`, or `$MINECRAFT_V_ARTIFACTS_DIR`). Use a separate directory per build to run builds in parallel.
-   - `--module <name>`: The top-level Verilog module; everything under it is flattened into one build (Default: `main`).
-   - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).
-   - `--allow-routing-failures`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
-   - `--synth-only`: Stops after writing the netlist (handled by `synth.sh`).
-   - `--tiled-ram` / `--no-tiled-ram` (synth.sh): Memories with a supported port layout become tiled RAM blocks, settled once and cached in `--macro-cache` (Default: `build/macro_cache`). On by default; `--no-tiled-ram` maps every memory to flip-flops and also skips the ABC optimization pass that comes with tiled RAM, so other logic can come out a little larger. Large memory designs build better with `--no-macros`.
-   - `--no-macros`: Routes every gate on its own. By default repeated subcircuits are routed once and stamped, which builds designs with many repeated blocks faster but takes more volume. Designs without enough repeats stay as gates.
-   - `--no-settle`: Saves blocks as built instead of in the states they settle to. Without settling, power-up pulses can overwrite flip-flops.
-   - `--no-debug-prints`: Removes `$write`/`$display`. By default they stay when they're in a clocked block, inside macros too: blocks they read stand on or hang from lime concrete, and `<out>.server.json` is written next to the litematic for [MCHPRS fork](https://github.com/saucefishman/MCHPRS) `/watch` and `mchprs_headless test --probes`. Non-constant `$sformatf` isn't supported by Yosys: use `$display` directly.
-   - `--output-pin-targets-json <file.json>`: Path to a JSON file explicitly dictating output coordinates. Note: `synth.sh` will _automatically_ use `pin_targets.json` if it finds it in your specific project directory; `--no-pin-extensions` ignores it.
-   - `--generate-clock <pin|auto|none>`: Select the pin to be the clock pin and automatically generate a redstone clock for it. Its period comes from static timing of the built circuit. (Default: `auto`, which picks `_clk` or `clk`)
-   - `--server-clock [half period]`: No generated clock, which gets long on large circuits: the clock pin gets a lever, and MCHPRS toggles it every that many redstone ticks, read from `<out>.server.json`. `synth.sh` turns this on when it finds an `mchprs_headless` with `--run-clock` (`$MCHPRS_HEADLESS`, or `target/release` under `$MCHPRS_DIR`, else `mchprs_headless` on `PATH`) and no clock flag is given; `--no-server-clock` or `--generate-clock <pin>` keeps the generated clock. (Default half period: from the critical path, the generated clock's period.) That check can't see the running server: if the clock stays still, rebuild and restart it, and stand on the plot, since plots only tick with a player.
+3. **Paste it into a world:** copy `build/result.litematic` into `.minecraft/schematics/`. In a creative world with open flat ground, press `M` for the Litematica menu, choose *Load Schematics*, pick `result`, and load it. Move the outline where you want it, then paste it with Litematica's paste tool mode.
 
-   - `--place-seed <n>`: Placement seed (Default: 0). Routing is deterministic per placement, so try another seed if a build fails nets.
-   - `--flat`: Puts every component on one Y level (for small designs). Output pin targets often fail to route flat: combine it with `--no-pin-extensions` for designs that have a `pin_targets.json`.
-   - `--resume-dir <dir>`, `--resume-reroute <nets>`: Save the placement and routed paths and reuse them on the next build; reroute only the listed nets.
-   - `--route-deadline <s>`: Stops routing after that many seconds and writes a partial result (implies `--allow-routing-failures`).
-   - `--debug`: Logs progress and slow searches, saves routing snapshots to `<artifacts>/snapshots` (slow), prints A* counters.
+4. **Watch it run:** four lamps at the edge of the build (outputs `count[0]` to `count[3]`) count up in binary. The clock is built in and starts on its own. Inputs, when a design has any, are levers on stone blocks.
 
-   Run `uv run python -m minecraft_v --help` for the full list.
+> If you've installed the MCHPRS fork's `mchprs_headless` (below), `synth.sh` leaves the clock out, so that MCHPRS can drive it, and the counter won't count in normal Minecraft. Add `--no-server-clock` to build a clock in.
 
-   Example usage:
+[`examples/README.md`](examples/README.md) lists the other examples, from `helloworld` (one gate) to `video` (a frame buffer of over 1,100 wires that takes a few minutes).
+
+## Your Own Design
+
+Make a directory with your `.v` files, where the top module is called `main` (or pass `--module <name>`), and build it:
 
 ```sh
-./synth.sh examples/counter --out-litematic counter.litematic --place-seed 1
+./synth.sh path/to/mydesign
 ```
+
+The design has to be synthesizable Verilog: no `#` delays, and `initial` only for starting values of registers and memories. Its inputs and outputs become levers and lamps. A clock input named `clk` or `_clk` gets the built-in clock. If the directory has a `pin_targets.json`, outputs are routed to the positions it lists (see `examples/sevenseg`).
+
+**If a build fails:** the build prints lines starting with `[verify]` for wires it couldn't connect or that interfere. Routing depends on where gates were placed, so the first thing to try is another placement: `--place-seed 1`, `--place-seed 2`, and so on.
+
+## Build Options
+
+Pass these to `synth.sh`:
+
+- `--out-litematic <path>`: where to write the schematic (default: `build/result.litematic`). `--out-litematic-dir <dir>` writes `<dir>/<design dir name>.litematic` instead.
+- `--module <name>`: the top-level module (default: `main`). Everything under it is flattened into one build.
+- `--schematic-name <name>`: the name Litematica shows (default: the module name).
+- `--place-seed <n>`: placement seed (default: 0). Try another one if a build fails to connect wires.
+- `--generate-clock <pin|auto|none>`: which input gets the built-in clock (default: `auto`, which picks `clk` or `_clk`).
+- `--server-clock` / `--no-server-clock`: leave the clock out and let MCHPRS toggle the clock lever instead. On by default when `synth.sh` finds the fork's `mchprs_headless`. Large designs need a long clock, which is big to build.
+- `--no-tiled-ram`: build memories from flip-flops instead of compact RAM blocks.
+- `--no-macros`: wire every gate on its own instead of copying repeated parts. Copies take more room, so a design can come out smaller without them; memory-heavy designs often route better with `--no-macros`.
+- `--no-debug-prints`: drop `$display`/`$write`. By default they're kept when they're in a clocked block: the blocks they read stand on or hang from lime concrete, and a `<out>.server.json` next to the schematic tells MCHPRS what to print. Non-constant `$sformatf` isn't supported by Yosys; use `$display` directly.
+- `--no-pin-extensions`: ignore `pin_targets.json`. `--output-pin-targets-json <file>` uses another file.
+- `--flat`: put every gate on one level, for small designs.
+
+Developer options (`--synth-only`, `--artifacts-dir`, `--resume-dir`, `--route-deadline`, `--debug`, `--no-settle`, `--allow-routing-failures`) are under [Development](#development). Run `uv run python -m minecraft_v --help` for every option.
 
 ## Running Builds in MCHPRS
 
-We recommend running builds in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS) instead of vanilla Minecraft. MCHPRS is a redstone-only server, and its redpiler compiler runs large circuits many times faster than vanilla. The fork also reads the `<out>.server.json` that each build writes next to its `.litematic`:
+We recommend running large builds in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS) instead of normal Minecraft. MCHPRS is a redstone-only server, and its redpiler compiler runs large circuits many times faster. Upstream [MCHPRS](https://github.com/MCHPR/MCHPRS) works too, but only the fork reads the `<out>.server.json` each build writes next to its `.litematic`, which adds:
 
-- **Server clock:** with `--server-clock` (on by default when `synth.sh` finds `mchprs_headless`), the server toggles the clock lever itself, so the build doesn't need a generated clock.
+- **Server clock:** the server toggles the clock lever itself, so the build doesn't need a built-in clock.
 - **Debug prints:** `$display`/`$write` output appears in chat and the server log.
 - **`/lever <input> [on|off|toggle]`:** sets inputs by their Verilog name.
 
-To load a build, copy the `.litematic` and its `.server.json` into the server's `schems/` folder, stand on a plot and run `/load <name>.litematic -c`, or `/watch <name>.litematic -c` to re-paste on every rebuild. (WorldEdit's `//load` pastes the blocks only, without the server file.) `/rtps halfclock` runs large builds much faster. See the fork's README for setup and the full command list.
+To load a build, copy the `.litematic` and its `.server.json` into the server's `schems/` folder, stand on a plot and run `/load <name>.litematic -c`, or `/watch <name>.litematic -c` to re-paste on every rebuild. (WorldEdit's `//load` pastes the blocks only, without the server file.) `/rtps halfclock` runs large builds much faster. If the server clock doesn't move, rebuild, restart the server, and stand on the plot: plots only run with a player on them. See the fork's README for setup and the full command list.
 
 ## Testing Builds Without the Game
 
-`mchprs_headless` (in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS), `crates/headless`) loads a `.litematic` and runs a script against it. Build it with `cargo build --release -p mchprs_headless`; scripts find it at `$MCHPRS_HEADLESS`, else `$MCHPRS_DIR/target/release/mchprs_headless` if `MCHPRS_DIR` is set, else `mchprs_headless` on `PATH`. When it supports `--run-clock`, `synth.sh` turns on `--server-clock`. Builds are settled in Python, without it.
+`mchprs_headless` (in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS), `crates/headless`) loads a `.litematic`, sets inputs and checks outputs from a script. Build it with `cargo build --release -p mchprs_headless`. Scripts look for it at `$MCHPRS_HEADLESS`, else `$MCHPRS_DIR/target/release/mchprs_headless`, else `mchprs_headless` on `PATH`. Builds work without it.
 
 ```sh
 ./synth.sh examples/counter --synth-only
@@ -95,7 +101,7 @@ uv run python scripts/build_with_pins.py pins.txt --netlist build/artifacts/netl
 mchprs_headless test out.litematic pins.txt script.txt --modes noupdate,redstone,redpiler
 ```
 
-with a `script.txt` such as:
+The first command stops after Yosys and writes the gates to `build/artifacts/netlist.json`. The second builds the schematic with a lever on `clk` instead of a clock, and writes `pins.txt` with the position of each input and output. You write `script.txt`, for example:
 
 ```text
 settle 100
@@ -105,26 +111,36 @@ expect count[0] 1
 expect count[1] 0
 ```
 
-The pin file lists `name x y z nx nz` per pin. Script commands: `settle N`, `set NAME 0|1`, `pulse NAME N`, `expect NAME 0|1`, `print LABEL`. `mchprs_headless test --add-lever NAME` adds a lever for an input that has none.
-
-Other scripts in `scripts/`:
-
-- `bench_examples.py`: builds several examples in parallel, each in its own artifacts directory, and prints failures and `[verify]` violations.
-- `add_clock.py`: adds a generated clock to a build you've already tested, without rebuilding.
-- `compare_gate_rtl.py`: checks a built schematic net by net against the netlist and RTL.
-- `dev/`: acceptance checks for single designs (`check_preload.py`, `check_powerup.py`, ...), built from `examples/` and `tests/designs/`. See [`scripts/README.md`](scripts/README.md).
+Script commands: `settle N` (run N ticks), `set NAME 0|1`, `pulse NAME N`, `expect NAME 0|1`, `print LABEL`. `mchprs_headless test --add-lever NAME` adds a lever for an input that has none.
 
 ## Limitations
 
-- RAM blocks support two read ports with one write port, and four read ports with two write ports, without partial (byte-enable) writes. 2-read/1-write blocks can't be preloaded (`initial`, `$readmemh`). Other memories are built from flip-flops. A RAM block input tied to constant 1 (say, a write enable that's always on) fails the build; use `--no-tiled-ram` or drive it from logic.
+- Memories become RAM blocks only with two read ports and one write port, or four read ports and two write ports, and without partial (byte-enable) writes. Other memories are built from flip-flops. 2-read/1-write blocks can't start out filled. A RAM input tied to constant 1 (say, a write enable that's always on) fails the build; use `--no-tiled-ram` or drive it from logic.
 - `--flat` doesn't route output pin targets; use it with `--no-pin-extensions`.
 
-## Development & Testing
+## Development
 
-Run our test suite with:
+Run the test suite with:
 
 ```sh
 uv run python -m pytest -q tests
 ```
 
-Tests that need `yosys` or `mchprs_headless` are skipped when those aren't found.
+Tests that need `yosys` or `mchprs_headless` are skipped when those aren't found. `uv run` recompiles the router when a `.pyx` file changes.
+
+Developer build options:
+
+- `--synth-only`: stop after writing the netlist.
+- `--artifacts-dir <dir>`: where the netlist and build files go (default: `build/artifacts`, or `$MINECRAFT_V_ARTIFACTS_DIR`). Give each build its own to run builds in parallel.
+- `--resume-dir <dir>`, `--resume-reroute <nets>`: save the placement and wires and reuse them on the next build, rerouting only the listed nets.
+- `--route-deadline <s>`: stop routing after that many seconds and write a partial result.
+- `--allow-routing-failures`: write the schematic even when some wires fail.
+- `--no-settle`: save blocks as built instead of in the states they settle to. Without settling, the pulses at paste time can overwrite flip-flops.
+- `--debug`: log progress and slow searches, save routing snapshots to `<artifacts>/snapshots` (slow), and print router counters.
+
+Scripts in `scripts/` ([`scripts/README.md`](scripts/README.md) has the full list):
+
+- `bench_examples.py`: builds several examples in parallel and prints failures and `[verify]` lines.
+- `add_clock.py`: adds a built-in clock to a build you've already tested, without rebuilding.
+- `compare_gate_rtl.py`: checks a built schematic wire by wire against the netlist and the Verilog.
+- `dev/`: acceptance checks for single designs, built from `examples/` and `tests/designs/`.
