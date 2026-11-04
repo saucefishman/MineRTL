@@ -6,7 +6,7 @@
 
 The result is a `.litematic` schematic. Paste it into your world with the [Litematica](https://www.curseforge.com/minecraft/mc-mods/litematica) mod, or load it into [MCHPRS](https://github.com/saucefishman/MCHPRS), a Minecraft server built for redstone that runs it far faster than the normal game.
 
-A 4-bit counter builds in about a second; a basic CPU in minutes.
+A 4-bit counter builds in about a second, and an 8-bit CPU running a preloaded program in about five.
 
 ## Features
 
@@ -16,7 +16,7 @@ A 4-bit counter builds in about a second; a basic CPU in minutes.
 - **Clock included:** The build comes with a redstone clock that's slow enough for the circuit, so you don't have to work out the timing.
 - **Debug prints:** `$display` messages from your Verilog show up in chat when you run the build in MCHPRS.
 - **Test without the game:** Script inputs and check outputs from the command line with `mchprs_headless`.
-- **Scale:** Builds a complete basic CPU in minutes.
+- **Scale:** Builds a single-cycle 8-bit CPU with its program preloaded (`examples/cpu`) in seconds.
 
 ## Prerequisites
 
