@@ -8,13 +8,12 @@ New to the terms? **Verilog** is a text language for describing digital circuits
 
 ## Features
 
-- **Write Verilog, get redstone:** Describe a circuit in Verilog and get a redstone build that does the same thing.
-- **Redstone building blocks:** Each gate is a small prebuilt redstone circuit: AND, OR, XOR, NOT, multiplexers, adders, and flip-flops that store bits.
-- **Automatic layout and wiring:** Gates are placed in 3D, on several levels, and wired together with redstone dust, repeaters and torches. A final check reports wires that are broken, touch each other, run too far without a repeater, or change at the wrong moment relative to the clock.
-- **Repeated parts built once:** When a design repeats the same circuit many times (the bits of a register, say), it's wired once and copied, which makes big builds faster.
-- **Memory:** Arrays in your Verilog become compact redstone RAM instead of one flip-flop per bit, and can start out filled with data (`$readmemh`).
-- **Clock and printing:** The build gets a redstone clock that's slow enough for its longest path, so you don't have to work out the timing. `$display` messages from your Verilog show up in chat when you run the build in MCHPRS.
-- **Ready to paste:** The output is a `.litematic` file you paste into a world with Litematica, or load into MCHPRS. Inputs become levers and outputs become lamps.
+- **Write Verilog, get redstone:** Describe a circuit in Verilog and get a redstone build that does the same thing, ready to paste with Litematica or load into MCHPRS. Inputs become levers and outputs become lamps.
+- **Outputs where you want them:** Place output lamps as a display, such as a seven-segment digit or a screen (`pin_targets.json`).
+- **Memory with data in it:** Memories can start out filled from a file with `$readmemh`, for lookup tables or a program.
+- **Clock included:** The build comes with a redstone clock that's slow enough for the circuit, so you don't have to work out the timing.
+- **Debug prints:** `$display` messages from your Verilog show up in chat when you run the build in MCHPRS.
+- **Test without the game:** Script inputs and check outputs from the command line with `mchprs_headless`.
 - **Scale:** Builds a complete basic CPU in minutes.
 
 ## Prerequisites
