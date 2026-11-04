@@ -10,7 +10,7 @@
 - **Custom Cell Library:** Standard logic gates (AND, OR, XOR, NOT) and D-Flip Flops seamlessly implemented in Minecraft.
 - **Automated 3D Placement and Routing:** Electrostatic 3D placement and a compiled (Cython) A* router for 3D redstone wiring, with a verify pass that reports opens, shorts, weak signals, latches and hold faults.
 - **Macros:** Repeated subcircuits are routed once and stamped.
-- **Memories:** Verilog memories with a supported port layout become prebuilt, pre-settled RAM blocks instead of routed flip-flops (`--no-tiled-ram` turns this off).
+- **Memories:** Verilog memories with a supported port layout become prebuilt, pre-settled RAM blocks instead of routed flip-flops.
 - **Clocks and Debug Prints:** A generated clock sized from static timing, or a lever MCHPRS toggles; `$write`/`$display` show up in MCHPRS.
 - **Litematica Integration:** Outputs `.litematic` files for easy importing into Minecraft worlds or fast simulation via MCHPRS.
 - **Scale:** designs of over 12,000 nets, such as a pipelined CPU with a branch predictor, build in minutes.
