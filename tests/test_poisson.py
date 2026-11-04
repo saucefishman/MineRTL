@@ -2,16 +2,62 @@ import numpy as np
 from scipy import fft
 
 import minecraft_v.placement_engine.poisson as poisson
+from minecraft_v.main import module_to_component_list
+from minecraft_v.models import Cell, Module, Port
 from minecraft_v.placement_engine.builder import _io_barrier
 from minecraft_v.placement_engine.ir import Component, ComponentType, Footprint
-from minecraft_v.placement_engine.layout import _io_base_name
-from tests.test_anneal import _KW, _setup
+from minecraft_v.placement_engine.layout import _expand_multibit_io, _io_base_name
+
+_KW = dict(base_y=5, gutter=10, io_margin=7, routing_gutter=6)
+
+
+def _cell(type_, conns):
+    pds = {p: ("output" if p == "Y" else "input") for p in conns}
+    return Cell(hide_name=1, type=type_, parameters={}, port_directions=pds, connections=conns)
+
+
+def _adder_like_module(width: int = 4) -> Module:
+    """Per bit: s = (a ^ b) ^ c, carry = (a & b) | (c & (a ^ b)) — enough fan-in/out to give the placer work."""
+    a = list(range(2, 2 + width))
+    b = list(range(10, 10 + width))
+    nid = 100
+    cells = {}
+    s_bits, carry = [], None
+    for i in range(width):
+        x, g = nid, nid + 1
+        nid += 2
+        cells[f"x{i}"] = _cell("$_XOR_", {"A": [a[i]], "B": [b[i]], "Y": [x]})
+        cells[f"g{i}"] = _cell("$_AND_", {"A": [a[i]], "B": [b[i]], "Y": [g]})
+        if carry is None:
+            s_bits.append(x)
+            carry = g
+            continue
+        s, p, c = nid, nid + 1, nid + 2
+        nid += 3
+        cells[f"s{i}"] = _cell("$_XOR_", {"A": [x], "B": [carry], "Y": [s]})
+        cells[f"p{i}"] = _cell("$_AND_", {"A": [x], "B": [carry], "Y": [p]})
+        cells[f"c{i}"] = _cell("$_OR_", {"A": [g], "B": [p], "Y": [c]})
+        s_bits.append(s)
+        carry = c
+    return Module(
+        ports={
+            "a": Port(direction="input", bits=a),
+            "b": Port(direction="input", bits=b),
+            "s": Port(direction="output", bits=s_bits),
+            "cout": Port(direction="output", bits=[carry]),
+        },
+        cells=cells,
+    )
+
+
+def _setup():
+    return _expand_multibit_io(module_to_component_list(_adder_like_module()))
 
 _IO = (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN)
 
 
 def _place(seed=0, **kw):
-    comp, _, _ = _setup()
+    comp = _setup()
     args = dict(_KW, y_spacing=3, seed=seed, **kw)
     return comp, poisson._poisson_placement(comp.components, comp.nets, **args)
 
@@ -95,7 +141,7 @@ def test_spread_keeps_order_and_gap():
 
 
 def test_outputs_stay_in_row_with_extension_targets():
-    comp, _, _ = _setup()
+    comp = _setup()
     order = {c.id: float(i) for i, c in enumerate(comp.components) if c.type == ComponentType.OUTPUT_PIN}
     placed = poisson._poisson_placement(comp.components, comp.nets, **dict(_KW, y_spacing=3),
                                         output_x_order=order)
@@ -118,13 +164,13 @@ def test_deterministic():
 
 
 def test_flat_uses_one_level():
-    comp, _, _ = _setup()
+    comp = _setup()
     placed = poisson._poisson_placement(comp.components, comp.nets, **dict(_KW, y_spacing=3), flat=True)
     assert len({p.origin[1] for p in placed}) == 1
 
 
 def test_flat_io_rows_clear_every_gate():
-    comp, _, _ = _setup()
+    comp = _setup()
     placed = poisson._poisson_placement(comp.components, comp.nets, **dict(_KW, y_spacing=3), flat=True)
     gates = [p for p in placed if p.component.type not in _IO]
     far = max(p.origin[2] + p.component.footprint.depth for p in gates)

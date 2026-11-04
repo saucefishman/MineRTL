@@ -1,7 +1,6 @@
 import argparse
 import atexit
 import json
-import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -200,18 +199,12 @@ _MACRO_FANOUT = 2  # nets above this fanout are shared between instances, not gr
 _MACRO_MIN_CELLS = 8  # smallest repeated subcircuit worth a macro
 _MACRO_ROW_TILES = 0  # instances per array, sharing lanes; 0 = all instances of a pattern in one array
 _MACRO_BANK_COLUMNS = 4  # tiles per row in fixed two-row banks facing one lane plane
-_MACRO_CHANNEL = int(os.environ.get("RAM_CHANNEL", 24))  # Z kept clear past a long macro's input face
+_MACRO_CHANNEL = 24  # Z kept clear past a long macro's input face
 _MACRO_EAST_ROOM = 20  # X past a bank stack's pin end where gates may go; the rest go on top
 _MACRO_HEADROOM = 32  # layers kept above the tallest macro
 _BANK_GUTTER = 12
 _BANK_ROUTING_GUTTER = 12
 _BANK_Y_SPACING = 5
-
-
-def _true_or_false(value: str) -> bool:
-    if value.lower() not in ("true", "false"):
-        raise argparse.ArgumentTypeError(f"expected True or False, got '{value}'")
-    return value.lower() == "true"
 
 
 def main():
@@ -221,8 +214,11 @@ def main():
     parser.add_argument("--module", type=str, default="main")
     parser.add_argument("--schematics-dir", type=str, default="schematics")
     parser.add_argument("--schematic-name", type=str, default=None)
-    parser.add_argument("--allow-routing-failures", type=bool, default=False)
+    parser.add_argument("--allow-routing-failures", action=argparse.BooleanOptionalAction, default=False,
+                        help="Write the build even if some nets fail to route (default: off)")
     parser.add_argument("--output-pin-targets-json", type=str, default=None)
+    parser.add_argument("--pin-extensions", action=argparse.BooleanOptionalAction, default=True,
+                        help="Extend output pins to --output-pin-targets-json (default: on)")
     parser.add_argument("--generate-clock", type=str, default="auto",
                         help="Input pin to drive with a generated clock; auto: _clk or clk if present; none: no clock")
     parser.add_argument("--server-clock", type=int, nargs="?", const=0, default=None, metavar="HALF_PERIOD",
@@ -231,47 +227,18 @@ def main():
                              "clock's period). synth.sh turns this on when its mchprs_headless has --run-clock")
     parser.add_argument("--no-server-clock", dest="server_clock", action="store_const", const=None,
                         help="Generate the clock even if synth.sh finds mchprs_headless")
-    parser.add_argument("--route-passes", type=int, default=None,
-                        help="Routing passes incl. final hard pass; 1 = single greedy pass (default: _ROUTE_MAX_PASSES)")
-    parser.add_argument("--wire-timeout", type=float, default=None,
-                        help="Per-search A* time limit in seconds for non-final passes; 0 disables "
-                             "(default: _ROUTE_SEARCH_TIMEOUT)")
-    parser.add_argument("--route-workers", type=int, default=1,
-                        help="Processes for negotiation passes (needs --route-passes > 1); 1 = sequential")
     parser.add_argument("--route-deadline", type=float, default=None,
                         help="Seconds of routing before giving up on remaining nets (writes a partial result; "
-                             "use with --allow-routing-failures True)")
-    parser.add_argument("--placer", choices=("legacy", "bary", "sa", "poisson"), default="poisson",
-                        help="Gate placement: legacy list order, barycenter row ordering, barycenter + "
-                             "simulated annealing, or electrostatic 3D placement without rows")
-    parser.add_argument("--place-y-moves", action=argparse.BooleanOptionalAction, default=True,
-                        help="Let --placer sa move gates between Y levels (default: on)")
-    parser.add_argument("--place-z-moves", action=argparse.BooleanOptionalAction, default=True,
-                        help="Let --placer sa move gates between depth layers within their slack (default: on)")
-    parser.add_argument("--place-flow-rule", action=argparse.BooleanOptionalAction, default=True,
-                        help="Keep same-level sinks in later layers than their driver in --placer sa (default: on)")
-    parser.add_argument("--place-mirror", action=argparse.BooleanOptionalAction, default=True,
-                        help="Let --placer bary|sa mirror gates in X (default: on)")
-    parser.add_argument("--flat", action="store_true",
+                             "use with --allow-routing-failures)")
+    parser.add_argument("--place-seed", type=int, default=0,
+                        help="Placement seed (default 0). Routing is deterministic per placement: try another seed "
+                             "if a build fails nets")
+    parser.add_argument("--flat", action=argparse.BooleanOptionalAction, default=False,
                         help="Put every component on the same Y level (for small projects)")
     parser.add_argument("--settle", action=argparse.BooleanOptionalAction, default=True,
                         help="Save blocks in the states they settle to, so that power-up pulses can't overwrite "
                              "flip-flops (default: on)")
-    parser.add_argument("--place-seed", type=int, default=0, help="RNG seed for --placer sa (default 0)")
-    parser.add_argument("--place-workers", type=int, default=min(4, os.cpu_count() or 1),
-                        help="forked chains per annealing temperature for --placer sa (default "
-                             "min(4, cpus); the result depends on the count, 1 = serial)")
-    parser.add_argument("--gutter", type=int, default=None,
-                        help="X gap between neighbouring gates in a row (default: auto from routing demand, 6-8)")
-    parser.add_argument("--io-margin", type=int, default=None,
-                        help="margin around the layout / IO rows (default 7)")
-    parser.add_argument("--routing-gutter", type=int, default=None,
-                        help="Z gap between layer rows, the routing channel depth (default: auto, 6-8)")
-    parser.add_argument("--y-spacing", type=int, default=None,
-                        help="extra Y between levels beyond the tallest component (default 3)")
-    parser.add_argument("--no-pin-extensions", action="store_true",
-                        help="ignore --output-pin-targets-json (no output pin extensions)")
-    parser.add_argument("--debug", type=_true_or_false, nargs="?", const=True, default=False,
+    parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False,
                         help="Log progress and slow searches, save litematic snapshots during routing to "
                              "<artifacts>/snapshots (slow), print A* counters")
     parser.add_argument("--debug-prints", action=argparse.BooleanOptionalAction, default=True,
@@ -279,10 +246,9 @@ def main():
                              "/watch and mchprs_headless --probes (default: on)")
     parser.add_argument("--macros", action=argparse.BooleanOptionalAction, default=True,
                         help="Route repeated subcircuits once and stamp them; the rest routes around them (default: on; "
-                             "needs --placer poisson, ignored with --flat)")
-    parser.add_argument("--macro-min-instances", type=int, default=None,
-                        help="--macros: use macros only if some pattern repeats this often (default: enough for a "
-                             "bank; designs with only small repeats route better as gates)")
+                             "ignored with --flat)")
+    # Tests: allow macros for patterns that repeat this often (default: enough for a bank)
+    parser.add_argument("--macro-min-instances", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--resume-dir", type=str, default=None,
                         help="Testing: save the placement and routed paths here and reuse them on the next build. "
                              "Use a new directory after changing the placer or netlist")
@@ -324,7 +290,7 @@ def main():
     allow_routing_failures = args.allow_routing_failures
     output_pin_targets = (
         _load_output_pin_targets(args.output_pin_targets_json)
-        if args.output_pin_targets_json and not args.no_pin_extensions
+        if args.output_pin_targets_json and args.pin_extensions
         else None
     )
     generate_clock_pin = None if args.generate_clock == "none" else args.generate_clock
@@ -349,7 +315,8 @@ def main():
     pathfinding.set_foot_repeaters(not rams)
     set_first_fanout(64 if rams else 0)
     set_long_edge_split(sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN) for c in component_list.components))
-    if args.macros and args.placer == "poisson" and not args.flat:
+    spacing = {}
+    if args.macros and not args.flat:
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
                                cache_dir=Path(args.macro_cache) / f"row{_MACRO_ROW_TILES}",
@@ -369,27 +336,17 @@ def main():
               f"{len(component_list.nets)} nets")
         if any(c.metadata.get("bank") for c in component_list.components):
             # Gates around a bank stack: what mem and regsbig route clean with. Without banks, the usual auto spacing.
-            args.gutter = _BANK_GUTTER if args.gutter is None else args.gutter
-            args.routing_gutter = _BANK_ROUTING_GUTTER if args.routing_gutter is None else args.routing_gutter
-            args.y_spacing = _BANK_Y_SPACING if args.y_spacing is None else args.y_spacing
+            spacing = {"gutter": _BANK_GUTTER, "component_depth_spacing": _BANK_ROUTING_GUTTER,
+                       "additional_component_height_spacing": _BANK_Y_SPACING}
 
     build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir),
                                         out_path=out_litematic, schematic_name=schematic_name,
                                         allow_routing_failures=allow_routing_failures,
                                         output_pin_targets=output_pin_targets,
                                         clock_pin=generate_clock_pin,
-                                        **({"route_passes": args.route_passes} if args.route_passes is not None else {}),
-                                        **({"wire_timeout": args.wire_timeout or None} if args.wire_timeout is not None else {}),
-                                        route_workers=args.route_workers,
                                         route_deadline=args.route_deadline,
                                         snapshots=args.debug,
-                                        placer=args.placer,
-                                        place_y_moves=args.place_y_moves,
-                                        place_z_moves=args.place_z_moves,
-                                        place_flow_rule=args.place_flow_rule,
-                                        place_mirror=args.place_mirror,
                                         place_seed=args.place_seed,
-                                        place_workers=args.place_workers,
                                         flat=args.flat,
                                         settled=args.settle,
                                         macros=macros,
@@ -401,12 +358,7 @@ def main():
                                         macro_channel=_MACRO_CHANNEL,
                                         macro_east_room=_MACRO_EAST_ROOM,
                                         macro_headroom=_MACRO_HEADROOM,
-                                        **{k: v for k, v in (
-                                            ("gutter", args.gutter),
-                                            ("component_width_spacing", args.io_margin),
-                                            ("component_depth_spacing", args.routing_gutter),
-                                            ("additional_component_height_spacing", args.y_spacing),
-                                        ) if v is not None})
+                                        **spacing)
 
     log(f"Wrote litematic: {out_litematic.resolve()}")
 

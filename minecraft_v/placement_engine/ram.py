@@ -61,12 +61,12 @@ _LANE_REPEAT = 12    # X between a lane's repeaters
 _LANE_PIN_PITCH = 6  # least X between a group's input pins
 _READ_PLANES = 4     # Y from one pair of read ports to the next
 _LINE_PITCH = 2      # X between decoder lines; each line's torches sit between it and the next
-_ADDR_PITCH = int(os.environ.get("RAM_ADDR_PITCH", 4))  # an address bit's true and complement lines; also the pins' X pitch
+_ADDR_PITCH = 4  # an address bit's true and complement lines; also the pins' X pitch
 _DECODER_REPEAT = 12 // _ADDR_PITCH * _ADDR_PITCH  # X between repeaters on a row line in the decoder: under a true line, never a torch
 
 # Write lines on plane 5 under the first read decoder, not beside it: narrower decoder, same bits. See build_ram.
-_FOLD_ENV = os.environ.get("RAM_FOLD")  # 1 always, 0 never; unset, only groups too wide for a plot
-_FOLD = _FOLD_ENV == "1"
+_FOLD_FIXED: bool | None = None  # True always, False never; None, only groups too wide for a plot
+_FOLD = bool(_FOLD_FIXED)
 _FOLD_GROUP_WIDTH = 1000
 _STACK_SOUTH_FOLDED = 10
 _TOWER_Z_PITCH = 3  # Z between a column's towers when folded
@@ -887,7 +887,7 @@ def _group_width(specs: list[StackSpec]) -> int:
 
 def group_block(specs: list[StackSpec]) -> tuple[Macro, dict[str, tuple[int, str]], dict[object, str]]:
     global _FOLD
-    if _FOLD_ENV is None:
+    if _FOLD_FIXED is None:
         _FOLD = _group_width(specs) > _FOLD_GROUP_WIDTH or _lone_lower_pin(specs) is not None
     numbers: dict[object, int] = {}  # a block depends on which pins share a net, not on what nets are called
     shape = [(s.row_bits, s.banks, s.base, s.abits, s.width, s.init,

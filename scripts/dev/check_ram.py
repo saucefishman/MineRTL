@@ -114,7 +114,7 @@ def check_build(netlist: str, out: Path, seed: str, *args: str) -> int:
     out.mkdir(parents=True, exist_ok=True)
     litematic, pins = out / f"s{seed}.litematic", out / f"s{seed}.pins"
     (out / f"s{seed}_artifacts").mkdir(exist_ok=True)
-    subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", netlist, "--route-passes", "1",
+    subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", netlist,
                     "--generate-clock", "none", "--place-seed", seed, "--out-litematic", litematic, *args], check=True,
                    env={**os.environ, "MINECRAFT_V_ARTIFACTS_DIR": str(out / f"s{seed}_artifacts")})
     script = out / f"s{seed}.script"

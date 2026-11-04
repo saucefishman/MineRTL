@@ -33,7 +33,7 @@ uv sync
 This also builds the Cython A* kernel; `uv run` rebuilds it when a `.pyx` file changes.
 
 2. **Generate a schematic:**
-   We provide several examples in the `examples/` directory, from small ones (`and_gate`, `counter`, `helloworld`, `sevenseg`) to larger designs (`video`, `halfvideo`). Synthesize the counter example with:
+   We provide several examples in the `examples/` directory, from the smallest (`helloworld`, `counter`, `multimodule`, `sevenseg`) to `video`; `examples/README.md` lists what each one shows. Synthesize the counter example with:
 
 ```sh
 ./synth.sh examples/counter
@@ -49,28 +49,28 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
    - `--module <name>`: Sets the top-level Verilog module to synthesize (Default: `main`).
    - `--schematics-dir <dir>`: Sets the directory containing our `.litematic` cell library objects (Default: `schematics`).
    - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).
-   - `--allow-routing-failures True`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
+   - `--allow-routing-failures`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
    - `--synth-only`: Stops after writing the netlist (handled by `synth.sh`).
    - `--tiled-ram` / `--no-tiled-ram` (synth.sh): Memories with a supported port layout become tiled RAM blocks, settled once and cached in `--macro-cache` (Default: `build/macro_cache`). On by default; `--no-tiled-ram` maps every memory to flip-flops. Large memory designs build better with `--no-macros`.
    - `--no-macros`: Routes every gate on its own. By default repeated subcircuits are routed once and stamped, which on a small CPU builds about 2.4x faster and takes about 3x the volume. Designs without enough repeats stay as gates.
    - `--no-settle`: Saves blocks as built instead of in the states they settle to. Without settling, power-up pulses can overwrite flip-flops.
    - `--no-debug-prints`: Removes `$write`/`$display`. By default they stay when they're in a clocked block, inside macros too: blocks they read stand on or hang from lime concrete, and `<out>.server.json` is written next to the litematic for [MCHPRS fork](https://github.com/saucefishman/MCHPRS) `/watch` and `mchprs_headless test --probes`. Non-constant `$sformatf` isn't supported by Yosys: use `$display` directly.
-   - `--output-pin-targets-json <file.json>`: Path to a JSON file explicitly dictating output coordinates. Note: `synth.sh` will _automatically_ use `pin_targets.json` if it finds it in your specific project directory.
+   - `--output-pin-targets-json <file.json>`: Path to a JSON file explicitly dictating output coordinates. Note: `synth.sh` will _automatically_ use `pin_targets.json` if it finds it in your specific project directory; `--no-pin-extensions` ignores it.
    - `--generate-clock <pin|auto|none>`: Select the pin to be the clock pin and automatically generate a redstone clock for it. Its period comes from static timing of the built circuit. (Default: `auto`, which picks `_clk` or `clk`)
    - `--server-clock [half period]`: No generated clock, which gets long on large circuits: the clock pin gets a lever, and MCHPRS toggles it every that many redstone ticks, read from `<out>.server.json`. `synth.sh` turns this on when it finds an `mchprs_headless` with `--run-clock` (`$MCHPRS_HEADLESS`, or `target/release` under `$MCHPRS_DIR`, else `mchprs_headless` on `PATH`) and no clock flag is given; `--no-server-clock` or `--generate-clock <pin>` keeps the generated clock. (Default half period: from the critical path, the generated clock's period.) That check can't see the running server: if the clock stays still, rebuild and restart it, and stand on the plot, since plots only tick with a player.
 
-   - `--placer poisson|bary|legacy`, `--place-seed <n>`: Placement algorithm and seed (Default: `poisson`, seed 0). Routing is deterministic per placement, so try another seed if a build fails nets.
+   - `--place-seed <n>`: Placement seed (Default: 0). Routing is deterministic per placement, so try another seed if a build fails nets.
    - `--flat`: Puts every component on one Y level (for small designs).
    - `--resume-dir <dir>`, `--resume-reroute <nets>`: Save the placement and routed paths and reuse them on the next build; reroute only the listed nets.
-   - `--route-deadline <s>`: Stops routing after that many seconds and writes a partial result (use with `--allow-routing-failures True`).
-   - `--debug True`: Logs progress and slow searches, saves routing snapshots to `<artifacts>/snapshots` (slow), prints A* counters.
+   - `--route-deadline <s>`: Stops routing after that many seconds and writes a partial result (use with `--allow-routing-failures`).
+   - `--debug`: Logs progress and slow searches, saves routing snapshots to `<artifacts>/snapshots` (slow), prints A* counters.
 
    Run `uv run python -m minecraft_v.main --help` for the full list.
 
    Example usage:
 
 ```sh
-./synth.sh examples/counter --module my_counter --out-litematic "counter.litematic" --allow-routing-failures True
+./synth.sh examples/counter --out-litematic counter.litematic --place-seed 1
 ```
 
 ## Running Builds in MCHPRS

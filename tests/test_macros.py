@@ -36,8 +36,8 @@ def _build(tmp: Path, project: Path, *flags: str) -> tuple[str, list[dict], Path
     out = tmp / "result.litematic"
     env = {**os.environ, "PYTHONHASHSEED": "0"}
     run = subprocess.run(
-        ["./synth.sh", str(project), "--no-tiled-ram", "--artifacts-dir", str(tmp / "artifacts"), "--route-passes", "1",
-         "--allow-routing-failures", "True", "--out-litematic", str(out), "--macros", "--macro-cache", str(tmp / "cache"), *flags],
+        ["./synth.sh", str(project), "--no-tiled-ram", "--artifacts-dir", str(tmp / "artifacts"),
+         "--allow-routing-failures", "--out-litematic", str(out), "--macros", "--macro-cache", str(tmp / "cache"), *flags],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
     log = run.stdout + run.stderr
     assert run.returncode == 0, log[-2000:]
@@ -169,8 +169,8 @@ def test_cached_macro_keeps_print_drivers_and_old_caches_rebuild(tmp_path):
 def test_macros_are_on_by_default(tmp_path):
     out = tmp_path / "result.litematic"
     run = subprocess.run(
-        ["./synth.sh", str(_memory(tmp_path, 8, 16)), "--no-tiled-ram", "--artifacts-dir", str(tmp_path / "artifacts"), "--route-passes", "1",
-         "--allow-routing-failures", "True", "--out-litematic", str(out)],
+        ["./synth.sh", str(_memory(tmp_path, 8, 16)), "--no-tiled-ram", "--artifacts-dir", str(tmp_path / "artifacts"),
+         "--allow-routing-failures", "--out-litematic", str(out)],
         cwd=ROOT, env={**os.environ, "PYTHONHASHSEED": "0"}, capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
     assert "[macro]" in run.stdout

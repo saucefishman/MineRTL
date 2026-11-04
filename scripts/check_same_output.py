@@ -2,7 +2,7 @@
 
     uv run python scripts/check_same_output.py --save build/same_output.json     # record baseline
     uv run python scripts/check_same_output.py --compare build/same_output.json  # after a change
-    uv run python scripts/check_same_output.py --compare base.json regs -- --route-passes 3
+    uv run python scripts/check_same_output.py --compare base.json regs -- --place-seed 1
 
 Builds run through bench_examples.run_example (same caps, PYTHONHASHSEED=0, per-build dirs).
 The hash covers every region's block array and palette, not the file bytes (those carry

@@ -27,7 +27,7 @@ def build(example: str, out: Path, seed: str, script_text: str) -> tuple[Path, P
     subprocess.run([ROOT / "synth.sh", ROOT / "examples" / example, "--artifacts-dir", out, "--synth-only"], check=True, stdout=subprocess.DEVNULL)
     pins, raw, settled = out / "pins.txt", out / "unsettled.litematic", out / "settled.litematic"
     for flag, litematic in (("--no-settle", raw), ("--settle", settled)):
-        subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", out / "netlist.json", "--route-passes", "1",
+        subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", out / "netlist.json",
                         "--no-macros", "--no-debug-prints", "--generate-clock", "none", "--place-seed", seed, flag, "--out-litematic", litematic],
                        check=True, env=env, stdout=subprocess.DEVNULL)
     script = out / "run.txt"

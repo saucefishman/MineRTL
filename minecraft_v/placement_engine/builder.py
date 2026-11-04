@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import bisect
 import gc
 import time
@@ -20,7 +19,7 @@ from minecraft_v.placement_engine.server_file import SERVER_FILE_SUFFIX, schemat
 from minecraft_v.placement_engine.resume import ResumeStore
 from minecraft_v.build_utils import save_artifact, save_schematic_artifact, DEFAULT_SNAPSHOT_DIR
 from minecraft_v.cell_library import INIT_HIGH_STATES, SCHEMATIC_MAP
-from minecraft_v.progress import ProgressBar, debug, log, phase, status
+from minecraft_v.progress import ProgressBar, debug, is_debug, log, phase, status
 from minecraft_v.placement_engine.ir import (
     Direction,
     Component,
@@ -31,19 +30,15 @@ from minecraft_v.placement_engine.ir import (
 from .block_utils import Box, BulkRegion, save_schematic, _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
-    _ROUTE_STAGNATION_FIRST, _ROUTE_RETRY_BUDGET, _ROUTE_MAX_PASSES, _PRES_SCHEDULE, _CONFLICT_BASE, _ROUTE_STAGNATION_PASSES, _ROUTE_SEARCH_TIMEOUT,
-    _ROUTE_TIMEOUT_ESCALATION, _ROUTE_FINAL_SEARCH_TIMEOUT, _ROUTE_BATCH_PER_WORKER,
+    _ROUTE_STAGNATION_FIRST, _ROUTE_RETRY_BUDGET,
 )
 from .layout import (
-    _Placed, _expand_multibit_io, _assign_component_y_levels,
-    _layout_components, _compute_workspace_dims,
+    _Placed, _expand_multibit_io,
+    _compute_workspace_dims,
 )
-from .anneal import _optimize_placement
 from .poisson import _poisson_placement
-from .negotiate import Congestion, OverlayDict, OverlaySet, NetRoute, OverlayWorkspace
-from .parallel import RouteWorkers, claims_of
 from .propagate import comparator_entity, settle as settle_blocks
-from .pathfinding import IndexedWorkspace, RouteTimeout, _BlockIndex, _astar, _find_wire_path, _signal_depths
+from .pathfinding import IndexedWorkspace, _astar, _find_wire_path, _signal_depths
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -776,7 +771,7 @@ class _KeptBranches:
 
 
 _LOG_EVERY_SECONDS = 30.0     # routing progress in the log
-_NET_CHECKS = os.environ.get("MINECRAFT_V_NET_CHECKS", "1")
+_NET_CHECKS = "1"  # "0": verify alone; "check": compare the compiled per-net checks to verify on every net
 _FAULT_LATCH, _FAULT_INVERTED, _FAULT_GATE = 1, 2, 4  # _astar.NetChecks.faults
 _LOG_SLOW_SEARCH_SECONDS = 5.0
 _LOG_SLOW_JOB_SECONDS = 10.0
@@ -814,13 +809,13 @@ class _TreeCells:
         return [tuple(c) for c in cells[np.argpartition(h, k)[:k]].tolist()]
 
 
-_first_fanout = [int(os.environ.get("ROUTE_FIRST_FANOUT", 64))]
+_first_fanout = [64]
 
 
 def set_first_fanout(fanout: int) -> None:
     """Nets of this fanout or more route first and aren't ripped up as blockers. RAM blocks need it, but on a design
-    without them it walls in later nets: examples/cpu --no-macros fails on seed 0. ROUTE_FIRST_FANOUT overrides it."""
-    _first_fanout[0] = int(os.environ.get("ROUTE_FIRST_FANOUT", fanout))
+    without them it walls in later nets: examples/cpu --no-macros fails on seed 0."""
+    _first_fanout[0] = fanout
 
 
 class _GreedyRouter:
@@ -884,8 +879,7 @@ class _GreedyRouter:
         self.rips_blockers = True  # whether a failed sink can get room by ripping (run's rip_blockers)
 
     def _make_net_checks(self):
-        """The compiled per-net checks, if this router's world is what they read. MINECRAFT_V_NET_CHECKS: 0 verify's alone,
-        check compares them to verify on every net."""
+        """The compiled per-net checks, if this router's world is what they read (see _NET_CHECKS)."""
         grid = self.indexed.block_index().grid
         if (grid is None or _NET_CHECKS == "0" or not _astar.NetChecks.usable(self.region)
                 or grid.fp_set() is not self.footprint_blocked or grid.terminal_set() is not self.terminal_positions):
@@ -1452,7 +1446,7 @@ class _GreedyRouter:
                         raise RuntimeError(f"Routing failed for net {job.key}: {e}") from e
                     failures.append((job.key, e))
                     log(f"[error] skipped net {job.key}: {e}")
-                    if os.environ.get("ROUTE_DEBUG_FAILED"):
+                    if is_debug():
                         self._dump_around(job)
                 if on_done is not None:
                     on_done(i, job)
@@ -1517,14 +1511,14 @@ def _bank_pin_leads(
     return list(dict.fromkeys(leads))
 
 
-_long_edge_split = [int(os.environ.get("ROUTE_SPLIT", 0))]  # edges longer than this get soft waypoints; 0 off
+_long_edge_split = [0]  # edges longer than this get soft waypoints; 0 off
 _SPLIT_MIN_GATES = 10_000
 
 
 def set_long_edge_split(gates: int) -> None:
     """Split long edges every 100 blocks on designs of _SPLIT_MIN_GATES or more. floweypu routes 5% faster; examples/cpu
-    routes 19% slower and bpmem a little slower, so small designs keep it off. ROUTE_SPLIT overrides it."""
-    _long_edge_split[0] = int(os.environ.get("ROUTE_SPLIT", 100 if gates >= _SPLIT_MIN_GATES else 0))
+    routes 19% slower and bpmem a little slower, so small designs keep it off."""
+    _long_edge_split[0] = 100 if gates >= _SPLIT_MIN_GATES else 0
 
 
 def _long_edge_leads(src: Pos, sinks: list[Pos], split: int) -> list[Pos]:
@@ -1747,310 +1741,6 @@ def _hold_with_detours(workspace: Region, flat: ComponentList, ends: dict, faile
             period = fix_hold(workspace, flat, ends, failed, probed, opaque, macros, requirement, shorts)
             break
     return period
-
-
-def _commit_route(
-        workspace: Region,
-        rec: Recorder,
-        solid: JournaledSet,
-        dust_owner: JournaledDict,
-        inverted_cells: JournaledSet,
-        net_id: str,
-        route: NetRoute,
-        net_ids: set[str],
-) -> bool:
-    """Write a virtual route into the real workspace; rip it back out if it clashes.
-
-    Clash = a block lands on a non-air cell (other than sharing an existing solid as
-    support), or one of its signal cells ends up next to (halo) another committed net's
-    signal — the same adjacency _wire_walkable forbids.
-    """
-    ws = JournalingWorkspace(workspace, rec)
-    ok = True
-    with rec.recording(net_id):
-        for pos, block in route.overlay.items():
-            if not _is_air(workspace[pos]):
-                if pos in solid and pos in route.support:
-                    continue  # shared support block
-                ok = False
-                break
-            ws[pos] = block
-        if ok:
-            for pos in route.solid:
-                solid.add(pos)
-            for pos, owner in route.owner.items():
-                dust_owner[pos] = owner
-            for pos in route.inverted:
-                inverted_cells.add(pos)
-    if ok:
-        for pos in route.halo:
-            owner = dust_owner.get(pos)
-            if owner is not None and owner != net_id and owner in net_ids:
-                ok = False
-                break
-    if not ok:
-        rip_up(rec, net_id, workspace, solid, dust_owner)
-    return ok
-
-
-def _route_all_nets_negotiated(
-        workspace: Region,
-        rec: Recorder,
-        solid: JournaledSet,
-        dust_owner: JournaledDict,
-        sorted_nets: list[NetConnection],
-        pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
-        ws_bounds: tuple[int, int, int, int, int, int],
-        max_bridge_y: int,
-        footprint_blocked: frozenset[tuple[int, int, int]],
-        all_terminals: dict[str, set[tuple[int, int, int]]],
-        passes: int,
-        component_cells: frozenset[tuple[int, int, int]] = frozenset(),
-        snapshot_dir: Path | None = None,
-        search_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
-        final_search_timeout: float | None = _ROUTE_FINAL_SEARCH_TIMEOUT,
-        route_workers: int = 1,
-        deadline: float | None = None,
-        fail_fast: bool = False,
-        terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None,
-) -> tuple[list[tuple[str, Exception]], set[tuple[int, int, int]]]:
-    """Negotiated-congestion routing (PathFinder), then commit, then a hard cleanup pass.
-
-    Negotiation passes: every net (pass 0) or every net touching overuse / unrouted (later
-    passes) is ripped up and rerouted against the static world plus its own blocks only.
-    Other nets add cost, not walls: Congestion.cost = history + pres * users, with pres
-    rising per pass and history growing on cells still overused after each pass. Stops
-    when a pass leaves no overuse and no unrouted nets, or after _ROUTE_STAGNATION_PASSES
-    passes without improvement, or passes-1 passes.
-
-    Per-net search limit starts at search_timeout and is multiplied by
-    _ROUTE_TIMEOUT_ESCALATION each time that net times out (capped at final_search_timeout),
-    so hard nets aren't retried with a limit they already failed.
-
-    Commit: the best pass's routes are written into the real workspace, clean nets first;
-    any that clash, or that verify_signals finds open/shorted afterwards (claims don't model
-    every interaction), are ripped out. Leftovers get a final hard (overlap-free) A* pass
-    with final_search_timeout per search.
-
-    route_workers > 1 runs negotiation passes in forked worker processes (parallel.py):
-    nets are routed in batches against congestion frozen at the start of each batch.
-
-    deadline (time.monotonic()): past it, no new net/batch is started; the best pass so far
-    is committed and the final hard pass skips its remaining nets (reported as failures),
-    so a capped build still writes a partial result.
-
-    fail_fast: raise on the first net that fails the final hard pass (negotiation-pass
-    failures are retried, so they don't count).
-    """
-    base_index = _BlockIndex(workspace)  # static world; unchanged until commit
-    inverted_cells = JournaledSet(rec, name="inverted")
-    net_ids = {net.net_id for net in sorted_nets}
-    net_by_id = {net.net_id: net for net in sorted_nets}
-    net_order = {net.net_id: i for i, net in enumerate(sorted_nets)}
-    all_terminal_positions = frozenset(pin_terminal.values())
-    cong = Congestion()
-    routes: dict[str, NetRoute] = {}
-    last_error: dict[str, Exception] = {}
-    net_timeout: dict[str, float | None] = {}
-
-    def terminals(net_id: str) -> tuple[tuple[int, int, int], list[tuple[int, int, int]]]:
-        net = net_by_id[net_id]
-        return (_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
-                [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks])
-
-    keepouts = _KeepoutMap(all_terminals, terminal_approach)
-
-    def route_net(net: NetConnection, ws, solid_view, owner_view, inverted, congestion_cost, time_limit):
-        src_pin = _pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name)
-        protected = keepouts.for_net(net.net_id)
-        net_ordered_paths: list[list[tuple[int, int, int]]] = []
-        dst_pins = (_pin_for_endpoint(pin_terminal, sink.component_id, sink.pin_name) for sink in net.sinks)
-        sorted_pins = sorted(dst_pins,
-                             key=lambda p: abs(p[0] - src_pin[0]) + abs(p[1] - src_pin[1]) + abs(p[2] - src_pin[2]))
-        support_block = WOOLS[net_order[net.net_id] % len(WOOLS)]
-        for dst_pin in sorted_pins:
-            tree_seeds = [pos for _path in net_ordered_paths for pos in _path]
-            path = _find_wire_path(
-                ws, solid_view, owner_view,
-                src_pin, dst_pin, net.net_id,
-                ws_bounds, max_bridge_y,
-                tree_seeds=tree_seeds,
-                protected=protected,
-                footprint_blocked=footprint_blocked,
-                inverted_cells=frozenset(inverted),
-                terminal_positions=all_terminal_positions,
-                congestion_cost=congestion_cost,
-                time_limit=time_limit,
-                seed_depths=_signal_depths(net_ordered_paths),
-            )
-            _lay_redstone_path(ws, solid_view, owner_view, path, net.net_id,
-                               opaque_support_block=support_block,
-                               inverted_cells=inverted,
-                               goal=dst_pin,
-                               terminal_positions=all_terminal_positions)
-            net_ordered_paths.append(path)
-        _place_repeaters_for_net(ws, owner_view, net.net_id, net_ordered_paths)
-
-    def route_virtual(net_id: str, pres: float, cong: Congestion, time_limit: float | None) -> NetRoute:
-        view = OverlayWorkspace(workspace, base_index)
-        solid_view = OverlaySet(solid)
-        owner_view = OverlayDict(dust_owner)
-        inverted: set[tuple[int, int, int]] = set()
-        route_net(net_by_id[net_id], view, solid_view, owner_view, inverted,
-                  lambda pos: cong.cost(pos, pres, _CONFLICT_BASE), time_limit)
-        return NetRoute.from_view(view, solid_view, owner_view, inverted)
-
-    def settle(net_id: str, old: NetRoute | None, route: NetRoute | None, error: Exception | None) -> NetRoute | None:
-        """Record a reroute's outcome; a failed one (e.g. timeout) keeps the previous route."""
-        if error is None:
-            last_error.pop(net_id, None)
-            return route
-        last_error[net_id] = error
-        limit = net_timeout.get(net_id, search_timeout)
-        if isinstance(error, RouteTimeout) and limit is not None:
-            cap = final_search_timeout if final_search_timeout is not None else limit * _ROUTE_TIMEOUT_ESCALATION
-            net_timeout[net_id] = min(limit * _ROUTE_TIMEOUT_ESCALATION, cap)
-        return old
-
-    def past_deadline() -> bool:
-        return deadline is not None and time.monotonic() > deadline
-
-    def route_pass_sequential(bar: ProgressBar, pres: float) -> None:
-        for net_id in to_route:
-            if past_deadline():
-                return
-            bar.update(info=net_id)
-            old = routes.pop(net_id, None)
-            if old is not None:
-                cong.remove(net_id, old)
-            try:
-                route, error = route_virtual(net_id, pres, cong, net_timeout.get(net_id, search_timeout)), None
-            except Exception as e:
-                route, error = None, e
-            route = settle(net_id, old, route, error)
-            if route is not None:
-                routes[net_id] = route
-                cong.add(net_id, route)
-
-    def route_pass_parallel(bar: ProgressBar, pres: float) -> None:
-        # Batches of _ROUTE_BATCH_PER_WORKER * workers nets route against the same frozen
-        # congestion; within a batch, slowest-last-time nets go out first.
-        nonlocal deltas
-        batch_size = _ROUTE_BATCH_PER_WORKER * route_workers
-
-        def progress(net_id: str) -> None:
-            bar.update(info=net_id)
-
-        for b in range(0, len(to_route), batch_size):
-            if past_deadline():
-                return
-            batch = to_route[b:b + batch_size]
-            olds = {}
-            for net_id in batch:
-                old = olds[net_id] = routes.pop(net_id, None)
-                if old is not None:
-                    cong.remove(net_id, old)
-                    deltas.append(("rm", net_id, claims_of(old)))
-            tasks = [(net_id, pres, net_timeout.get(net_id, search_timeout))
-                     for net_id in sorted(batch, key=lambda n: -net_seconds.get(n, 0.0))]
-            results = workers.run_batch(deltas, tasks, progress)
-            deltas = []
-            for net_id in batch:
-                route, error, net_seconds[net_id] = results[net_id]
-                route = settle(net_id, olds[net_id], route, error)
-                if route is not None:
-                    routes[net_id] = route
-                    cong.add(net_id, route)
-                    deltas.append(("add", net_id, claims_of(route)))
-
-    order = [net.net_id for net in sorted_nets]
-    to_route = list(order)
-    best: tuple[tuple[int, int], dict[str, NetRoute]] | None = None
-    stale = 0
-    deltas: list = []  # congestion changes not yet sent to the workers
-    net_seconds: dict[str, float] = {}
-    workers = RouteWorkers(route_workers, route_virtual) if route_workers > 1 and passes > 1 else None
-    try:
-        for k in range(max(passes - 1, 0)):
-            pres = _PRES_SCHEDULE[min(k, len(_PRES_SCHEDULE) - 1)]
-            with ProgressBar(f"[wire] pass {k}", len(to_route)) as bar:
-                if workers is None:
-                    route_pass_sequential(bar, pres)
-                else:
-                    route_pass_parallel(bar, pres)
-            over = cong.overused()
-            for pos in over:
-                cong.hist[pos] += 1
-            if workers is not None:
-                deltas.append(("hist", None, list(over)))
-            conflicted = cong.nets_at(over) & routes.keys()
-            unrouted = [net_id for net_id in order if net_id not in routes]
-            score = (len(unrouted) + len(conflicted), len(over))
-            if best is None or score < best[0]:
-                best = (score, dict(routes))
-                stale = 0
-            else:
-                stale += 1
-            if not over and not unrouted:
-                break
-            if stale >= _ROUTE_STAGNATION_PASSES:
-                break
-            if past_deadline():
-                break
-            to_route = [net_id for net_id in order if net_id in conflicted or net_id not in routes]
-    finally:
-        if workers is not None:
-            workers.close()
-
-    # Commit the best pass. Rebuild congestion for exactly those routes to know which are clean.
-    final_routes = best[1] if best is not None else {}
-    final_cong = Congestion()
-    for net_id, route in final_routes.items():
-        final_cong.add(net_id, route)
-    conflicted = final_cong.nets_at(final_cong.overused())
-    commit_order = sorted(final_routes, key=lambda n: (n in conflicted, net_order[n]))
-    leftovers = [net_id for net_id in order if net_id not in final_routes]
-    for net_id in commit_order:
-        if not _commit_route(workspace, rec, solid, dust_owner, inverted_cells, net_id,
-                             final_routes[net_id], net_ids):
-            last_error[net_id] = ValueError("route clashed with another net at commit")
-            leftovers.append(net_id)
-    # Claims only model same-cell use and adjacency; check the committed result for real.
-    committed = [net_id for net_id in commit_order if net_id not in leftovers]
-    bad: set[str] = set()
-    for violation in verify_signals(workspace, {n: terminals(n) for n in committed}, dust_owner,
-                                    component_cells):
-        bad |= violation.nets & set(committed)
-    for net_id in sorted(bad, key=net_order.get):
-        rip_up(rec, net_id, workspace, solid, dust_owner)
-        last_error[net_id] = ValueError("open/short after commit (verify_signals)")
-        leftovers.append(net_id)
-    if snapshot_dir is not None:
-        save_schematic_artifact("negotiated_commit.litematic", workspace, snapshot_dir)
-
-    # Final hard pass in the real workspace: overlaps forbidden, no search timeout.
-    ws = JournalingWorkspace(workspace, rec)
-    failures: list[tuple[str, Exception]] = []
-    with ProgressBar("[wire] final", len(leftovers)) as bar:
-        for net_id in sorted(leftovers, key=net_order.get):
-            bar.update(info=net_id)
-            if past_deadline():
-                if fail_fast:
-                    raise RuntimeError(f"Routing failed for net {net_id}: route deadline reached")
-                failures.append((net_id, ValueError("route deadline reached")))
-                continue
-            try:
-                with rec.recording(net_id):
-                    route_net(net_by_id[net_id], ws, solid, dust_owner, inverted_cells, None, final_search_timeout)
-            except Exception as e:
-                rip_up(rec, net_id, workspace, solid, dust_owner)
-                if fail_fast:
-                    raise RuntimeError(f"Routing failed for net {net_id}: {e}") from e
-                failures.append((net_id, e))
-    for net_id, e in failures:
-        log(f"[error] unrouted net {net_id}: {e}")
-    log(f"[wire] done ({len(order)} nets, {len(failures)} failed)")
-    return failures, inverted_cells
 
 
 def _report_signal_violations(
@@ -2372,18 +2062,9 @@ def build_litematic_from_component_list(
         output_pin_targets: dict[str, tuple[int, int]] | None = None,
         pin_targets_space=50,
         clock_pin: str = 'clk',
-        route_passes: int = _ROUTE_MAX_PASSES,
-        wire_timeout: float | None = _ROUTE_SEARCH_TIMEOUT,
-        route_workers: int = 1,
         route_deadline: float | None = None,
         snapshots: bool = False,
-        placer: str = "poisson",
-        place_y_moves: bool = True,
-        place_z_moves: bool = True,
-        place_flow_rule: bool = True,
-        place_mirror: bool = True,
         place_seed: int = 0,
-        place_workers: int = 1,
         flat: bool = False,
         settled: bool = True,
         macros: dict[str, Macro] | None = None,
@@ -2407,26 +2088,12 @@ def build_litematic_from_component_list(
         routing_headroom = max(routing_headroom, macro_headroom)
         bridge_height = max(bridge_height, macro_headroom - 4)
     comp = _expand_multibit_io(comp)
-    max_comp_height = max((c.footprint.height for c in comp.components), default=1)
-    y_stride = max_comp_height + additional_component_height_spacing
-    y_level = _assign_component_y_levels(comp.components, comp.nets, y_stride=y_stride, clock_pin=clock_pin)
-    if flat:
-        y_level = {cid: 0 for cid in y_level}
-        place_y_moves = False
     # Order output pins like their extension targets, so extensions don't have to cross.
     output_x_order = {pn: float(tx) for pn, (tx, _ty) in (output_pin_targets or {}).items()}
-    if placer == "legacy":
-        placed = _layout_components(
-            comp.components, comp.nets,
-            gutter=10 if gutter is None else gutter, base_y=base_y, y_level=y_level,
-            io_margin=component_width_spacing,
-            routing_gutter=6 if component_depth_spacing is None else component_depth_spacing, flat=flat,
-            output_x_order=output_x_order,
-        )
-    elif resume is not None and resume.load_placed(place_seed) is not None:
+    if resume is not None and resume.load_placed(place_seed) is not None:
         placed = resume.load_placed(place_seed)
         log(f"[resume] placement from {resume.dir}")
-    elif placer == "poisson":
+    else:
         with phase("[place]"):
             placed = _poisson_placement(
                 comp.components, comp.nets,
@@ -2435,15 +2102,6 @@ def build_litematic_from_component_list(
                 seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
                 macro_channel=macro_channel, macro_east_room=macro_east_room, io_lane_pins=io_lane_pins,
             )
-    else:
-        placed = _optimize_placement(
-            comp.components, comp.nets, y_level,
-            placer=placer, base_y=base_y, gutter=gutter,
-            io_margin=component_width_spacing, routing_gutter=component_depth_spacing,
-            y_moves=place_y_moves, z_moves=place_z_moves, flow_rule=place_flow_rule,
-            mirror_moves=place_mirror, seed=place_seed,
-            clock_pin=clock_pin, workers=place_workers, flat=flat, output_x_order=output_x_order,
-        )
     if resume is not None:
         resume.save_placed(place_seed, placed)
     if output_pin_targets:
@@ -2539,35 +2197,18 @@ def build_litematic_from_component_list(
             else (1, _net_sort_key(net, pin_terminal))))
     deadline = None if route_deadline is None else time.monotonic() + route_deadline
     kept_router: list = []
-    if route_passes <= 1:
-        if route_workers > 1:
-            log("[wire] --route-workers ignored: needs --route-passes > 1")
-        routing_failures, inverted_cells, net_paths = _route_all_nets(
-            workspace, rec, solid, dust_owner,
-            sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
-            footprint_blocked, all_terminals,
-            snapshot_dir=snapshot_dir,
-            deadline=deadline,
-            fail_fast=not allow_routing_failures,
-            terminal_approach=terminal_approach,
-            placed=placed,
-            resume=resume,
-            keep_router=kept_router,
-        )
-    else:
-        net_paths = {}  # negotiated mode keeps no ordered paths
-        routing_failures, inverted_cells = _route_all_nets_negotiated(
-            workspace, rec, solid, dust_owner,
-            sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
-            footprint_blocked, all_terminals, route_passes,
-            component_cells=_hidden_cells(placed),
-            snapshot_dir=snapshot_dir,
-            search_timeout=wire_timeout,
-            route_workers=route_workers,
-            deadline=deadline,
-            fail_fast=not allow_routing_failures,
-            terminal_approach=terminal_approach,
-        )
+    routing_failures, inverted_cells, net_paths = _route_all_nets(
+        workspace, rec, solid, dust_owner,
+        sorted_nets, pin_terminal, ws_bounds, max_bridge_y,
+        footprint_blocked, all_terminals,
+        snapshot_dir=snapshot_dir,
+        deadline=deadline,
+        fail_fast=not allow_routing_failures,
+        terminal_approach=terminal_approach,
+        placed=placed,
+        resume=resume,
+        keep_router=kept_router,
+    )
 
     failed_nets = {nid for nid, _ in routing_failures}
     flat_period = 0
@@ -2774,7 +2415,7 @@ def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int
         try:
             build_litematic_from_component_list(
                 sub, schematics_dir, Path("unused.litematic"), schematic_name=name, clock_pin=None,
-                route_passes=1, place_seed=seed, capture=capture, route_deadline=route_deadline,
+                place_seed=seed, capture=capture, route_deadline=route_deadline,
                 gutter=gutter, component_depth_spacing=routing_gutter,
                 io_columns=io_column_pins(n_pins, 4, gutter + 1), **build_kwargs,
             )

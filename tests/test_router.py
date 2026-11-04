@@ -599,12 +599,8 @@ def test_long_edge_leads_split_only_long_tree_edges():
 
 def test_long_edge_split_only_on_large_designs(monkeypatch):
     # examples/cpu (4509 gates) and bpmem (345) route slower split, floweypu (12448) faster.
-    monkeypatch.delenv("ROUTE_SPLIT", raising=False)
     monkeypatch.setattr(builder, "_long_edge_split", [0])
     builder.set_long_edge_split(4509)
     assert builder._long_edge_split[0] == 0
     builder.set_long_edge_split(12448)
     assert builder._long_edge_split[0] == 100
-    monkeypatch.setenv("ROUTE_SPLIT", "0")
-    builder.set_long_edge_split(12448)
-    assert builder._long_edge_split[0] == 0

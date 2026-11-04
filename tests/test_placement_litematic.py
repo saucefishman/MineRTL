@@ -110,7 +110,6 @@ def test_output_pin_target_layer_wiring(tmp_path: Path, capsys):
     assert "redstone_wire" in str(region[etx, ty, 0])
 
 
-@pytest.mark.parametrize("placer", ["legacy", "sa"])
 @pytest.mark.parametrize(
     "gate_type, kwargs",
     [
@@ -120,12 +119,12 @@ def test_output_pin_target_layer_wiring(tmp_path: Path, capsys):
         ("$_NOT_", {"has_b": False}),
         pytest.param("$_MUX_", {"has_b": True, "has_s": True}, marks=pytest.mark.xfail(
             raises=ValueError, strict=False,
-            reason="known layout bug (also examples/mux): IO repeater cell lands outside the workspace; "
-                   "not strict because sa's auto spacing happens not to trigger it for a single gate")),
+            reason="known layout bug: IO repeater cell lands outside the workspace; "
+                   "not strict because it depends on the placement")),
     ],
 )
-def test_single_gate_routes_clean(tmp_path: Path, capsys, gate_type, kwargs, placer):
-    _build(_single_gate_module(gate_type, **kwargs), tmp_path / "gate.litematic", capsys, placer=placer)
+def test_single_gate_routes_clean(tmp_path: Path, capsys, gate_type, kwargs):
+    _build(_single_gate_module(gate_type, **kwargs), tmp_path / "gate.litematic", capsys)
 
 
 @pytest.mark.parametrize("gate, cells", [
@@ -164,7 +163,7 @@ def test_synth_works_without_mchprs_headless(tmp_path: Path):
 
     out = tmp_path / "result.litematic"
     run = subprocess.run(
-        ["./synth.sh", "examples/counter", "--artifacts-dir", str(tmp_path / "artifacts"), "--route-passes", "1",
+        ["./synth.sh", "examples/counter", "--artifacts-dir", str(tmp_path / "artifacts"),
          "--out-litematic", str(out)],
         env={**os.environ, "MCHPRS_HEADLESS": str(tmp_path / "missing")}, capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]

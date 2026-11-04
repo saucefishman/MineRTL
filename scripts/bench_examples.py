@@ -1,7 +1,7 @@
 """Build examples in parallel with a hard per-build time limit; report routing + verify results.
 
-    uv run python scripts/bench_examples.py                      # all examples except video
-    uv run python scripts/bench_examples.py regs sevenseg -- --route-passes 4
+    uv run python scripts/bench_examples.py                      # all examples except the showcases
+    uv run python scripts/bench_examples.py regs sevenseg -- --place-seed 1
     uv run python scripts/bench_examples.py --cap 30 --workers 4 counter
 
 Each build gets its own artifacts dir and output under build/bench/<example>/, so builds
@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-EXCLUDED_BY_DEFAULT = {"video"}
+EXCLUDED_BY_DEFAULT = {"cpu", "video", "floweypu", "floweypu_hi", "floweypu_loop"}  # minutes each
 
 
 def run_example(example: str, cap: float, extra: list[str], out_root: Path, hash_seed: int = 0) -> str:
@@ -28,7 +28,7 @@ def run_example(example: str, cap: float, extra: list[str], out_root: Path, hash
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "log.txt"
     cmd = ["./synth.sh", f"examples/{example}", "--artifacts-dir", str(out_dir),
-           "--out-litematic", str(out_dir / "result.litematic"), "--allow-routing-failures", "True", *extra]
+           "--out-litematic", str(out_dir / "result.litematic"), "--allow-routing-failures", *extra]
     env = {**os.environ, "PYTHONHASHSEED": str(hash_seed)}
     t0 = time.monotonic()
     with open(log_path, "w") as log:
@@ -60,7 +60,7 @@ def run_example(example: str, cap: float, extra: list[str], out_root: Path, hash
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("examples", nargs="*", help="example names (default: all except video)")
+    parser.add_argument("examples", nargs="*", help="example names (default: all except cpu, video and floweypu*)")
     parser.add_argument("--cap", type=float, default=60, help="per-build time limit in seconds (default 60)")
     parser.add_argument("--workers", type=int, default=4, help="parallel builds (default 4)")
     parser.add_argument("--out", type=Path, default=ROOT / "build" / "bench", help="output root")

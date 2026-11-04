@@ -53,7 +53,7 @@ def main() -> int:
     litematic, pins = out / f"s{seed}.litematic", out / f"s{seed}.pins"
     env = {**os.environ, "MINECRAFT_V_ARTIFACTS_DIR": str(out / f"s{seed}_artifacts")}
     (out / f"s{seed}_artifacts").mkdir(exist_ok=True)
-    subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", netlist, "--route-passes", "1",
+    subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", netlist,
                     "--no-macros", "--generate-clock", "none", "--place-seed", seed, "--out-litematic", litematic, *args],
                    check=True, env=env, stdout=subprocess.DEVNULL if os.environ.get("QUIET") else None)
     script_path = out / f"s{seed}.script"

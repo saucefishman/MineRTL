@@ -237,7 +237,7 @@ def test_a_live_pin_with_no_net_keeps_wire_off_its_cell():
 
 
 def test_only_a_group_too_wide_for_a_plot_folds_by_default(monkeypatch):
-    monkeypatch.setattr(ram, "_FOLD_ENV", None)
+    monkeypatch.setattr(ram, "_FOLD_FIXED", None)
     monkeypatch.setattr(ram, "_FOLD", False)
     wide = [StackSpec(6, 8, 0, 11, 2, [], {})] * 8
     assert ram._group_width(wide) > ram._FOLD_GROUP_WIDTH

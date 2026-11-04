@@ -41,7 +41,7 @@ def build(project: str, out: Path, seed: str, *args: str) -> int:
         subprocess.run([*env_args, "bash", "synth.sh", project, "--synth-only", *flags], cwd=ROOT, check=True)
     rest = [a for a in args if a != "--tiled-ram"]
     return subprocess.run([*env_args, sys.executable, ROOT / "scripts/build_with_pins.py", out / "design.pins", "--netlist",
-                           out / "netlist.json", "--route-passes", "1", "--server-clock", "--place-seed", seed,
+                           out / "netlist.json", "--server-clock", "--place-seed", seed,
                            "--out-litematic", out / "design.litematic", *rest], cwd=ROOT).returncode
 
 

@@ -131,6 +131,10 @@ def set_debug(on: bool) -> None:
     _debug = on
 
 
+def is_debug() -> bool:
+    return _debug
+
+
 def debug(msg: str) -> None:
     """log(), only with --debug."""
     if _debug:

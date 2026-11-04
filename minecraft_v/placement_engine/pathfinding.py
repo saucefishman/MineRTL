@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import atexit
-import os
-import sys
 import time
 from typing import Callable
 
@@ -251,7 +248,7 @@ class IndexedWorkspace:
     def attach_grid(self, solid, dust_owner, inverted_cells, footprint_blocked, terminal_positions) -> None:
         """Have searches over this workspace read an _astar.CellGrid of these containers, which
         from here on keep it current. Containers that don't (plain sets) leave searches reading
-        them directly. MINECRAFT_V_ASTAR_GRID: 0 no grid, check compares every cell's moves."""
+        them directly. _ASTAR_GRID: 0 no grid, check compares every cell's moves."""
         if (_ASTAR_GRID == "0"
                 or not all(hasattr(c, "_grid") for c in (solid, dust_owner, inverted_cells))):
             return
@@ -377,10 +374,9 @@ def _find_wire_path(
     blocked: extra cells the path must not use, even inside the goal's relief zone (a
     retry after a path that couldn't be laid, see wire.LayConflict).
 
-    congestion_cost: extra cost per path cell (negotiated-congestion routing: other nets'
-    usage + history). Excluded from the f-cap budget.
+    congestion_cost: extra cost per path cell. Excluded from the f-cap budget.
     time_limit: wall-clock seconds for the search; on expiry it fails like any other early stop.
-    workspace may be a view exposing block_index() (see negotiate.OverlayWorkspace).
+    workspace may be a view exposing block_index() (see IndexedWorkspace).
     """
     min_y = bounds[1]
     # Strip the goal terminal's own keepout zone from protected so the approach
@@ -605,16 +601,13 @@ def _check_tower_self_overlap(path: list[tuple[int, int, int]], net_id: str) -> 
                                   (c, (bx, by, bz)))
 
 
-_ASTAR_GRID = os.environ.get("MINECRAFT_V_ASTAR_GRID", "1")
+_ASTAR_GRID = "1"  # "0": searches read the containers, not a CellGrid; "check": compare every cell's moves
 try:
     from . import _astar
 except ImportError as exc:
     raise ImportError(f"the compiled A* kernel (minecraft_v.placement_engine._astar) is missing: {exc}. "
                       "Run `uv sync` to build it.") from exc
-if os.environ.get("MINECRAFT_V_ASTAR_STATS"):
-    atexit.register(lambda: print(f"[astar-stats] {_astar.stats()}", file=sys.stderr))
-# MINECRAFT_V_ASTAR_SUBSET=0: no subset dominance (_astar.set_subset_dominance), for the paths from before it.
-_astar.set_subset_dominance(os.environ.get("MINECRAFT_V_ASTAR_SUBSET", "1") != "0")
+_astar.set_subset_dominance(True)
 _astar.init(_SNAP_OFFSETS, _TOWER_FLAG, _NODE_SHIFT, _ROUTE_STAGNATION, _ROUTE_MAX_NODES,
             _ROUTE_MAX_EXPANSIONS, _H_RADIUS_FACTOR, _HORIZ_DIRS, _HORIZ_RADIUS_MIN, _Y_RADIUS_MIN,
             _SIG_SHIFT, _REPEATER_INTERVAL)
@@ -636,7 +629,7 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-_SEARCH_LOG = os.environ.get("ROUTE_SEARCH_LOG")
+_SEARCH_LOG: str | None = None  # a CSV path: one line per search (net, seed, goal, result, expansions, seconds)
 
 
 def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
