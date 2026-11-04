@@ -6,14 +6,14 @@
 
 ## Features
 
-- **Full Synthesis Pipeline:** Parses, elaborates, and optimizes Verilog using Yosys.
-- **Custom Cell Library:** AND, OR, XOR, NOT, MUX, full adder, D latch, and D flip-flops with and without enable, built in redstone.
-- **Automated 3D Placement and Routing:** Electrostatic 3D placement and a compiled (Cython) A* router for 3D redstone wiring, with a verify pass that reports opens, shorts, weak signals, latches and hold faults.
-- **Macros:** Repeated subcircuits are routed once and stamped.
-- **Memories:** Verilog memories with a supported port layout become prebuilt, pre-settled RAM blocks instead of routed flip-flops.
-- **Clocks and Debug Prints:** A generated clock sized from static timing, or a lever MCHPRS toggles; `$write`/`$display` show up in MCHPRS.
-- **Litematica Integration:** Outputs `.litematic` files for easy importing into Minecraft worlds or fast simulation via MCHPRS.
-- **Scale:** tested on designs of over 12,000 nets, which build in minutes.
+- **Write Verilog, get redstone:** Describe a circuit in Verilog, the language used to design real chips, and get a redstone build that does the same thing. [Yosys](https://github.com/yosyshq/yosys) turns the code into logic gates first.
+- **Redstone building blocks:** Each gate is a small prebuilt redstone circuit: AND, OR, XOR, NOT, multiplexers, adders, and flip-flops that store bits.
+- **Automatic layout and wiring:** Gates are placed in 3D, on several levels, and wired together with redstone dust, repeaters and torches. A final check reports wires that are broken, touch each other, run too far without a repeater, or change at the wrong moment relative to the clock.
+- **Repeated parts built once:** When a design repeats the same circuit many times (the bits of a register, say), it's wired once and copied, which makes big builds faster.
+- **Memory:** Arrays in your Verilog become compact redstone RAM instead of one flip-flop per bit, and can start out filled with data (`$readmemh`).
+- **Clock and printing:** The build gets a redstone clock that's slow enough for its longest path, so you don't have to work out the timing. `$display` messages from your Verilog show up in chat when you run the build in MCHPRS.
+- **Ready to paste:** The output is a `.litematic` file you paste into a world with the Litematica mod, or load into the MCHPRS redstone server to run it much faster. Inputs become levers and outputs become lamps.
+- **Scale:** Builds a complete basic CPU in minutes.
 
 ## Prerequisites
 
