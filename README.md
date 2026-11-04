@@ -50,7 +50,7 @@ This takes about a second and writes `build/result.litematic`, about 35×32×27 
 
 > If you've installed the MCHPRS fork's `mchprs_headless` (below), `synth.sh` leaves the clock out, so that MCHPRS can drive it, and the counter won't count in normal Minecraft. Add `--no-server-clock` to build a clock in.
 
-[`examples/README.md`](examples/README.md) lists the other examples, from `helloworld` (one gate) to `video` (an animation played from one preloaded memory onto a screen of lamps).
+[`examples/README.md`](examples/README.md) lists the other examples, from `helloworld` (one gate) to `video` (Bad Apple!! played from one preloaded memory onto a screen of lamps).
 
 ## Your Own Design
 

@@ -4,7 +4,7 @@ Steps through every frame and round to the first again, expecting each frame of 
 outputs, on every tile's middle lamp, and on all nine lamps of a few tiles. A tile lights while its pin is low.
 
 Usage: check_video.py <netlist.json> <out_dir> <seed> [minecraft_v args...]. Env: QUIET=1 hides the build output,
-FRAMES sets the clock count (default 34).
+FRAMES sets the clock count (default: every frame, and two more).
 """
 import json
 import os
@@ -72,7 +72,7 @@ def main() -> int:
     with open(pins, "a") as f:
         f.writelines(f"{name} {x} {y} {z} 0 -1\n" for name, (x, y, z) in found.items())
     script_path = out / f"s{seed}.script"
-    script_path.write_text(script(int(os.environ.get("FRAMES", 34)), list(found)))
+    script_path.write_text(script(int(os.environ.get("FRAMES", len(WORDS) + 2)), list(found)))
     return subprocess.run([headless_binary(), "test", settled, pins, script_path,
                            "--modes", "noupdate,redstone,redpiler"]).returncode
 
