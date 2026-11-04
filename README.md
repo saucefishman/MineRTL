@@ -73,6 +73,16 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
 ./synth.sh examples/counter --module my_counter --out-litematic "counter.litematic" --allow-routing-failures True
 ```
 
+## Running Builds in MCHPRS
+
+We recommend running builds in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS) instead of vanilla Minecraft. MCHPRS is a redstone-only server, and its redpiler compiler runs large circuits many times faster than vanilla. The fork also reads the `<out>.server.json` that each build writes next to its `.litematic`:
+
+- **Server clock:** with `--server-clock` (on by default when `synth.sh` finds `mchprs_headless`), the server toggles the clock lever itself, so the build doesn't need a generated clock.
+- **`/watch`:** shows the values of `$display`/`$write` debug prints as the circuit runs.
+- **`/lever <input> [on|off|toggle]`:** sets inputs by their Verilog name.
+
+To load a build, copy the `.litematic` and its `.server.json` into the server's `schems/` folder, then `//load <name>` and `//paste` on a plot. See the fork's README for setup and the full command list.
+
 ## Testing Builds Without the Game
 
 `mchprs_headless` (in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS), `crates/headless`) loads a `.litematic` and runs a script against it. Build it with `cargo build --release -p mchprs_headless`; scripts find it at `$MCHPRS_HEADLESS`, else `$MCHPRS_DIR/target/release/mchprs_headless` if `MCHPRS_DIR` is set, else `mchprs_headless` on `PATH`. When present, `synth.sh` uses it to settle the build and to turn on `--server-clock`.
