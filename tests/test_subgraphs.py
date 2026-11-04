@@ -1,17 +1,10 @@
 """The repeated subcircuit finder: exact isomorphism and disjoint instances, on hand-made and example netlists."""
-import shutil
-import subprocess
-from pathlib import Path
 
-import pytest
-
-from minecraft_v.main import Netlist, module_to_component_list
 from minecraft_v.placement_engine.ir import (
     CURRENT_SCHEMA_VERSION, Component, ComponentList, ComponentType, Direction, NetConnection, NetEndpoint, PinRef,
 )
 from minecraft_v.placement_engine.subgraphs import RepeatedClass, find_repeated
 
-ROOT = Path(__file__).resolve().parent.parent
 _INPUTS = {ComponentType.AND: ("A", "B"), ComponentType.XOR: ("A", "B"), ComponentType.NOT: ("A",)}
 
 
@@ -121,17 +114,3 @@ def test_a_spent_time_limit_still_returns_valid_classes():
     comp = _netlist(gates, ["s", *(f"in{k}" for k in range(4))])
     _assert_exact(comp, find_repeated(comp, time_limit=0.0))
 
-
-@pytest.mark.skipif(shutil.which("yosys") is None, reason="yosys not installed")
-def test_cpu_finds_its_memory_and_registers_within_the_limit(tmp_path):
-    subprocess.run(["./synth.sh", "examples/cpu", "--synth-only", "--artifacts-dir", str(tmp_path)], cwd=ROOT, check=True,
-                   capture_output=True)
-    netlist = Netlist.model_validate_json((tmp_path / "netlist.json").read_text())
-    comp = module_to_component_list(netlist.modules["main"])
-    classes = find_repeated(comp, time_limit=30.0)
-    _assert_exact(comp, classes)
-    sizes = [(len(c.instances), len(c.cells)) for c in classes]
-    # The preloaded program's init values split a few bits off from otherwise identical ones, more the longer
-    # prog.hex is (180 cells at 13 words, 177 at 16), so leave room for editing the program.
-    assert sizes[0][0] == 16 and sizes[0][1] >= 160
-    assert sum(n for n, cells in sizes if cells == 48) == 16

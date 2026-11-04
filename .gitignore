@@ -9,6 +9,20 @@ build/
 .pytest_cache/
 
 # Cython A* kernel build outputs
-minecraft_v/placement_engine/_astar.cpp
-minecraft_v/placement_engine/_signals.cpp
+minecraft_v/placement_engine/*.cpp
 minecraft_v/placement_engine/*.so
+
+# Editors and local agent notes
+.idea/
+.vscode/
+.claude/
+CLAUDE.md
+AGENTS.md
+todo.md
+history.txt
+
+# Build and simulation outputs
+*.vcd
+*.litematic
+!schematics/**/*.litematic
+*.server.json
