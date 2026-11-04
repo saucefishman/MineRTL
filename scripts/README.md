@@ -11,7 +11,7 @@ Run from the repo root with `uv run python scripts/<name>.py`. Scripts that run 
 - `clock_sweep.py`: finds the fastest clock a build really runs at, against a slow reference run.
 - `clock_timing.py`: reports clock skew and hold margins from the routed wire.
 - `simulate.py`: simulates net power states from `component_list.json` for N clock cycles.
-- `dev/`: acceptance checks for single examples (`check_memread.py`, `check_powerup.py`, `check_preload.py`, `check_ram.py`); each has its usage in its docstring.
+- `dev/`: acceptance checks for single designs in `examples/` and `tests/designs/` (`check_memread.py`, `check_powerup.py`, `check_preload.py`, `check_ram.py`); each has its usage in its docstring.
 
 Environment variables the scripts and build read, besides the `MCHPRS_*` ones: `MINECRAFT_V_ARTIFACTS_DIR` (where a build writes its netlist and artifacts), `RAM_WORKERS` (processes that settle RAM banks, default the core count), `STACK_DUMP_EVERY` (`build_with_pins.py`), `QUIET` (`dev/check_memread.py`), `STEPS` (`dev/check_preload.py`).
 

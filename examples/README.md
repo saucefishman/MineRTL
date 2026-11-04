@@ -20,16 +20,6 @@ Build any of these with `./synth.sh examples/<name>`. Each directory holds the V
 | `regs` | A 4-word register file: a Verilog memory built from flip-flops. |
 | `ramtile` | The smallest memory that becomes a tiled RAM block (2 reads, 1 write; `--no-tiled-ram` keeps it as flip-flops). `scripts/dev/check_ram.py` tests it against a model. |
 | `memread` | A memory loaded with `$readmemh` and read out in order. `scripts/dev/check_memread.py` runs it. |
-| `preload` | Two preloaded tiled memories on shared addresses, read back before any write. `scripts/dev/check_preload.py` runs it. |
-
-## Regression designs
-
-Small circuits kept because an acceptance script builds them.
-
-| Example | Shows |
-| --- | --- |
-| `powerup` | Flip-flops that keep their initial values at power-up only when the build is settled (`--no-settle` loses them on `--place-seed 7`). `scripts/dev/check_powerup.py`. |
-| `powerup_inverted` | Clocks that rest high at power-up: settling has to keep every initial value. `scripts/dev/check_powerup.py`. |
 
 ## Showcase
 

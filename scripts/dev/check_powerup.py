@@ -1,7 +1,7 @@
 """Show why a build has to paste settled, and that settling keeps state.
 
-examples/powerup fails unsettled and passes settled. It depends on layout, so a router or placer change can hide the
-failure on --place-seed 7: then sweep seeds. examples/powerup_inverted has clocks that rest high, and has to pass settled,
+tests/designs/powerup fails unsettled and passes settled. It depends on layout, so a router or placer change can hide the
+failure on --place-seed 7: then sweep seeds. tests/designs/powerup_inverted has clocks that rest high, and has to pass settled,
 then still capture on the clock's real edge.
 
 Usage: check_powerup.py <out_dir> [seed]
@@ -24,7 +24,7 @@ def build(example: str, out: Path, seed: str, script_text: str) -> tuple[Path, P
     """Builds unsettled and settled copies. Returns them with the pins and script to test them with."""
     out.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "MINECRAFT_V_ARTIFACTS_DIR": str(out)}
-    subprocess.run([ROOT / "synth.sh", ROOT / "examples" / example, "--artifacts-dir", out, "--synth-only"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([ROOT / "synth.sh", ROOT / "tests" / "designs" / example, "--artifacts-dir", out, "--synth-only"], check=True, stdout=subprocess.DEVNULL)
     pins, raw, settled = out / "pins.txt", out / "unsettled.litematic", out / "settled.litematic"
     for flag, litematic in (("--no-settle", raw), ("--settle", settled)):
         subprocess.run([sys.executable, ROOT / "scripts/build_with_pins.py", pins, "--netlist", out / "netlist.json",

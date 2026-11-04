@@ -1,6 +1,6 @@
 """A preloaded RAM read back from a settled build before any write, then random traffic, against its model.
 
-Usage: check_preload.py <dir with out.litematic and pins> <seed> <half period> <modes>. For a build of examples/preload.
+Usage: check_preload.py <dir with out.litematic and pins> <seed> <half period> <modes>. For a build of tests/designs/preload.
 Env: STEPS sets the random write steps (default 30).
 """
 import os

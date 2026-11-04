@@ -112,7 +112,7 @@ Other scripts in `scripts/`:
 - `bench_examples.py`: builds several examples in parallel, each in its own artifacts directory, and prints failures and `[verify]` violations.
 - `add_clock.py`: adds a generated clock to a build you've already tested, without rebuilding.
 - `compare_gate_rtl.py`: checks a built schematic net by net against the netlist and RTL.
-- `dev/`: acceptance checks for single examples (`check_preload.py`, `check_powerup.py`, ...). See [`scripts/README.md`](scripts/README.md).
+- `dev/`: acceptance checks for single designs (`check_preload.py`, `check_powerup.py`, ...), built from `examples/` and `tests/designs/`. See [`scripts/README.md`](scripts/README.md).
 
 ## Limitations
 
