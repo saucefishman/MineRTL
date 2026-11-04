@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,10 @@ DEFAULT_SNAPSHOT_DIR = DEFAULT_ARTIFACTS_DIR / "snapshots"
 def save_schematic_artifact(filename: str, region: Region, snapshot_dir: Path = DEFAULT_SNAPSHOT_DIR) -> Path:
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     out = snapshot_dir / filename
+    # Saving renumbers the palette in place; a live workspace's writers and indexes would keep the old ids.
+    region = copy.copy(region)
+    region._Region__blocks = region._Region__blocks.copy()
+    region._Region__palette = list(region._Region__palette)
     schematic = region.as_schematic(name=filename, author="MineRTL")
     schematic.save(str(out))
     return out

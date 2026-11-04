@@ -2,9 +2,10 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <project-dir>" >&2
+    echo "Usage: $0 <project-dir> [flags]   (README.md lists them; python -m minecraft_v --help for the rest)" >&2
     exit 1
 fi
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # techmap/ and the Python project, wherever this runs from
 
 dir="$1"
 shift
@@ -18,6 +19,7 @@ out_litematic="build/result.litematic"
 synth_only=false
 debug_prints=true
 tiled_ram=true
+top=main
 artifacts_dir="${MINECRAFT_V_ARTIFACTS_DIR:-build/artifacts}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,7 +43,7 @@ while [[ $# -gt 0 ]]; do
             tiled_ram=true
             shift
             ;;
-        --no-tiled-ram)  # every memory becomes flip-flops and muxes
+        --no-tiled-ram)  # every memory becomes flip-flops and muxes; also skips the ABC pass below
             tiled_ram=false
             shift
             ;;
@@ -56,6 +58,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-debug-prints)  # also passed on to minecraft_v
             debug_prints=false
+            args+=("$1")
+            shift
+            ;;
+        --module)  # also passed on to minecraft_v
+            top="$2"
+            args+=("$1" "$2")
+            shift 2
+            ;;
+        --module=*)
+            top="${1#*=}"
             args+=("$1")
             shift
             ;;
@@ -168,12 +180,12 @@ opt_clean
 peepopt
 opt -full -purge
 memory_collect
-techmap -map techmap/ram_2r1w.v -map techmap/ram_4r2w.v t:\$mem_v2"
+techmap -map ${here}/techmap/ram_2r1w.v -map ${here}/techmap/ram_4r2w.v t:\$mem_v2"
 fi
 abc_step=""
 if [[ "$tiled_ram" == true ]]; then
     # A full adder with a tied input folds to gates first, then &syn2 restructures: 18% fewer nets, about half the gate delay.
-    abc_step="techmap -map techmap/fa_const.v
+    abc_step="techmap -map ${here}/techmap/fa_const.v
 techmap
 opt -nosdff
 opt_clean
@@ -183,24 +195,24 @@ fi
 yosys_status=0
 yosys -q -l "$yosys_log" -p "
 read_verilog -sv ${dir}/*.v
-read_verilog -lib techmap/ram_cells.v
-hierarchy -check -top main
+read_verilog -lib ${here}/techmap/ram_cells.v
+hierarchy -check -top ${top}
 flatten -noscopeinfo
 proc
 ${strip_debug}
 ${map_tiled_ram}
 memory_map
 dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
-techmap -map techmap/dlatch_map.v
+techmap -map ${here}/techmap/dlatch_map.v
 opt
-techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
-techmap -map techmap/fa_map.v
+techmap -map ${here}/techmap/sdff_decompose.v -map ${here}/techmap/sdffe_decompose.v
+techmap -map ${here}/techmap/fa_map.v
 techmap
 dfflegalize -cell \$_DFF_P_ 01 -cell \$_DFFE_PP_ 01 -cell \$_DLATCH_P_ 0
-techmap -map techmap/dffe_pn_decompose.v
+techmap -map ${here}/techmap/dffe_pn_decompose.v
 opt -nosdff
-techmap -map techmap/sdff_decompose.v -map techmap/sdffe_decompose.v
-techmap -map techmap/dffe_pn_decompose.v
+techmap -map ${here}/techmap/sdff_decompose.v -map ${here}/techmap/sdffe_decompose.v
+techmap -map ${here}/techmap/dffe_pn_decompose.v
 opt_clean
 ${abc_step}
 write_json ${artifacts_dir}/netlist.json
@@ -216,4 +228,4 @@ if [[ "$synth_only" == true ]]; then
     exit 0
 fi
 
-uv run python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
+uv run --project "$here" python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"

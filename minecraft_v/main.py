@@ -211,7 +211,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--netlist", required=True)
     parser.add_argument("--out-litematic", type=str, default="build/result.litematic")
-    parser.add_argument("--module", type=str, default="main")
+    parser.add_argument("--module", type=str, default="main",
+                        help="Top module; synth.sh flattens everything under it (default: main)")
     parser.add_argument("--schematic-name", type=str, default=None)
     parser.add_argument("--allow-routing-failures", action=argparse.BooleanOptionalAction, default=False,
                         help="Write the build even if some nets fail to route (default: off)")
@@ -227,13 +228,14 @@ def main():
     parser.add_argument("--no-server-clock", dest="server_clock", action="store_const", const=None,
                         help="Generate the clock even if synth.sh finds mchprs_headless")
     parser.add_argument("--route-deadline", type=float, default=None,
-                        help="Seconds of routing before giving up on remaining nets (writes a partial result; "
-                             "use with --allow-routing-failures)")
+                        help="Seconds of routing before giving up on remaining nets and writing a partial result "
+                             "(implies --allow-routing-failures)")
     parser.add_argument("--place-seed", type=int, default=0,
                         help="Placement seed (default 0). Routing is deterministic per placement: try another seed "
                              "if a build fails nets")
     parser.add_argument("--flat", action=argparse.BooleanOptionalAction, default=False,
-                        help="Put every component on the same Y level (for small projects)")
+                        help="Put every component on the same Y level (for small projects; output pin targets often "
+                             "fail flat, see --no-pin-extensions)")
     parser.add_argument("--settle", action=argparse.BooleanOptionalAction, default=True,
                         help="Save blocks in the states they settle to, so that power-up pulses can't overwrite "
                              "flip-flops (default: on)")
@@ -286,7 +288,7 @@ def main():
 
     save_build_artifacts(component_list)
 
-    allow_routing_failures = args.allow_routing_failures
+    allow_routing_failures = args.allow_routing_failures or args.route_deadline is not None
     output_pin_targets = (
         _load_output_pin_targets(args.output_pin_targets_json)
         if args.output_pin_targets_json and args.pin_extensions
@@ -338,6 +340,13 @@ def main():
             spacing = {"gutter": _BANK_GUTTER, "component_depth_spacing": _BANK_ROUTING_GUTTER,
                        "additional_component_height_spacing": _BANK_Y_SPACING}
 
+    reroute = set(filter(None, args.resume_reroute.split(",")))
+    if reroute and not args.resume_dir:
+        log("[resume] --resume-reroute does nothing without --resume-dir")
+    known = {n.net_id for n in component_list.nets} | {n.net_id for n in flat_comp.nets}
+    if unknown := sorted(reroute - known):
+        log(f"[resume] --resume-reroute: no such net {', '.join(unknown)}")
+
     build_litematic_from_component_list(component_list, schematics_dir=SCHEMATICS_DIR,
                                         out_path=out_litematic, schematic_name=schematic_name,
                                         allow_routing_failures=allow_routing_failures,
@@ -352,8 +361,7 @@ def main():
                                         flat_comp=flat_comp,
                                         probes=probes,
                                         server_clock=args.server_clock,
-                                        resume=ResumeStore(args.resume_dir, set(filter(None, args.resume_reroute.split(","))))
-                                        if args.resume_dir else None,
+                                        resume=ResumeStore(args.resume_dir, reroute) if args.resume_dir else None,
                                         macro_channel=_MACRO_CHANNEL,
                                         macro_east_room=_MACRO_EAST_ROOM,
                                         macro_headroom=_MACRO_HEADROOM,

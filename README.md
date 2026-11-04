@@ -46,11 +46,11 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
    - `--out-litematic <path>`: Specifies custom output path for the `.litematic` file (Default: `build/result.litematic`).
    - `--out-litematic-dir <dir>`: Writes the `.litematic` to `<dir>/<project-dir name>.litematic` (e.g. `examples/counter` → `<dir>/counter.litematic`). Handled by `synth.sh`.
    - `--artifacts-dir <dir>`: Where the netlist and build artifacts go (Default: `build/artifacts`, or `$MINECRAFT_V_ARTIFACTS_DIR`). Use a separate directory per build to run builds in parallel.
-   - `--module <name>`: Sets the top-level Verilog module to synthesize (Default: `main`).
+   - `--module <name>`: The top-level Verilog module; everything under it is flattened into one build (Default: `main`).
    - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).
    - `--allow-routing-failures`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
    - `--synth-only`: Stops after writing the netlist (handled by `synth.sh`).
-   - `--tiled-ram` / `--no-tiled-ram` (synth.sh): Memories with a supported port layout become tiled RAM blocks, settled once and cached in `--macro-cache` (Default: `build/macro_cache`). On by default; `--no-tiled-ram` maps every memory to flip-flops. Large memory designs build better with `--no-macros`.
+   - `--tiled-ram` / `--no-tiled-ram` (synth.sh): Memories with a supported port layout become tiled RAM blocks, settled once and cached in `--macro-cache` (Default: `build/macro_cache`). On by default; `--no-tiled-ram` maps every memory to flip-flops and also skips the ABC optimization pass that comes with tiled RAM, so other logic can come out a little larger. Large memory designs build better with `--no-macros`.
    - `--no-macros`: Routes every gate on its own. By default repeated subcircuits are routed once and stamped, which on a small CPU builds about 2.4x faster and takes about 3x the volume. Designs without enough repeats stay as gates.
    - `--no-settle`: Saves blocks as built instead of in the states they settle to. Without settling, power-up pulses can overwrite flip-flops.
    - `--no-debug-prints`: Removes `$write`/`$display`. By default they stay when they're in a clocked block, inside macros too: blocks they read stand on or hang from lime concrete, and `<out>.server.json` is written next to the litematic for [MCHPRS fork](https://github.com/saucefishman/MCHPRS) `/watch` and `mchprs_headless test --probes`. Non-constant `$sformatf` isn't supported by Yosys: use `$display` directly.
@@ -59,9 +59,9 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
    - `--server-clock [half period]`: No generated clock, which gets long on large circuits: the clock pin gets a lever, and MCHPRS toggles it every that many redstone ticks, read from `<out>.server.json`. `synth.sh` turns this on when it finds an `mchprs_headless` with `--run-clock` (`$MCHPRS_HEADLESS`, or `target/release` under `$MCHPRS_DIR`, else `mchprs_headless` on `PATH`) and no clock flag is given; `--no-server-clock` or `--generate-clock <pin>` keeps the generated clock. (Default half period: from the critical path, the generated clock's period.) That check can't see the running server: if the clock stays still, rebuild and restart it, and stand on the plot, since plots only tick with a player.
 
    - `--place-seed <n>`: Placement seed (Default: 0). Routing is deterministic per placement, so try another seed if a build fails nets.
-   - `--flat`: Puts every component on one Y level (for small designs).
+   - `--flat`: Puts every component on one Y level (for small designs). Output pin targets often fail to route flat: combine it with `--no-pin-extensions` for designs that have a `pin_targets.json`.
    - `--resume-dir <dir>`, `--resume-reroute <nets>`: Save the placement and routed paths and reuse them on the next build; reroute only the listed nets.
-   - `--route-deadline <s>`: Stops routing after that many seconds and writes a partial result (use with `--allow-routing-failures`).
+   - `--route-deadline <s>`: Stops routing after that many seconds and writes a partial result (implies `--allow-routing-failures`).
    - `--debug`: Logs progress and slow searches, saves routing snapshots to `<artifacts>/snapshots` (slow), prints A* counters.
 
    Run `uv run python -m minecraft_v.main --help` for the full list.
@@ -84,7 +84,7 @@ To load a build, copy the `.litematic` and its `.server.json` into the server's 
 
 ## Testing Builds Without the Game
 
-`mchprs_headless` (in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS), `crates/headless`) loads a `.litematic` and runs a script against it. Build it with `cargo build --release -p mchprs_headless`; scripts find it at `$MCHPRS_HEADLESS`, else `$MCHPRS_DIR/target/release/mchprs_headless` if `MCHPRS_DIR` is set, else `mchprs_headless` on `PATH`. When present, `synth.sh` uses it to settle the build and to turn on `--server-clock`.
+`mchprs_headless` (in [our MCHPRS fork](https://github.com/saucefishman/MCHPRS), `crates/headless`) loads a `.litematic` and runs a script against it. Build it with `cargo build --release -p mchprs_headless`; scripts find it at `$MCHPRS_HEADLESS`, else `$MCHPRS_DIR/target/release/mchprs_headless` if `MCHPRS_DIR` is set, else `mchprs_headless` on `PATH`. When it supports `--run-clock`, `synth.sh` turns on `--server-clock`. Builds are settled in Python, without it.
 
 ```sh
 uv run python scripts/build_with_pins.py pins.txt --netlist netlist.json --out-litematic out.litematic --generate-clock none

@@ -228,7 +228,7 @@ def _place_io_repeaters(
            list[tuple[tuple[int, int, int], tuple[int, int], bool]]]:
     """Place I/O repeaters and return (all repeater cells, output target lookup, sign specs, fixture specs).
 
-    The clock input (`clock_pin`, or a pin named `clk`) gets no lever: it is driven by a clock.
+    The clock input (`clock_pin`) gets no lever: it is driven by a clock.
     With `clock_lever` it does, for the server to toggle.
     """
     io_repeater_cells: set[tuple[int, int, int]] = set()
@@ -254,7 +254,7 @@ def _place_io_repeaters(
             nx, _, nz = _SIDE_NORMAL[side.value]
             io_signs.append((cell, (nx, nz), pin.name))
             is_input = c.type == ComponentType.INPUT_PIN
-            if not (is_input and c.id in (clock_pin, 'clk')) or (clock_lever and c.id == clock_pin):
+            if not (is_input and c.id == clock_pin) or clock_lever:
                 io_fixtures.append((cell, (nx, nz), is_input))
             if c.type == ComponentType.OUTPUT_PIN:
                 side_name = side.value
