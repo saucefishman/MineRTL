@@ -131,6 +131,7 @@ def test_cpu_finds_its_memory_and_registers_within_the_limit(tmp_path):
     classes = find_repeated(comp, time_limit=30.0)
     _assert_exact(comp, classes)
     sizes = [(len(c.instances), len(c.cells)) for c in classes]
-    # The preloaded program's init values split a few bits off from otherwise identical ones.
-    assert sizes[0][0] == 16 and sizes[0][1] >= 180
+    # The preloaded program's init values split a few bits off from otherwise identical ones, more the longer
+    # prog.hex is (180 cells at 13 words, 177 at 16), so leave room for editing the program.
+    assert sizes[0][0] == 16 and sizes[0][1] >= 160
     assert sum(n for n, cells in sizes if cells == 48) == 16
