@@ -1,0 +1,18 @@
+// Fibonacci on the out lamps: 0 1 1 2 3 5 8 13 21 34 55 89 144, then start over.
+// Encoding: op[15:12] rd[11:10] rs[9:8] imm[7:0] (see cpu.v).
+0000  // 0: LI   r0, 0      r0 = current number
+0401  // 1: LI   r1, 1      r1 = next number
+8000  // 2: OUT  r0         show r0 on the lamps
+6800  // 3: MOV  r2, r0
+1900  // 4: ADD  r2, r1     r2 = r0 + r1, C = overflow
+A000  // 5: JC   0          past 8 bits: start over
+6100  // 6: MOV  r0, r1
+6600  // 7: MOV  r1, r2
+9002  // 8: JMP  2
+0000  // 9-15: unused
+0000
+0000
+0000
+0000
+0000
+0000
