@@ -295,7 +295,7 @@ def test_smallest_ram_runs_at_its_generated_clock(tmp_path):
     """examples/ramtile generated half 16 when half = path / 2, and writes get lost below half 30."""
     import clock_sweep
 
-    assert clock_sweep.build("examples/ramtile", tmp_path, "0", "--tiled-ram", "--no-macros") == 0
+    assert clock_sweep.build("examples/ramtile", tmp_path, "0", "--no-macros") == 0
     inputs, _ = clock_sweep.top_ports(tmp_path / "netlist.json")
     pins = {line.split()[0] for line in open(tmp_path / "design.pins")}
     inputs = [p for p in inputs if p in pins]

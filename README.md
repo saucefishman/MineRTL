@@ -13,7 +13,7 @@
 - **Memories:** Verilog memories with a supported port layout become prebuilt, pre-settled RAM blocks instead of routed flip-flops.
 - **Clocks and Debug Prints:** A generated clock sized from static timing, or a lever MCHPRS toggles; `$write`/`$display` show up in MCHPRS.
 - **Litematica Integration:** Outputs `.litematic` files for easy importing into Minecraft worlds or fast simulation via MCHPRS.
-- **Scale:** tested on designs of over 12,000 nets (a pipelined CPU with a branch predictor, not included here), which build in minutes.
+- **Scale:** tested on designs of over 12,000 nets, which build in minutes.
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ This also builds the Cython A* kernel; `uv run` rebuilds it when a `.pyx` file c
 ./synth.sh examples/counter
 ```
 
-The resulting schematic will be saved to `build/result.litematic`. Paste it into a world with the [Litematica](https://www.curseforge.com/minecraft/mc-mods/litematica) mod, or load it in MCHPRS (below). Each input gets a lever on a stone block and each output a redstone lamp, at the edges of the build. A generated clock starts on its own once pasted.
+The resulting schematic will be saved to `build/result.litematic`. Paste it into a world with the [Litematica](https://www.curseforge.com/minecraft/mc-mods/litematica) mod (Fabric, with MaLiLib, for 1.20.4): put the file in `.minecraft/schematics/`, load it there, and paste in creative mode. Or load it in MCHPRS (below), which is much faster for large builds. Each input gets a lever on a stone block and each output a redstone lamp, at the edges of the build. A generated clock starts on its own once pasted.
 
 3. **Synthesis Flags & Configuration:**
    The `synth.sh` script automatically wraps our Python-based layout engine (`minecraft_v/main.py`) alongside Yosys. It supports several flags that you can pass directly:
@@ -67,7 +67,7 @@ The resulting schematic will be saved to `build/result.litematic`. Paste it into
    - `--route-deadline <s>`: Stops routing after that many seconds and writes a partial result (implies `--allow-routing-failures`).
    - `--debug`: Logs progress and slow searches, saves routing snapshots to `<artifacts>/snapshots` (slow), prints A* counters.
 
-   Run `uv run python -m minecraft_v.main --help` for the full list.
+   Run `uv run python -m minecraft_v --help` for the full list.
 
    Example usage:
 
@@ -95,7 +95,17 @@ uv run python scripts/build_with_pins.py pins.txt --netlist build/artifacts/netl
 mchprs_headless test out.litematic pins.txt script.txt --modes noupdate,redstone,redpiler
 ```
 
-The pin file lists `name x y z nx nz` per pin. Script commands: `settle N`, `set NAME 0|1`, `pulse NAME N`, `expect NAME 0|1`, `print LABEL`. Add `--add-lever clk` for an input with no lever.
+with a `script.txt` such as:
+
+```text
+settle 100
+pulse clk 20
+settle 100
+expect count[0] 1
+expect count[1] 0
+```
+
+The pin file lists `name x y z nx nz` per pin. Script commands: `settle N`, `set NAME 0|1`, `pulse NAME N`, `expect NAME 0|1`, `print LABEL`. `mchprs_headless test --add-lever NAME` adds a lever for an input that has none.
 
 Other scripts in `scripts/`:
 
@@ -106,7 +116,7 @@ Other scripts in `scripts/`:
 
 ## Limitations
 
-- RAM blocks support two read ports with one write port, and four read ports with two write ports, without partial (byte-enable) writes. Other memories are built from flip-flops. A RAM block input tied to constant 1 (say, a write enable that's always on) fails the build; use `--no-tiled-ram` or drive it from logic.
+- RAM blocks support two read ports with one write port, and four read ports with two write ports, without partial (byte-enable) writes. 2-read/1-write blocks can't be preloaded (`initial`, `$readmemh`). Other memories are built from flip-flops. A RAM block input tied to constant 1 (say, a write enable that's always on) fails the build; use `--no-tiled-ram` or drive it from logic.
 - `--flat` doesn't route output pin targets; use it with `--no-pin-extensions`.
 
 ## Development & Testing
@@ -116,3 +126,5 @@ Run our test suite with:
 ```sh
 uv run python -m pytest -q tests
 ```
+
+Tests that need `yosys` or `mchprs_headless` are skipped when those aren't found.

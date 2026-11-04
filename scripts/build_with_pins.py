@@ -12,7 +12,7 @@ import sys
 from minecraft_v.main import main
 from minecraft_v.placement_engine import builder
 
-if os.environ.get("STACK_DUMP_EVERY"):  # a poor man's profiler for long builds: py-spy needs root here
+if os.environ.get("STACK_DUMP_EVERY"):  # a poor man's profiler for long builds
     artifacts = os.environ.get("MINECRAFT_V_ARTIFACTS_DIR", "build/artifacts")
     os.makedirs(artifacts, exist_ok=True)
     stacks = open(artifacts + "/stacks.txt", "w")

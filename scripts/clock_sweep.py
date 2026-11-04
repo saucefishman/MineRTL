@@ -37,9 +37,9 @@ def build(project: str, out: Path, seed: str, *args: str) -> int:
     out.mkdir(parents=True, exist_ok=True)
     env_args = ["env", f"MINECRAFT_V_ARTIFACTS_DIR={out}"]
     if not (out / "netlist.json").exists():
-        flags = [a for a in args if a == "--tiled-ram"]
+        flags = [a for a in args if a in ("--tiled-ram", "--no-tiled-ram")]
         subprocess.run([*env_args, "bash", "synth.sh", project, "--synth-only", *flags], cwd=ROOT, check=True)
-    rest = [a for a in args if a != "--tiled-ram"]
+    rest = [a for a in args if a not in ("--tiled-ram", "--no-tiled-ram")]
     return subprocess.run([*env_args, sys.executable, ROOT / "scripts/build_with_pins.py", out / "design.pins", "--netlist",
                            out / "netlist.json", "--server-clock", "--place-seed", seed,
                            "--out-litematic", out / "design.litematic", *rest], cwd=ROOT).returncode

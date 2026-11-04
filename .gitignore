@@ -12,14 +12,9 @@ build/
 minecraft_v/placement_engine/*.cpp
 minecraft_v/placement_engine/*.so
 
-# Editors and local agent notes
+# Editors
 .idea/
 .vscode/
-.claude/
-CLAUDE.md
-AGENTS.md
-todo.md
-history.txt
 
 # Build and simulation outputs
 *.vcd

@@ -10,9 +10,8 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
+from minecraft_v.build_utils import DEFAULT_ARTIFACTS_DIR as ARTIFACTS_DIR
 from minecraft_v.placement_engine.ir import ComponentType
-
-ARTIFACTS_DIR = Path("build/artifacts")
 
 SCALE = 20  # pixels per block
 PADDING = 40

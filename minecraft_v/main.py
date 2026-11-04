@@ -80,7 +80,8 @@ def _add_ram_group(stacks, components: list[Component], bit_endpoints) -> None:
                 elif isinstance(bit, int):
                     nets[pin] = bit
                 elif bit == "1":  # TODO: drive a pin tied high. Low is what an unconnected pin reads anyway.
-                    raise ValueError(f"{cell_name}: {pin} is tied to {bit}")
+                    raise SystemExit(f"{cell_name}: RAM input {pin} is tied to {bit}, which RAM blocks can't take yet; "
+                                     "build with --no-tiled-ram or drive it from logic")
         specs.append(stack_spec(cell.parameters, nets))
     block, own_pins, lane_pins = group_block(specs)
     pins = []
@@ -131,7 +132,8 @@ def module_to_component_list(module: Module) -> ComponentList:
                 bit = cell.connections[port][int(index or 0)]
                 # TODO: drive a pin tied high. Low is what an unconnected pin reads anyway.
                 if bit == "1" and pin.direction == Direction.IN:
-                    raise ValueError(f"{cell_name}: {pin.name} is tied to {bit}")
+                    raise SystemExit(f"{cell_name}: block input {pin.name} is tied to {bit}, which blocks can't take yet; "
+                                     "build with --no-tiled-ram or drive it from logic")
                 if isinstance(bit, int):
                     pins.append(pin)
                     bit_endpoints[bit].append((cell_name, pin.name, pin.direction))
@@ -208,15 +210,19 @@ _BANK_Y_SPACING = 5
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--netlist", required=True)
-    parser.add_argument("--out-litematic", type=str, default="build/result.litematic")
+    parser = argparse.ArgumentParser(description="Place and route a yosys netlist into a Minecraft .litematic. "
+                                     "synth.sh runs yosys and then this; see README.md.")
+    parser.add_argument("--netlist", required=True, help="netlist.json written by synth.sh")
+    parser.add_argument("--out-litematic", type=str, default="build/result.litematic",
+                        help="Output schematic (default: build/result.litematic)")
     parser.add_argument("--module", type=str, default="main",
                         help="Top module; synth.sh flattens everything under it (default: main)")
-    parser.add_argument("--schematic-name", type=str, default=None)
+    parser.add_argument("--schematic-name", type=str, default=None,
+                        help="Name stored in the schematic (default: the module name)")
     parser.add_argument("--allow-routing-failures", action=argparse.BooleanOptionalAction, default=False,
                         help="Write the build even if some nets fail to route (default: off)")
-    parser.add_argument("--output-pin-targets-json", type=str, default=None)
+    parser.add_argument("--output-pin-targets-json", type=str, default=None,
+                        help="JSON of output pin target positions; synth.sh passes the project's pin_targets.json")
     parser.add_argument("--pin-extensions", action=argparse.BooleanOptionalAction, default=True,
                         help="Extend output pins to --output-pin-targets-json (default: on)")
     parser.add_argument("--generate-clock", type=str, default="auto",
@@ -271,7 +277,6 @@ def main():
     out_litematic.parent.mkdir(parents=True, exist_ok=True)
     # MCHPRS loads a sibling sidecar: one from an older build would read wrong blocks
     out_litematic.with_suffix(SERVER_FILE_SUFFIX).unlink(missing_ok=True)
-    out_litematic.with_suffix(".probes.json").unlink(missing_ok=True)  # the old name
 
     with phase("[load] reading netlist"), open(args.netlist) as f:
         netlist = Netlist.model_validate_json(f.read())
