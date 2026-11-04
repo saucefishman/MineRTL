@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <project-dir> [flags]   (README.md lists them; python -m minecraft_v --help for the rest)" >&2
-    exit 1
-fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # techmap/ and the Python project, wherever this runs from
+
+if [[ $# -lt 1 || "$1" == -h || "$1" == --help ]]; then
+    cat <<EOF
+Usage: $0 <project-dir> [options]
+
+Synthesizes the Verilog in <project-dir> (top module main) and builds build/result.litematic.
+
+Synthesis options:
+  --out-litematic-dir DIR
+                        Write DIR/<project-dir name>.litematic
+  --artifacts-dir DIR   Where the netlist and build files go (default: build/artifacts)
+  --synth-only          Stop after writing the netlist
+  --no-tiled-ram        Build memories from flip-flops instead of RAM blocks
+
+Build options:
+EOF
+    # minecraft_v's own options, minus -h and --netlist, which this script fills in
+    uv run --project "$here" python -m minecraft_v --help | sed '1,/^options:/d' \
+        | awk '/^  -/ { skip = ($1 == "-h," || $1 == "--netlist") } !skip'
+    [[ $# -ge 1 ]]; exit
+fi
 
 dir="$1"
 shift

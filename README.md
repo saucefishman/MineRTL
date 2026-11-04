@@ -78,7 +78,7 @@ Pass these to `synth.sh`:
 - `--no-pin-extensions`: ignore `pin_targets.json`. `--output-pin-targets-json <file>` uses another file.
 - `--flat`: put every gate on one level, for small designs.
 
-Developer options (`--synth-only`, `--artifacts-dir`, `--resume-dir`, `--route-deadline`, `--debug`, `--no-settle`, `--allow-routing-failures`) are under [Development](#development). Run `uv run python -m minecraft_v --help` for every option.
+Developer options (`--synth-only`, `--artifacts-dir`, `--resume-dir`, `--route-deadline`, `--debug`, `--no-settle`, `--allow-routing-failures`) are under [Development](#development). Run `./synth.sh --help` for every option.
 
 ## Running Builds in MCHPRS
 
