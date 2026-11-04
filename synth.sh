@@ -168,7 +168,7 @@ opt_clean
 peepopt
 opt -full -purge
 memory_collect
-techmap ${RAM_STACK_BANKS:+-D RAM_STACK_BANKS=$RAM_STACK_BANKS} -map techmap/ram_2r1w.v -map techmap/ram_4r2w.v t:\$mem_v2"
+techmap -map techmap/ram_2r1w.v -map techmap/ram_4r2w.v t:\$mem_v2"
 fi
 abc_step=""
 if [[ "$tiled_ram" == true ]]; then
@@ -179,10 +179,6 @@ opt -nosdff
 opt_clean
 abc -g AND,OR,XOR,MUX -script +strash;&get,-n;&syn2;&dch,-f;&nf;&put
 opt_clean"
-    if [[ "${SYNTH_OLD_ABC:-0}" == 1 ]]; then
-        abc_step="abc -g AND,OR,XOR,MUX
-opt_clean"
-    fi
 fi
 yosys_status=0
 yosys -q -l "$yosys_log" -p "
