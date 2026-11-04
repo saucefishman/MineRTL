@@ -2,9 +2,11 @@
 
 # MineRTL: Verilog to Minecraft Redstone Synthesis
 
-**MineRTL** turns circuit code written in Verilog into working Minecraft redstone. You describe what the circuit does, and MineRTL designs the redstone, lays it out in 3D, wires it, and saves it as a schematic you paste into your world. A 4-bit counter builds in about a second; a basic CPU in minutes.
+**MineRTL** turns circuits written in Verilog, the text language used to design real chips, into working Minecraft redstone. You describe what the circuit does, and MineRTL designs the redstone, lays it out in 3D and wires it.
 
-New to the terms? **Verilog** is a text language for describing digital circuits, the one used to design real chips. **Yosys** is an open-source tool that turns Verilog into logic gates; MineRTL runs it for you. **Litematica** is a Minecraft mod that loads and pastes saved builds (`.litematic` files). **MCHPRS** is a Minecraft server made only for redstone, which runs it far faster than the normal game.
+The result is a `.litematic` schematic. Paste it into your world with the [Litematica](https://www.curseforge.com/minecraft/mc-mods/litematica) mod, or load it into [MCHPRS](https://github.com/saucefishman/MCHPRS), a Minecraft server built for redstone that runs it far faster than the normal game.
+
+A 4-bit counter builds in about a second; a basic CPU in minutes.
 
 ## Features
 
