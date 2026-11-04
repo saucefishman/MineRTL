@@ -3,13 +3,13 @@ from pathlib import Path
 import pytest
 from litemapy import Schematic
 
+from minecraft_v.cell_library import SCHEMATICS_DIR
 from minecraft_v.main import module_to_component_list
 from minecraft_v.models import Cell, Module, Port
 from minecraft_v.placement_engine import build_litematic_from_component_list
 from minecraft_v.placement_engine.ir import CardinalDirection, ComponentType
 from minecraft_v.placement_engine.template import _io_repeater_facing
 
-SCHEMATICS_DIR = Path("schematics")
 
 
 def _make_module(ports=None, cells=None):

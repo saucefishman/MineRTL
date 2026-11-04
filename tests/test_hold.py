@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 import pytest
 from litemapy import BlockState, Region, Schematic
 
-from minecraft_v.cell_library import SCHEMATIC_MAP
+from minecraft_v.cell_library import SCHEMATICS_DIR, SCHEMATIC_MAP
 from minecraft_v.placement_engine import hold
 from minecraft_v.placement_engine.block_utils import BulkRegion
 from minecraft_v.placement_engine.builder import _GreedyRouter, _hold_with_detours, _RouteJob
@@ -22,7 +22,7 @@ _ORIGIN = (8, 4, 8)
 def _flip_flop_bench(kind: ComponentType):
     """One flip-flop, repeaters driving its pins' cells from outside and dust on Q. Repeaters here face their input."""
     info = SCHEMATIC_MAP[kind]
-    template = next(iter(Schematic.load(f"schematics/{info.file_prefix}.litematic").regions.values()))
+    template = next(iter(Schematic.load(str(SCHEMATICS_DIR / f"{info.file_prefix}.litematic")).regions.values()))
     x0, y0, z0, x1, y1, z1 = _non_air_bounds(template)
     region = BulkRegion(0, 0, 0, 30, 10, 30)
     for x in range(30):

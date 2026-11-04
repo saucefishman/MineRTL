@@ -6,7 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from minecraft_v.build_utils import save_build_artifacts
-from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, apply_schematic_pin
+from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, SCHEMATICS_DIR, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
 from minecraft_v.placement_engine.builder import build_macro, set_first_fanout, set_long_edge_split
@@ -212,7 +212,6 @@ def main():
     parser.add_argument("--netlist", required=True)
     parser.add_argument("--out-litematic", type=str, default="build/result.litematic")
     parser.add_argument("--module", type=str, default="main")
-    parser.add_argument("--schematics-dir", type=str, default="schematics")
     parser.add_argument("--schematic-name", type=str, default=None)
     parser.add_argument("--allow-routing-failures", action=argparse.BooleanOptionalAction, default=False,
                         help="Write the build even if some nets fail to route (default: off)")
@@ -318,7 +317,7 @@ def main():
     spacing = {}
     if args.macros and not args.flat:
         def build(name, sub, ports, cells):
-            return build_macro(name, sub, ports, cells, Path(args.schematics_dir),
+            return build_macro(name, sub, ports, cells, SCHEMATICS_DIR,
                                cache_dir=Path(args.macro_cache) / f"row{_MACRO_ROW_TILES}",
                                io_lane_pins=_MACRO_ROW_TILES != 1)
 
@@ -339,7 +338,7 @@ def main():
             spacing = {"gutter": _BANK_GUTTER, "component_depth_spacing": _BANK_ROUTING_GUTTER,
                        "additional_component_height_spacing": _BANK_Y_SPACING}
 
-    build_litematic_from_component_list(component_list, schematics_dir=Path(args.schematics_dir),
+    build_litematic_from_component_list(component_list, schematics_dir=SCHEMATICS_DIR,
                                         out_path=out_litematic, schematic_name=schematic_name,
                                         allow_routing_failures=allow_routing_failures,
                                         output_pin_targets=output_pin_targets,

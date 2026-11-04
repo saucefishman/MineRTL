@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from minecraft_v.placement_engine.ir import (
     CardinalDirection,
@@ -7,6 +8,9 @@ from minecraft_v.placement_engine.ir import (
     Footprint,
     PinRef,
 )
+
+# The cell templates: their footprints and pins are SCHEMATIC_MAP's, so the two only work together.
+SCHEMATICS_DIR = Path(__file__).resolve().parent.parent / "schematics"
 
 CELL_TYPE_MAP: dict[str, ComponentType] = {
     "$_AND_": ComponentType.AND,

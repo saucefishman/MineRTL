@@ -47,7 +47,6 @@ The resulting schematic will be saved to `build/result.litematic`. You can impor
    - `--out-litematic-dir <dir>`: Writes the `.litematic` to `<dir>/<project-dir name>.litematic` (e.g. `examples/counter` → `<dir>/counter.litematic`). Handled by `synth.sh`.
    - `--artifacts-dir <dir>`: Where the netlist and build artifacts go (Default: `build/artifacts`, or `$MINECRAFT_V_ARTIFACTS_DIR`). Use a separate directory per build to run builds in parallel.
    - `--module <name>`: Sets the top-level Verilog module to synthesize (Default: `main`).
-   - `--schematics-dir <dir>`: Sets the directory containing our `.litematic` cell library objects (Default: `schematics`).
    - `--schematic-name <name>`: The name attached to the generated schematic in-game (Default: matches `--module`).
    - `--allow-routing-failures`: Keeps generating the structure even if some 3D routes fail to connect (useful for debugging physical placement).
    - `--synth-only`: Stops after writing the netlist (handled by `synth.sh`).
