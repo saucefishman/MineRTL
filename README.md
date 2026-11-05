@@ -1,5 +1,3 @@
-![MineRTL logo](assets/logo.png)
-
 # MineRTL: Verilog to Minecraft Redstone Synthesis
 
 **MineRTL** turns circuits written in Verilog, the text language used to design real chips, into working Minecraft redstone. You describe what the circuit does, and MineRTL designs the redstone, lays it out in 3D and wires it.
