@@ -8,6 +8,10 @@ The result is a `.litematic` schematic. Paste it into your world with the [Litem
 
 A 4-bit counter builds in about a second, and an 8-bit CPU running a preloaded program in about five.
 
+![Bad Apple!! playing on a 48x36 lamp screen, built from examples/video](assets/demo.gif)
+
+*`examples/video`: 128 frames of Bad Apple!! in one preloaded memory, running in MCHPRS (2x speed).*
+
 ## Features
 
 - **Write Verilog, get redstone:** Describe a circuit in Verilog and get a redstone build that does the same thing, ready to paste with Litematica or load into MCHPRS. Inputs become levers and outputs become lamps.
