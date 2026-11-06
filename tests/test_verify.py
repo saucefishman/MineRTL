@@ -578,3 +578,31 @@ def test_kernel_and_python_find_the_same_violations(monkeypatch, seed):
     assert sum(v.kind == "short" for v in kernel) > 3 and sum(v.kind == "open" for v in kernel) >= 14
     monkeypatch.setattr(verify, "_signals", None)
     assert verify_signals(region, nets, owner, blocked) == kernel
+
+
+# ---------------------------------------------------------------- memo between rounds
+
+def test_memo_rounds_match_full_verify():
+    """A memo'd verify after a change finds what a verify from scratch does, nets far from the change reused."""
+    from minecraft_v.placement_engine.verify import VerifyMemo
+    region = Region(0, 0, 0, 40, 8, 40)
+    owner: dict = {}
+    nets = {}
+    for i in range(12):  # parallel wires two apart, along x
+        z = 2 + 3 * i
+        cells = _wire(region, owner, f"n{i}", _line_x(2, 14, 2, z))
+        nets[f"n{i}"] = (cells[0], [cells[-1]])
+    memo = VerifyMemo()
+    first = verify_signals(region, nets, owner, memo=memo)
+    assert first == verify_signals(region, nets, owner)
+    assert first == []
+    # n3 grows a spur into n4, then n7 loses a cell
+    _wire(region, owner, "n3", [(10, 2, z) for z in (12, 13)])
+    region[8, 2, 23] = BlockState("minecraft:air")
+    owner.pop((8, 2, 23))
+    second = verify_signals(region, nets, owner, memo=memo)
+    assert second == verify_signals(region, nets, owner)
+    assert _shorts(second) == {frozenset({"n3", "n4"})}
+    assert "open" in _kinds(second)
+    third = verify_signals(region, nets, owner, memo=memo)  # nothing changed: all reused
+    assert third == second

@@ -50,7 +50,7 @@ from .hold import _HOLD_MARGIN, HoldShort, fix_hold, flat_terminals, hold_violat
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
 from .forks import Forked
-from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, VerifyMemo, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -1913,12 +1913,13 @@ def _repair_faulty_nets(
     order = {job.key: i for i, job in enumerate(jobs)}
     by_key = {job.key: job for job in jobs}
     failures: list[tuple[str, Exception]] = []
+    memo = VerifyMemo()  # a round searches again only the nets near what the last one re-routed
     for _ in range(_REPAIR_ROUNDS):
         spec = {job.key: (job.src, job.sinks) for job in jobs if job.key not in failed}
         faults: dict[str, set[Pos]] = {}
         with ProgressBar("[repair] verify", len(spec)) as bar:
             violations = verify_signals(router.region, spec, router.dust_owner, component_cells,
-                                        on_net=lambda net_id: bar.update(info=net_id))
+                                        on_net=lambda net_id: bar.update(info=net_id), memo=memo)
         for v in violations:
             # Of a short's two nets, moving the later one disturbs the least.
             key = max((n for n in v.nets if n in by_key), key=order.__getitem__, default=None)
