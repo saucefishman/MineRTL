@@ -819,6 +819,7 @@ cdef class World:
     cdef FlatMap[char] walk_cache, mid_cache  # 0 unknown, 1 false, 2 true
     # Likewise for m4_cell_clear and next_to_terminal: a cell is asked about from many neighbours' moves.
     cdef FlatMap[char] m4_clear_cache, terminal_cache
+    cdef FlatMap[char] column_cache  # tower_column_clear, by its foot: four cells' towers land on each column
     cdef object no_exempt
     # With a grid: reads go through it (see base(), owner(), eprot_at(), prot_at(), efp()).
     cdef CellGrid grid
@@ -1327,6 +1328,7 @@ cdef class World:
         self.mid_cache.reset(1 << 12)
         self.m4_clear_cache.reset(1 << 12)
         self.terminal_cache.reset(1 << 12)
+        self.column_cache.reset(1 << 12)
         self.info.reset(1 << 12)
         want = self._static_moves(x, y, z)
         self.gp = gp
@@ -1334,6 +1336,7 @@ cdef class World:
         self.mid_cache.reset(1 << 12)
         self.m4_clear_cache.reset(1 << 12)
         self.terminal_cache.reset(1 << 12)
+        self.column_cache.reset(1 << 12)
         self.info.reset(1 << 12)
         if got != want:
             raise AssertionError(f"CellGrid moves differ at {(x, y, z)} for net {self.net_id}:\n"
@@ -1478,23 +1481,7 @@ cdef class World:
                         break
             if cuts:
                 continue
-            col_clear = True
-            for cdy in range(5):
-                cy = y + cdy
-                if not self.inb(cx, cy, cz) or (self.base(cx, cy, cz) & F_FP) or self.prot_at(cx, cy, cz):
-                    col_clear = False
-                    break
-                if (self.base(cx, cy, cz) & F_NONAIR):
-                    col_clear = False
-                    break
-                for k in range(4):
-                    if (self.inb(cx + HORIZ[k][0], cy, cz + HORIZ[k][1])
-                            and (self.base(cx + HORIZ[k][0], cy, cz + HORIZ[k][1]) & F_WIRE)):
-                        col_clear = False
-                        break
-                if not col_clear:
-                    break
-            if not col_clear:
+            if not self.tower_column_clear(cx, y, cz):
                 continue
             if self.next_to_terminal(cx, y + 1, cz) or self.next_to_terminal(cx, y + 2, cz):
                 continue
@@ -1506,6 +1493,33 @@ cdef class World:
             self.emit(moves, x, y, z, cx, y + 4, cz, 8, snap_bit(tdx, 0, tdz) | snap_bit(tdx, -1, tdz) | snap_bit(tdx, 1, tdz),
                       0, False, 0, 0, 0)
         return 0
+
+    cdef bint tower_column_clear(self, int cx, int y, int cz) except -1:
+        """Whether the five cells from (cx, y, cz) up are free for a tower, with no wire beside them. Remembered."""
+        cdef unsigned long long key = cell_key(cx, y, cz)
+        cdef char* hit = self.column_cache.find(key)
+        if hit != NULL:
+            return hit[0] == 2
+        cdef bint col_clear = True
+        cdef int cdy, cy, k
+        for cdy in range(5):
+            cy = y + cdy
+            if not self.inb(cx, cy, cz) or (self.base(cx, cy, cz) & F_FP) or self.prot_at(cx, cy, cz):
+                col_clear = False
+                break
+            if (self.base(cx, cy, cz) & F_NONAIR):
+                col_clear = False
+                break
+            for k in range(4):
+                if (self.inb(cx + HORIZ[k][0], cy, cz + HORIZ[k][1])
+                        and (self.base(cx + HORIZ[k][0], cy, cz + HORIZ[k][1]) & F_WIRE)):
+                    col_clear = False
+                    break
+            if not col_clear:
+                break
+        cdef int ins
+        self.column_cache.get(key, &ins)[0] = 2 if col_clear else 1
+        return col_clear
 
     cdef bint next_to_terminal(self, int x, int y, int z) except -1:
         """Whether an inverted cell here would make a pin terminal unwalkable (wire_walkable
