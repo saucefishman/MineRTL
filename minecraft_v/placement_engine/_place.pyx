@@ -248,12 +248,11 @@ cdef extern from *:
     };
 
 
-    // Weighted-average wirelength gradient and HPWL (poisson._Netlist), nets in parallel.
+    // Weighted-average wirelength gradient (poisson._Netlist.wa_gradient), nets in parallel.
     struct WireKernel {
         std::vector<int64_t> pin_comp, net_start;  // net_start: n_nets + 1
         std::vector<double> pin_off, weights;      // 3 per pin; 3
         std::vector<double> pin_grad;              // 3 per pin
-        std::vector<double> part;
         int threads = 1;
         template <class F> void parallel(int n, F f) const {
             int t = std::max(1, std::min(threads, n));
@@ -315,29 +314,6 @@ cdef extern from *:
                     double minus = (-weights[a]) * comp_sum[6 * c + 2 * a + 1];
                     grad[3 * c + a] = plus + minus;
                 }
-        }
-        double hpwl(const double* pos) {
-            const int chunks = 64;
-            part.assign(chunks, 0.0);
-            int nn = n_nets();
-            parallel(chunks, [&](int c0, int c1) {
-                for (int c = c0; c < c1; ++c) {
-                    double sum = 0;
-                    for (int net = (int)((int64_t)nn * c / chunks); net < (int)((int64_t)nn * (c + 1) / chunks); ++net) {
-                        double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
-                        for (int64_t q = net_start[net]; q < net_start[net + 1]; ++q)
-                            for (int a = 0; a < 3; ++a) {
-                                double v = pos[3 * pin_comp[q] + a] + pin_off[3 * q + a];
-                                lo[a] = std::min(lo[a], v); hi[a] = std::max(hi[a], v);
-                            }
-                        for (int a = 0; a < 3; ++a) sum += (hi[a] - lo[a]) * weights[a];
-                    }
-                    part[c] = sum;
-                }
-            });
-            double total = 0;
-            for (double v : part) total += v;
-            return total;
         }
     };
 
@@ -414,7 +390,6 @@ cdef extern from *:
         vector[double] pin_off, weights
         int threads
         void gradient(const double*, int, const double*, double*) nogil
-        double hpwl(const double*) nogil
     cdef cppclass Nets:
         vector[int64_t] pin_comp, net_start, pin_off, comp_net_start, comp_nets
         double* pos
@@ -587,7 +562,7 @@ cdef class Field:
 
 
 cdef class Wire:
-    """_Netlist.wa_gradient and hpwl over fixed pins; pins come net after net."""
+    """_Netlist.wa_gradient over fixed pins, the same floats; pins come net after net."""
     cdef WireKernel k
 
     def __init__(self, pin_comp, pin_offset, net_start, weights, int threads):
@@ -604,13 +579,6 @@ cdef class Wire:
         cdef double[:, ::1] o = out
         with nogil:
             self.k.gradient(&p[0, 0], p.shape[0], &g[0], &o[0, 0])
-        return out
-
-    def hpwl(self, pos):
-        cdef double[:, ::1] p = np.ascontiguousarray(pos, dtype=np.float64)
-        cdef double out
-        with nogil:
-            out = self.k.hpwl(&p[0, 0])
         return out
 
 
