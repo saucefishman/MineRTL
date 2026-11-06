@@ -166,6 +166,14 @@ class _BlockIndex:
         self.repeater = cells(8)
         self.grid = None  # _astar.CellGrid mirroring these sets; update keeps it current
 
+    @classmethod
+    def empty(cls) -> _BlockIndex:
+        """An index of nothing, for an _astar.CellGrid to fill with views of itself."""
+        idx = cls.__new__(cls)
+        idx.non_air, idx.wire, idx.torch, idx.repeater = set(), set(), set(), set()
+        idx.grid = None
+        return idx
+
     @staticmethod
     def kinds(region: Region) -> np.ndarray:
         """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater."""
@@ -226,8 +234,14 @@ class IndexedWorkspace:
 
     def __init__(self, region: Region):
         self.region = region
-        self._index = _BlockIndex(region)
+        self._built: _BlockIndex | None = None  # built when first used: attach_grid needs none of its sets
         self._write = palette_writer(region)
+
+    @property
+    def _index(self) -> _BlockIndex:
+        if self._built is None:
+            self._built = _BlockIndex(self.region)
+        return self._built
 
     def __getitem__(self, pos) -> BlockState:
         # Region.__getitem__ without its coordinate conversion, a no-op for a positive-size region. Saving a schematic
@@ -255,7 +269,9 @@ class IndexedWorkspace:
                 or not all(hasattr(c, "_grid") for c in (solid, dust_owner, inverted_cells))):
             return
         region = self.region
-        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._index, solid, dust_owner,
+        if self._built is None:  # the grid replaces the sets with views of itself: millions of cells not to collect
+            self._built = _BlockIndex.empty()
+        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._built, solid, dust_owner,
                         inverted_cells, footprint_blocked, terminal_positions)
 
 
