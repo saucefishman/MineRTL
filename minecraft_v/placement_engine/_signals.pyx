@@ -1254,7 +1254,8 @@ cdef class Settler:
             sv[row] = 0 if k == S_REPEATER else 1 if k == S_DUST else 3 if k == S_COMPARATOR else 2
             wv[row] = self.cells[i].power
             lv[row] = 1 if self.cells[i].locked else 0
-        order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
+        # By x, then y, then z: one key per cell sorts as lexsort would, and several times faster.
+        order = np.argsort((pos[:, 0].astype(np.int64) * self.h + pos[:, 1]) * self.l + pos[:, 2])
         return pos[order], state[order], power[order], locked[order]
 
 

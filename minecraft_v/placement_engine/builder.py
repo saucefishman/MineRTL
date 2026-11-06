@@ -1975,8 +1975,9 @@ def _hold_with_detours(workspace: Region, flat: ComponentList, ends: dict, faile
         if not shorts or routed is None or attempt == _DETOUR_ROUNDS:
             break
         # Padding is outside the router's books, and a net laid again starts clean: undo it all, and pad again.
+        write = palette_writer(workspace)
         for pos, block in reversed(edits):
-            workspace[pos] = block
+            write(pos, block)
         if not _detour_hold_shorts(*routed, shorts, attempt):
             shorts.clear()
             requirement.clear()
