@@ -435,6 +435,36 @@ def test_sink_walled_in_by_a_big_fanout_net_gets_its_branch_ripped(monkeypatch):
     assert not verify_signals(region, {"big": (big.src, big.sinks), "n": (net.src, net.sinks)}, dust_owner)
 
 
+def test_pin_walled_in_past_the_blocker_radius_rips_what_walls_it():
+    # A RAM pin's way out between its neighbours on the face is one cell wide for a few cells (floweypu strip-front
+    # seeds 4 and 5, net_8069 and net_12369). Wire crossing its far end walls the pin in from beyond the blocker
+    # radius of both the pin and the sink; the rip goes round where the search got stuck.
+    rec = Recorder()
+    region = Region(0, 0, 0, BOUNDS[3] + 1, BOUNDS[4] + 1, BOUNDS[5] + 1)
+    solid, dust_owner = JournaledSet(rec, name="solid"), JournaledDict(rec)
+    y, src = 4, (12, 4, 1)
+    for z in range(7):
+        for x in (11, 12, 13):
+            for wy in (y - 1, y, y + 1):
+                if (x, wy) != (12, y) or z == 0:
+                    region[x, wy, z] = STONE
+                    solid.add((x, wy, z))
+    cross, sink = ((2, y, 7), (22, y, 7)), (12, y, 20)
+    terminals = {"a": {src, sink}, "x": set(cross)}
+    keepouts = _KeepoutMap(terminals, {src: (0, 1)})
+    router = _GreedyRouter(region, rec, solid, dust_owner, JournaledSet(rec, name="inverted"), frozenset(), BOUNDS[4],
+                           frozenset(t for ts in terminals.values() for t in ts))
+    x = _RouteJob(key="x", net_id="x", src=cross[0], sinks=[cross[1]], bounds=BOUNDS, protected=keepouts.for_net("x"),
+                  terminals=terminals["x"])
+    a = _RouteJob(key="a", net_id="a", src=src, sinks=[sink], bounds=BOUNDS, protected=keepouts.for_net("a"),
+                  terminals=terminals["a"])
+    assert router.run([x], "[test]") == []
+    assert dust_owner.get((12, y, 7)) == "x"  # across the tunnel's mouth, 6 from the pin
+    assert router.run([a], "[test]", pool=[x, a]) == []
+    assert "a" in router.paths and "x" in router.paths
+    assert not verify_signals(region, {"x": (x.src, x.sinks), "a": (a.src, a.sinks)}, dust_owner)
+
+
 def test_rip_branch_keeps_the_other_branches_and_reroutes_only_its_sink(monkeypatch):
     router, region, solid, dust_owner = _router()
     job = _job("n", (2, 1, 2), [(8, 1, 2), (2, 1, 14)])
