@@ -117,6 +117,7 @@ class JournalingWorkspace:
     def __init__(self, region: Region, recorder: Recorder):
         self.region = region
         self._rec = recorder
+        self._put = getattr(region, "put", None)  # an IndexedWorkspace's write that returns the old block
 
     def __getitem__(self, pos) -> BlockState:
         return self.region[pos]
@@ -131,11 +132,15 @@ class JournalingWorkspace:
         rec = self._rec
         active = rec.active
         region = self.region
+        if self._put is not None:
+            old = self._put(pos, block)
+        else:
+            old = region[pos]
+            region[pos] = block
         if active is not None:
             writer = rec.writer
-            rec.journals[active].append(("block", region, pos, region[pos], writer.get(pos)))
+            rec.journals[active].append(("block", region, pos, old, writer.get(pos)))
             writer[pos] = active
-        region[pos] = block
 
 
 def _support_dependent(

@@ -5,7 +5,7 @@ from .constants import (
     GLASS, STONE, REDSTONE, REDSTONE_TORCH,
     _HORIZ_DIRS, _DELTA_TO_FACING, _OPPOSITE_SIDE, _REPEATER_INTERVAL, _TOWER_2BLOCK,
 )
-from .block_utils import _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
+from .block_utils import _TORCH_IDS, _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
 
 _foot_repeaters = [False]  # see pathfinding.set_foot_repeaters
 
@@ -60,12 +60,13 @@ def _lay_dust_cell(
     """Place a single redstone dust cell, raising on foreign collision."""
     x, y, z = pos
     existing = workspace[x, y, z]
-    if _is_redstone_wire(existing) or _is_torch(existing):
+    block_id = existing.id  # _is_redstone_wire, _is_torch, _is_air without three calls: laying runs this per cell
+    if "redstone_wire" in block_id or block_id in _TORCH_IDS:
         owner = dust_owner.get(pos)
         if owner is not None and owner != net_id:
             raise LayConflict(f"Dust collision at {pos} for nets {owner} vs {net_id}", (pos,))
         return
-    elif not _is_air(existing):
+    elif block_id != "minecraft:air":
         raise LayConflict(f"Tried to redstone over an existing block ({existing}) at {pos}", (pos, (x, y + 1, z)))
     workspace[x, y, z] = REDSTONE
     dust_owner[pos] = net_id

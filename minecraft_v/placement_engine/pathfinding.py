@@ -213,9 +213,7 @@ class _BlockIndex:
             return
         grid = self.grid
         if grid is not None:  # the sets are views of it
-            for i, bit in enumerate(self.grid_bits):
-                if (was ^ now) & (1 << i):
-                    grid.put(pos, bit, bool(now & (1 << i)))
+            grid.put_kind(pos, was ^ now, now)
             return
         for i, cells in enumerate((self.non_air, self.wire, self.torch, self.repeater)):
             bit = 1 << i
@@ -251,10 +249,15 @@ class IndexedWorkspace:
         return region._Region__palette[region._Region__blocks[pos]]
 
     def __setitem__(self, pos, block: BlockState) -> None:
-        pos = tuple(pos)
+        self.put(tuple(pos), block)
+
+    def put(self, pos: tuple[int, int, int], block: BlockState) -> BlockState:
+        """self[pos] = block, returning the block it replaced."""
         region = self.region
-        self._index.update(pos, region._Region__palette[region._Region__blocks[pos]], block)
+        old = region._Region__palette[region._Region__blocks[pos]]
+        (self._built or self._index).update(pos, old, block)
         self._write(pos, block)
+        return old
 
     def __getattr__(self, name):
         return getattr(self.region, name)

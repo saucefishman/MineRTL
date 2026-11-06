@@ -698,6 +698,12 @@ cdef class CellGrid:
             return NULL
         return &self.g[ux * self.sx + uy * self.sy + uz]
 
+    cpdef put_kind(self, tuple pos, unsigned int changed, unsigned int now):
+        """_BlockIndex.update: the kind bits (_BlockIndex.kinds) in changed take their values from now."""
+        cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
+        if w != NULL:
+            w[0] = (w[0] & ~(changed << 1)) | ((now & changed) << 1)  # kind bits are F_NONAIR.. >> 1
+
     cpdef put(self, tuple pos, unsigned int bit, bint on):
         cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
         if w != NULL:
