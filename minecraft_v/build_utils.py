@@ -35,8 +35,10 @@ def save_artifact(filename: str, data: Any, artifacts_dir: Path = DEFAULT_ARTIFA
 def save_build_artifacts(
         component_list: ComponentList,
         artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR,
-) -> Path:
+) -> str:
+    """Writes component_list.json; returns its text."""
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     out = artifacts_dir / "component_list.json"
-    out.write_text(component_list.model_dump_json(indent=2))
-    return out
+    text = component_list.model_dump_json(indent=2)
+    out.write_text(text)
+    return text
