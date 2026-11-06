@@ -179,6 +179,10 @@ class _HoldTiming:
             self._clock = clock
         return dict(self._clock)
 
+    def clock_changed(self) -> bool:
+        """Whether a net the clock goes through changed since clock_arrivals last looked."""
+        return self._clock is None
+
     def forget(self, net_id: str) -> None:
         """A net's wire changed. Other nets keep what they found until they change too."""
         self.cache.pop(net_id, None)
@@ -736,20 +740,30 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
         if not bad:
             break
         progress = 0
+        # Nets padded since margins were worked out. Padding only slows the paths through a net, so a pin whose fastest
+        # path misses all of them still has that path, ties and all: its margins needn't be worked out again first.
+        padded_nets: set[str] = set()
         for margin, pin in bad:
             need = _HOLD_MARGIN - margin
             padded = 0
-            for net_id, sink in timing.path_nets(pin, via):
+            path = timing.path_nets(pin, via)
+            if padded_nets and (timing.clock_changed() or any(net_id in padded_nets for net_id, _ in path)):
+                clock, margins, via = timing.margins()
+                padded_nets.clear()
+                path = timing.path_nets(pin, via)
+            for net_id, sink in path:
                 if net_id in timing.clock_net_ids:
                     continue
                 got = _pad_net(timing, net_id, sink, need, protected, counts, edits)
                 need -= got
                 padded += got
+                if got:
+                    padded_nets.add(net_id)
                 if need <= 0:
                     break
             progress += padded
-            if padded:  # another pin's path may share these nets, and its numbers are now stale
-                clock, margins, via = timing.margins()
+        if padded_nets:
+            clock, margins, via = timing.margins()
         total += progress
         if not progress:
             break

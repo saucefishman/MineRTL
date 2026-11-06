@@ -686,7 +686,7 @@ cdef enum:  # indexes of propagate._FACES; a direction's opposite is its index ^
     D_TOP, D_BOTTOM
 
 
-cdef inline int _horizontal(int dx, int dz):
+cdef inline int _horizontal(int dx, int dz) noexcept:
     if dx == 0:
         return 2 if dz < 0 else 3
     return 4 if dx < 0 else 5
@@ -746,21 +746,21 @@ cdef class Settler:
         self.steps = 0
         self.oscillated = False
 
-    cdef inline int64_t _key(self, int x, int y, int z):
+    cdef inline int64_t _key(self, int x, int y, int z) noexcept:
         return (<int64_t>x * self.h + y) * self.l + z
 
-    cdef inline int _id(self, int x, int y, int z):
+    cdef inline int _id(self, int x, int y, int z) noexcept:
         if 0 <= x < self.w and 0 <= y < self.h and 0 <= z < self.l:
             return self.blocks[x, y, z]
         return 0
 
-    cdef inline int _kind_id_at(self, int x, int y, int z):
+    cdef inline int _kind_id_at(self, int x, int y, int z) noexcept:
         return self.kind_id[self._id(x, y, z)]
 
-    cdef inline bint _solid_at(self, int x, int y, int z):
+    cdef inline bint _solid_at(self, int x, int y, int z) noexcept:
         return self.solid[self._id(x, y, z)]
 
-    cdef int _at(self, int x, int y, int z):
+    cdef int _at(self, int x, int y, int z) noexcept:
         if not (0 <= x < self.w and 0 <= y < self.h and 0 <= z < self.l):
             return -1
         cdef int i = self.index.get(self._key(x, y, z))
@@ -768,7 +768,7 @@ cdef class Settler:
             i = self._load(x, y, z)
         return i
 
-    cdef int _load(self, int x, int y, int z):
+    cdef int _load(self, int x, int y, int z) noexcept:
         cdef int pid = self.blocks[x, y, z]
         cdef int i = self.cells.size(), j, level, k = self.kind_id[pid]
         cdef SettleCell c
@@ -800,13 +800,13 @@ cdef class Settler:
 
     # ---- wire shape and connections
 
-    cdef bint _connects(self, int x, int y, int z, int d):
+    cdef bint _connects(self, int x, int y, int z, int d) noexcept:
         cdef int pid = self._id(x, y, z), k = self.kind_id[pid]
         if k < 0 or k == S_LAMP:
             return False
         return k != S_REPEATER or (self.pal_facing[pid] >> 1) == (d >> 1)
 
-    cdef int _dust_sides(self, int i):
+    cdef int _dust_sides(self, int i) noexcept:
         cdef int found = self.cells[i].side_mask
         cdef int x, y, z, d, sx, sz, count = 0, last = 0
         cdef bint above_solid
@@ -830,12 +830,12 @@ cdef class Settler:
         self.cells[i].side_mask = found
         return found
 
-    cdef inline void _keep_links(self, int i, vector[int]& found):
+    cdef inline void _keep_links(self, int i, vector[int]& found) noexcept:
         self.cells[i].links_off = self.arena.size()
         self.cells[i].links_len = found.size()
         self.arena.insert(self.arena.end(), found.begin(), found.end())
 
-    cdef void _dust_links(self, int i):
+    cdef void _dust_links(self, int i) noexcept:
         if self.cells[i].links_off >= 0:
             return
         cdef vector[int] found
@@ -853,14 +853,14 @@ cdef class Settler:
                     found.push_back(self._at(qx, qy - 1, qz))
         self._keep_links(i, found)
 
-    cdef inline bint _in_arena(self, int off, int n, int e):
+    cdef inline bint _in_arena(self, int off, int n, int e) noexcept:
         cdef int j
         for j in range(off, off + n):
             if self.arena[j] == e:
                 return True
         return False
 
-    cdef void _take_from(self, int i, int qx, int qy, int qz, vector[int]& found):
+    cdef void _take_from(self, int i, int qx, int qy, int qz, vector[int]& found) noexcept:
         cdef int j
         if self._kind_id_at(qx, qy, qz) == S_DUST:
             j = self._at(qx, qy, qz)
@@ -868,7 +868,7 @@ cdef class Settler:
             if self._in_arena(self.cells[j].links_off, self.cells[j].links_len, i):
                 found.push_back(j)
 
-    cdef void _dust_takers(self, int i):
+    cdef void _dust_takers(self, int i) noexcept:
         if self.cells[i].takers_off >= 0:
             return
         cdef vector[int] found
@@ -882,7 +882,7 @@ cdef class Settler:
         self.cells[i].takers_len = found.size()
         self.arena.insert(self.arena.end(), found.begin(), found.end())
 
-    cdef int _run(self, int start):
+    cdef int _run(self, int start) noexcept:
         cdef int number = self.cells[start].run, a, j, q
         if number >= 0:
             return number
@@ -912,7 +912,7 @@ cdef class Settler:
 
     # ---- what emits into a cell: `side` is the direction from the reader to p
 
-    cdef int _weak(self, int x, int y, int z, int side, bint dust_power):
+    cdef int _weak(self, int x, int y, int z, int side, bint dust_power) noexcept:
         cdef int i = self._at(x, y, z), k
         cdef bint emits
         if i < 0:
@@ -932,7 +932,7 @@ cdef class Settler:
             emits = False
         return i if emits else -1
 
-    cdef int _strong(self, int x, int y, int z, int side, bint dust_power):
+    cdef int _strong(self, int x, int y, int z, int side, bint dust_power) noexcept:
         cdef int i = self._at(x, y, z), k
         if i < 0:
             return -1
@@ -945,7 +945,7 @@ cdef class Settler:
             return self._weak(x, y, z, side, dust_power)
         return -1
 
-    cdef void _signal(self, int x, int y, int z, int side, bint dust_power, vector[int]& out):
+    cdef void _signal(self, int x, int y, int z, int side, bint dust_power, vector[int]& out) noexcept:
         cdef int d, e
         if self._solid_at(x, y, z):
             for d in range(6):
@@ -957,7 +957,7 @@ cdef class Settler:
             if e >= 0:
                 out.push_back(e)
 
-    cdef void _inputs(self, int i):
+    cdef void _inputs(self, int i) noexcept:
         if self.cells[i].inputs_off >= 0:
             return
         cdef vector[int] found
@@ -981,7 +981,7 @@ cdef class Settler:
         self.cells[i].inputs_len = found.size()
         self.arena.insert(self.arena.end(), found.begin(), found.end())
 
-    cdef void _side_inputs(self, int i):
+    cdef void _side_inputs(self, int i) noexcept:
         cdef int k = self.cells[i].kind
         if self.cells[i].sides_off >= 0 or (k != S_REPEATER and k != S_COMPARATOR):
             return
@@ -1003,7 +1003,7 @@ cdef class Settler:
         self.cells[i].sides_len = found.size()
         self.arena.insert(self.arena.end(), found.begin(), found.end())
 
-    cdef void _dust_sources(self, int i):
+    cdef void _dust_sources(self, int i) noexcept:
         if self.cells[i].sources_off >= 0:
             return
         cdef vector[int] found
@@ -1064,14 +1064,14 @@ cdef class Settler:
 
     # ---- evaluation
 
-    cdef inline bint _any_on(self, int off, int n):
+    cdef inline bint _any_on(self, int off, int n) noexcept:
         cdef int j
         for j in range(off, off + n):
             if self.cells[self.arena[j]].power:
                 return True
         return False
 
-    cdef inline int _max_on(self, int off, int n):
+    cdef inline int _max_on(self, int off, int n) noexcept:
         cdef int j, best = 0, p
         for j in range(off, off + n):
             p = self.cells[self.arena[j]].power
@@ -1079,7 +1079,7 @@ cdef class Settler:
                 best = p
         return best
 
-    cdef int _output(self, int i):
+    cdef int _output(self, int i) noexcept:
         cdef int k = self.cells[i].kind, level, sides
         self._inputs(i)
         cdef int io = self.cells[i].inputs_off, il = self.cells[i].inputs_len
@@ -1100,7 +1100,7 @@ cdef class Settler:
             return 15 if self._any_on(io, il) else 0
         return 0 if self._any_on(io, il) else 15
 
-    cdef void _dust_levels(self, int number, vector[int]& changed):
+    cdef void _dust_levels(self, int number, vector[int]& changed) noexcept:
         cdef size_t a
         cdef int i, level, q, j, n = self.runs[number].size()
         for a in range(n):
@@ -1133,13 +1133,13 @@ cdef class Settler:
             if self.cells[i].power != self.cells[i].level:
                 changed.push_back(i)
 
-    cdef inline void _mark(self, int item, bint on):
+    cdef inline void _mark(self, int item, bint on) noexcept:
         if item >= 0:
             self.cells[item].queued = on
         else:
             self.run_queued[~item] = on
 
-    cdef inline bint _is_queued(self, int item):
+    cdef inline bint _is_queued(self, int item) noexcept:
         return self.cells[item].queued if item >= 0 else self.run_queued[~item]
 
     def run(self, starting, int steps_per_item, int steps_per_cell):
@@ -1255,6 +1255,67 @@ cdef class Settler:
             lv[row] = 1 if self.cells[i].locked else 0
         order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
         return pos[order], state[order], power[order], locked[order]
+
+
+def table_gather(uint32_t[:, :, ::1] blocks, uint8_t[::1] table):
+    """table[blocks], a uint8 array the shape of blocks: numpy's fancy indexing takes several times as long."""
+    out = np.empty((blocks.shape[0], blocks.shape[1], blocks.shape[2]), dtype=np.uint8)
+    if out.size == 0:
+        return out
+    cdef uint8_t[:, :, ::1] o = out
+    cdef uint32_t* p = &blocks[0, 0, 0]
+    cdef uint8_t* q = &o[0, 0, 0]
+    cdef Py_ssize_t i, size = blocks.shape[0] * blocks.shape[1] * blocks.shape[2]
+    for i in range(size):
+        q[i] = table[p[i]]
+    return out
+
+
+def table_where(uint32_t[:, :, ::1] blocks, uint8_t[::1] table, boxes=()):
+    """np.argwhere(table[blocks]) with the cells in boxes (lowest cell, one past the highest) left out: an n x 3 int64
+    array in the same order, without a mask the size of blocks."""
+    cdef int nx = blocks.shape[0], ny = blocks.shape[1], nz = blocks.shape[2], x, y, z, z0, z1, j, nb
+    cdef vector[int] box
+    cdef vector[int] cut  # per row, the z ranges boxes cover there
+    cdef vector[int64_t] found
+    for lo, hi in boxes:
+        for v in (*lo, *hi):
+            box.push_back(v)
+    nb = box.size() // 6
+    cdef uint32_t* row
+    for x in range(nx):
+        for y in range(ny):
+            row = &blocks[x, y, 0]
+            cut.clear()
+            for j in range(nb):
+                if box[6 * j] <= x < box[6 * j + 3] and box[6 * j + 1] <= y < box[6 * j + 4]:
+                    z0, z1 = max(box[6 * j + 2], 0), min(box[6 * j + 5], nz)
+                    if z0 < z1:
+                        cut.push_back(z0)
+                        cut.push_back(z1)
+            if cut.empty():
+                for z in range(nz):
+                    if table[row[z]]:
+                        found.push_back((<int64_t>x * ny + y) * nz + z)
+            else:
+                for z in range(nz):
+                    if table[row[z]]:
+                        for j in range(0, cut.size(), 2):
+                            if cut[j] <= z < cut[j + 1]:
+                                break
+                        else:
+                            found.push_back((<int64_t>x * ny + y) * nz + z)
+    out = np.empty((found.size(), 3), dtype=np.int64)
+    cdef int64_t[:, ::1] o = out
+    cdef int64_t k
+    cdef size_t n
+    for n in range(found.size()):
+        k = found[n]
+        o[n, 2] = k % nz
+        k //= nz
+        o[n, 1] = k % ny
+        o[n, 0] = k // ny
+    return out
 
 
 def used_ids(uint32_t[:, :, :] blocks, int n):

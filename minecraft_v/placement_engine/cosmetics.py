@@ -13,7 +13,7 @@ from litemapy import BlockState, Region
 from litemapy.minecraft import TileEntity
 from nbtlib.tag import Byte, Compound, List, String
 
-from .block_utils import Box, cells_in_boxes_near, palette_writer
+from .block_utils import Box, cells_in_boxes_near, cells_where, palette_writer
 from .verify import _World, signal_grid
 
 Pos = tuple[int, int, int]
@@ -33,11 +33,7 @@ def apply_dust_shapes(region: Region, opaque: Collection[Box] = ()) -> int:
     wire_ids = [i for i, b in enumerate(palette) if b.id == "minecraft:redstone_wire"]
     if not wire_ids:
         return 0
-    is_wire = np.isin(blocks, wire_ids)
-    for lo, hi in opaque:
-        is_wire[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
-    at = np.argwhere(is_wire).astype(np.int32)
-    del is_wire
+    at = cells_where(blocks, np.isin(np.arange(len(palette)), wire_ids), opaque).astype(np.int32)
     near = cells_in_boxes_near(region, opaque, 1, [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)])
     near = near[np.isin(blocks[near[:, 0], near[:, 1], near[:, 2]], wire_ids)]
     at = np.concatenate((at, near.astype(np.int32)))

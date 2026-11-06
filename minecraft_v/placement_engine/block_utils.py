@@ -54,6 +54,33 @@ def palette_writer(region: Region) -> Callable[[tuple[int, int, int], BlockState
     return write
 
 
+def palette_table(region: Region, values) -> np.ndarray:
+    """A per palette entry list of small ints (or bools) as the uint8 table the lookups below take."""
+    return np.asarray(values, dtype=np.uint8).reshape(len(region._Region__palette))
+
+
+def _compiled(blocks: np.ndarray) -> bool:
+    return _signals is not None and blocks.dtype == np.uint32 and blocks.flags.c_contiguous and blocks.size > 0
+
+
+def lookup(blocks: np.ndarray, table: np.ndarray) -> np.ndarray:
+    """table[blocks], table a uint8 array per palette entry."""
+    if _compiled(blocks):
+        return _signals.table_gather(blocks, np.ascontiguousarray(table, dtype=np.uint8))
+    return table[blocks]
+
+
+def cells_where(blocks: np.ndarray, table: np.ndarray, skip: Iterable[Box] = ()) -> np.ndarray:
+    """np.argwhere(table[blocks]) less the cells in skip's boxes, as an n x 3 int64 array in argwhere's order."""
+    skip = [(tuple(int(c) for c in lo), tuple(int(c) for c in hi)) for lo, hi in skip]
+    if _compiled(blocks):
+        return _signals.table_where(blocks, np.ascontiguousarray(table, dtype=np.uint8), skip)
+    mask = np.asarray(table, dtype=bool)[blocks]
+    for lo, hi in skip:
+        mask[max(lo[0], 0):max(hi[0], 0), max(lo[1], 0):max(hi[1], 0), max(lo[2], 0):max(hi[2], 0)] = False
+    return np.argwhere(mask)
+
+
 def _pack_states(blocks: np.ndarray, nbits: int) -> LongArray:
     """Palette ids as Litematica's bit array: y, then z, then x, lowest bits first, values crossing long boundaries."""
     n_x, n_y, n_z = blocks.shape

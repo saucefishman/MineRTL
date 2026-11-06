@@ -49,6 +49,7 @@ from .template import (
 from .hold import _HOLD_MARGIN, HoldShort, fix_hold, flat_terminals, hold_violations, repeater_delay
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
+from .forks import Forked
 from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
@@ -449,8 +450,19 @@ def _opaque_boxes(placed: list[_Placed], macros: dict[str, Macro] | None) -> lis
             for fp in [p.component.footprint]]
 
 
+_interior_memo: list = []  # [placed, its cells]: routing, repair and verify all ask for the same layout's
+
+
 def _component_interior(placed: list[_Placed]) -> set[tuple[int, int, int]]:
     """Cells inside non-IO component footprints."""
+    if _interior_memo and _interior_memo[0] is placed and _interior_memo[1] == len(placed):
+        return set(_interior_memo[2])
+    cells = frozenset(_interior_cells(placed))
+    _interior_memo[:] = [placed, len(placed), cells]
+    return set(cells)
+
+
+def _interior_cells(placed: list[_Placed]) -> set[tuple[int, int, int]]:
     return {
         (ox + dx, oy + dy, oz + dz)
         for item in placed
@@ -539,6 +551,67 @@ class _LazyCells:
         return p in self._cells
 
 
+class CellMask:
+    """A set of cells kept as a grid over a region, cells outside it in `extra`: footprint_blocked on a big build is
+    millions of cells, which as tuples in a frozenset took seconds to make. `in` works as on a set; the router's CellGrid
+    reads `mask` whole."""
+    __slots__ = ("mask", "extra", "_view")
+
+    def __init__(self, shape: tuple[int, int, int], mask: np.ndarray | None = None, extra: Collection[Pos] = ()):
+        self.mask = np.zeros(shape, dtype=bool) if mask is None else mask
+        self.extra: set[Pos] = set(extra)
+        self._view = memoryview(self.mask.view(np.uint8)) if self.mask.size else None  # scalar reads beat numpy's
+
+    def _inside(self, x: int, y: int, z: int) -> bool:
+        sx, sy, sz = self.mask.shape
+        return 0 <= x < sx and 0 <= y < sy and 0 <= z < sz
+
+    def __contains__(self, p) -> bool:
+        x, y, z = p
+        if self._inside(x, y, z):
+            return self._view[x, y, z] != 0
+        return p in self.extra
+
+    def add(self, p: Pos) -> None:
+        if self._inside(*p):
+            self._view[p] = 1
+        else:
+            self.extra.add(tuple(p))
+
+    def discard(self, p: Pos) -> None:
+        if self._inside(*p):
+            self._view[p] = 0
+        else:
+            self.extra.discard(tuple(p))
+
+    def add_box(self, lo: Pos, hi: Pos) -> None:
+        """Every cell from lo up to, not including, hi."""
+        if any(a >= b for a, b in zip(lo, hi)):
+            return
+        shape = self.mask.shape
+        clo = tuple(max(a, 0) for a in lo)
+        chi = tuple(min(b, n) for b, n in zip(hi, shape))
+        if all(a < b for a, b in zip(clo, chi)):
+            self.mask[clo[0]:chi[0], clo[1]:chi[1], clo[2]:chi[2]] = True
+        if clo != tuple(lo) or chi != tuple(hi):  # some of it is past the grid
+            cells = np.argwhere(np.ones(tuple(b - a for a, b in zip(lo, hi)), dtype=bool)) + np.array(lo)
+            out = ~((cells >= 0) & (cells < shape)).all(axis=1)
+            self.extra.update(map(tuple, cells[out].tolist()))
+
+    def __or__(self, cells: Collection[Pos]) -> CellMask:
+        union = CellMask(self.mask.shape, self.mask.copy(), self.extra)
+        for p in cells:
+            union.add(p)
+        return union
+
+    def __len__(self) -> int:
+        return int(np.count_nonzero(self.mask)) + len(self.extra)
+
+    def __iter__(self):
+        yield from map(tuple, np.argwhere(self.mask).tolist())
+        yield from self.extra
+
+
 def _build_footprint_blocked(
         placed: list[_Placed],
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
@@ -546,10 +619,12 @@ def _build_footprint_blocked(
         const_positions: set[tuple[int, int, int]],
         io_fixtures: list[tuple[tuple[int, int, int], tuple[int, int], bool]] = (),
         block_output_lamps: bool = True,
-        envelope: set[tuple[int, int, int]] = frozenset(),
-) -> frozenset[tuple[int, int, int]]:
+        envelope: tuple[np.ndarray, np.ndarray, int] | None = None,
+        shape: tuple[int, int, int] | None = None,
+) -> CellMask:
     """Hard-block zone: footprint interiors + expanded borders + IO repeater tops + const air-gaps
-    + the lever/lamp cells (and their neighbours) behind input / in front of output repeaters."""
+    + the lever/lamp cells (and their neighbours) behind input / in front of output repeaters.
+    envelope: (x, z) columns blocked from y 0 up (_io_envelope_blocked). shape: the region's, which the mask covers."""
     boxes: list[Box] = []
     for item in placed:
         if item.component.type == ComponentType.CUSTOM:
@@ -566,24 +641,39 @@ def _build_footprint_blocked(
         ox, oy, oz = item.origin
         boxes += [((ox + dx, oy + dy, oz + dz), (ox + dx + fp.width, oy + dy + fp.height, oz + dz + fp.depth))
                   for dx, dy, dz in shifts]
-    fp_expanded = _cells_in(boxes)
+    if shape is None:  # just big enough
+        shape = tuple(int(n) for n in np.max([hi for _, hi in boxes] or [(0, 0, 0)], axis=0))
+    blocked = CellMask(shape)
+    for lo, hi in boxes:
+        blocked.add_box(lo, hi)
     for rx, ry, rz in io_repeater_cells:
-        fp_expanded.add((rx, ry + 1, rz))
+        blocked.add((rx, ry + 1, rz))
     for (rx, ry, rz), (nx, nz), is_input in io_fixtures:
         if not is_input and not block_output_lamps:
             continue  # output extensions start in front of the repeater
         fixture = [(rx + nx, ry, rz + nz)] + ([(rx + nx, ry + 1, rz + nz)] if is_input else [])
         for fx, fy, fz in fixture:
-            fp_expanded.add((fx, fy, fz))
+            blocked.add((fx, fy, fz))
             for ddx, ddy, ddz in _DIRS_6:
-                fp_expanded.add((fx + ddx, fy + ddy, fz + ddz))
+                blocked.add((fx + ddx, fy + ddy, fz + ddz))
     # Air-gap const redstone blocks: block all 6 immediate neighbors
     for rbx, rby, rbz in const_positions:
         for ddx, ddy, ddz in _DIRS_6:
-            fp_expanded.add((rbx + ddx, rby + ddy, rbz + ddz))
-    fp_expanded |= envelope
-    fp_expanded -= set(pin_terminal.values())
-    return frozenset(fp_expanded)
+            blocked.add((rbx + ddx, rby + ddy, rbz + ddz))
+    if envelope is not None:
+        xs, zs, top = envelope
+        if len(xs):
+            inside = (xs >= 0) & (xs < shape[0]) & (zs >= 0) & (zs < shape[2])
+            blocked.mask[xs[inside], :min(top, shape[1]), zs[inside]] = True
+            for x, z in zip(xs[~inside].tolist(), zs[~inside].tolist()):
+                for y in range(top):
+                    blocked.add((x, y, z))
+            for y in range(shape[1], top):  # above the grid
+                for x, z in zip(xs[inside].tolist(), zs[inside].tolist()):
+                    blocked.add((x, y, z))
+    for p in pin_terminal.values():
+        blocked.discard(p)
+    return blocked
 
 
 _ENVELOPE_GATE_GAP = 6   # room kept past a gate's far face, where its pins may need wire
@@ -603,6 +693,19 @@ def _io_barrier(
     if not columns:
         return []
     xs = sorted(columns)
+    # Per x, the farthest gate over it: a gate covers a run of x, one slice each rather than every gate at every x.
+    gate_limit = np.full(width, np.iinfo(np.int64).min, dtype=np.int64)
+    for x0, x1, far in gate_far:
+        lo, hi = max(x0, 0), min(x1, width - 1)
+        if lo <= hi:
+            np.maximum(gate_limit[lo:hi + 1], far + _ENVELOPE_GATE_GAP, out=gate_limit[lo:hi + 1])
+    covered = np.zeros(width, dtype=bool)
+    for x0, x1, _ in gate_far:
+        lo, hi = max(x0, 0), min(x1, width - 1)
+        if lo <= hi:
+            covered[lo:hi + 1] = True
+    gate_limit = gate_limit.tolist()
+    covered = covered.tolist()
     limit = []
     for x in range(width):
         lane = [columns[c] for c in (x - 1, x, x + 1) if c in columns]
@@ -611,7 +714,7 @@ def _io_barrier(
             continue
         i = bisect.bisect(xs, x)
         near = max(columns[c] for c in xs[max(i - 1, 0):i + 1])
-        limit.append(max([near, *(far + _ENVELOPE_GATE_GAP for x0, x1, far in gate_far if x0 <= x <= x1)]))
+        limit.append(max(near, gate_limit[x]) if covered[x] else near)
     cells = []
     for x, z in enumerate(limit):
         top = max(limit[max(x - 1, 0):x + 2]) + _ENVELOPE_THICKNESS
@@ -623,8 +726,9 @@ def _io_envelope_blocked(
         placed: list[_Placed],
         bounds: tuple[int, int, int, int, int, int],
         block_outputs: bool,
-) -> set[tuple[int, int, int]]:
-    """Wire keepout: nothing routes behind an input (+Z) or ahead of an output (-Z), at any Y.
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Wire keepout: nothing routes behind an input (+Z) or ahead of an output (-Z), at any Y: the (x, z) columns, as
+    arrays of x and of z, and the height they're blocked to (from y 0, not including it).
 
     The barrier starts just past each pin's repeater; lever and lamp are placed after routing.
     """
@@ -647,7 +751,8 @@ def _io_envelope_blocked(
     if block_outputs:  # outputs mirrored: far side = lower z
         columns += [(x, -z) for x, z in _io_barrier({x: -z for x, z in outputs.items()},
                                                     [(x0, x1, -z0) for x0, x1, z0, _ in gates], width)]
-    return {(x, y, z) for x, z in columns if min_z <= z <= max_z for y in range(max_y + 1)}
+    cells = np.array([(x, z) for x, z in columns if min_z <= z <= max_z], dtype=np.int64).reshape(-1, 2)
+    return cells[:, 0], cells[:, 1], max_y + 1
 
 
 def _build_terminal_map(
@@ -2214,11 +2319,15 @@ def build_litematic_from_component_list(
         resume: ResumeStore | None = None,
         probes: list[dict] | None = None,
         server_clock: int | None = None,
+        retain: bool = False,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro).
 
     server_clock: instead of generating `clock_pin`'s clock, give it a lever for MCHPRS to toggle every this many
     ticks (0: the generated clock's period for this critical path).
+
+    retain: keep the build's working state alive after returning, for a process about to exit: freeing its millions of
+    cells one by one takes longer than the exit.
     """
     if macros:  # an array is a wall across the layout: wires get past it overhead
         routing_headroom = max(routing_headroom, macro_headroom)
@@ -2305,6 +2414,7 @@ def build_litematic_from_component_list(
                 placed, pin_terminal, io_repeater_cells, const_positions, io_fixtures,
                 block_output_lamps=not output_pin_targets,
                 envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
+                shape=(width, height, workspace_depth),
             )
         all_terminals = _build_terminal_map(work_nets, pin_terminal)
         all_terminals.update(_unused_output_terminals(placed, all_terminals, pin_terminal))
@@ -2375,18 +2485,31 @@ def build_litematic_from_component_list(
         with phase("[hold] fixing hold"):
             flat_period = _hold_with_detours(workspace, flat, flat_ends, failed_nets, probed, opaque, macros, clock_requirement,
                                              hold_shorts, kept_router[0] if kept_router else None)
-    if macros:
-        signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
-                                                    failed_nets)
-    else:
-        signal_violations = _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
-                                                      frozenset(_component_interior(placed)), failed_nets)
+
+    def check_signals() -> list:
+        if macros:
+            return _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros, failed_nets)
+        return _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
+                                         frozenset(_component_interior(placed)), failed_nets)
+
+    # Only a check of the wire as it is now: it runs in a forked process beside what follows, up to writing the build.
+    signal_check = Forked(check_signals) if capture is None else None
+    signal_violations = check_signals() if signal_check is None else []
+
+    def checked_signals() -> list:
+        """signal_violations with the forked check's in front, once it's done."""
+        nonlocal signal_check, signal_violations
+        if signal_check is not None:
+            signal_violations = signal_check.result() + signal_violations
+            signal_check = None
+        return signal_violations
 
     if routing_failures:
         failed = ", ".join(nid for nid, _ in routing_failures)
         if allow_routing_failures:
             log(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
+            checked_signals()
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
     with phase("[verify] live pins"):
         unused = _unused_output_terminals(placed, _build_terminal_map(work_nets, pin_terminal), pin_terminal)
@@ -2395,14 +2518,16 @@ def build_litematic_from_component_list(
         log(f"[verify] live_pin {sorted(violation.nets)} has wire on its cell {violation.pos}")
     signal_violations = signal_violations + live_pins
     if live_pins and not allow_routing_failures:
+        checked_signals()
         raise RuntimeError(f"{len(live_pins)} pin(s) with no net drive wire, first: {live_pins[0]}")
     short_pins = hold_violations(hold_shorts)
     for violation in short_pins:
         log(f"[verify] hold {sorted(violation.nets)} can take new data on its own edge, at {violation.pos}")
     signal_violations = signal_violations + short_pins
     if short_pins and not allow_routing_failures:
+        checked_signals()
         raise RuntimeError(f"{len(short_pins)} flip-flop pin(s) short of hold time, first: {short_pins[0]}")
-    if signal_violations and not macros and not allow_routing_failures:
+    if signal_check is None and signal_violations and not macros and not allow_routing_failures:
         raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
 
     if output_pin_targets:
@@ -2524,14 +2649,18 @@ def build_litematic_from_component_list(
             if workspace[lever].id == "minecraft:lever":
                 levers.append({"name": p.component.id if len(p.component.pins) == 1 else f"{p.component.id}.{pin.name}",
                                "pos": [c - lo for c, lo in zip(lever, low)]})
+    if settled:
+        with phase("[settle] propagating"):
+            settle_blocks(workspace, opaque)
+
+    with phase("[verify] waiting for the signal check"):
+        signal_violations = checked_signals()
+    if signal_violations and not macros and not allow_routing_failures:
+        raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
     if resolved_probes or clock_entry:
         server_path = out_path.with_suffix(SERVER_FILE_SUFFIX)
         write_server_file(server_path, size, resolved_probes, clock_entry, levers)
         log(f"[server] {server_path}")
-
-    if settled:
-        with phase("[settle] propagating"):
-            settle_blocks(workspace, opaque)
 
     schematic = Schematic(
         name=schematic_name,
@@ -2548,7 +2677,12 @@ def build_litematic_from_component_list(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with phase("[write] saving litematic"):
         save_schematic(schematic, str(out_path))
+    if retain:
+        _retained.append(locals())
     return out_path
+
+
+_retained: list = []  # see build_litematic_from_component_list's retain
 
 
 def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int, schematics_dir: Path,
