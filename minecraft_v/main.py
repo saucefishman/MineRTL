@@ -352,7 +352,8 @@ def main():
                                                            bank_columns,
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
-                                                           on_class=report, min_coverage=_MACRO_MIN_COVERAGE)
+                                                           on_class=report, min_coverage=_MACRO_MIN_COVERAGE,
+                                                           repeats_cache=Path(args.macro_cache) / "repeats")
         macros = {**macros, **rams}
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")

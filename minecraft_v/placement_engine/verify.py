@@ -33,7 +33,9 @@ from litemapy import BlockState, Region
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
+from .block_utils import cells_where, lookup
 from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
+from .forks import fork_map
 
 try:
     from . import _signals
@@ -162,7 +164,7 @@ def signal_grid(region: Region, blocked: Collection[Pos], terminals: Collection[
     ends = np.array([p for p in terminals if p is not None], dtype=np.int64).reshape(-1, 3)
     if len(ends) and ((ends < 0).any() or (ends >= size).any()):
         return None
-    grid = np.asarray(table[blocks], order="C")
+    grid = np.asarray(lookup(blocks, table), order="C")
     cells = blocked
     if isinstance(blocked, HiddenBoxes):
         for lo, hi in blocked.boxes:
@@ -559,9 +561,9 @@ def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owne
     """verify_signals on the kernel, the same violations in the same order. Every net is searched first; then the
     cells reached are checked for shorts in bulk, and only nets with a suspect cell go through them one by one."""
     _, h, l = region._Region__blocks.shape
-    found: list[list[Violation]] = []
-    reached: list[np.ndarray] = []
-    for net_id, (source, sinks) in nets.items():
+
+    def check(item: tuple[str, tuple[Pos, list[Pos]]]) -> tuple[list[Violation], np.ndarray]:
+        net_id, (source, sinks) = item
         own = {source, *sinks}
         stop = Excluding(terminals, own)
         keys, strong, has_latch, inverted, in_reach = grid.check_net_keys(source, sinks, own)
@@ -578,9 +580,15 @@ def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owne
             net.append(Violation("latch", frozenset({net_id}), latch[0]))
         if inverted is not None:
             net.append(Violation("inverted", frozenset({net_id}), inverted))
-        found.append(net)
-        reached.append(keys)
-        if on_net is not None:
+        return net, keys
+
+    # Nets are searched one by one, each on its own: forked processes take a share each.
+    checked = fork_map(check, list(nets.items()))
+    found: list[list[Violation]] = [net for net, _ in checked]
+    reached: list[np.ndarray] = [keys for _, keys in checked]
+    del checked
+    if on_net is not None:
+        for net_id in nets:
             on_net(net_id)
 
     names = list(nets)
@@ -686,10 +694,7 @@ def verify_support(
     if not needs.any():
         return []
     gives = np.array([_gives_support(b) for b in palette], dtype=bool)
-    mask = needs[blocks]
-    for lo, hi in skip:
-        mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
-    cells = np.argwhere(mask)
+    cells = cells_where(blocks, needs, skip)
     support = cells + offsets[blocks[cells[:, 0], cells[:, 1], cells[:, 2]]]
     in_region = ((support >= 0) & (support < (region.width, region.height, region.length))).all(axis=1)
     held = np.zeros(len(cells), dtype=bool)

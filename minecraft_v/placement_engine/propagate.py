@@ -20,7 +20,7 @@ from nbtlib.tag import Compound, Int, String
 
 from minecraft_v.progress import log
 
-from .block_utils import Box, cells_in_boxes_near, palette_writer
+from .block_utils import Box, cells_in_boxes_near, cells_where, palette_writer
 
 try:
     from . import _signals
@@ -423,11 +423,7 @@ class _Propagation:
     def _starting_cells(self) -> np.ndarray:
         """Redstone outside the boxes, and redstone in them that something outside could feed."""
         table = np.array([k >= 0 for k in self.kind_id])
-        mask = table[self.blocks]
-        for lo, hi in self.opaque:
-            mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
-        cells = np.argwhere(mask)
-        del mask
+        cells = cells_where(self.blocks, table, self.opaque)
         near = cells_in_boxes_near(self.region, self.opaque, 2, _REACH_TWO)
         near = near[table[self.blocks[near[:, 0], near[:, 1], near[:, 2]]]]
         return np.concatenate((cells, near))
