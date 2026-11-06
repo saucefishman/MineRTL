@@ -1213,7 +1213,13 @@ cdef class World:
         return self.walkable_ex(x, y, z, 0, 0, 0, False)
 
     cdef bint walkable_ex(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt) except -1:
-        if self.eprot_at(x, y, z) or self.efp(x, y, z):
+        cdef uint16_t* w = self.gw(x, y, z)
+        cdef uint16_t g
+        if w != NULL and self.keep_fast:  # eprot_at and efp off one grid word
+            g = w[0]
+            if self.keep_at(g, x, y, z, 0) or (g & F_FP and not self.small_at(x, y, z) & S_RELIEF):
+                return False
+        elif self.eprot_at(x, y, z) or self.efp(x, y, z):
             return False
         cdef unsigned long long key = cell_key(x, y, z) << 7
         cdef char* hit
