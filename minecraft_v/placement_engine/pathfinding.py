@@ -8,7 +8,7 @@ from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
 from .wire import LayConflict, _foot_repeaters
-from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, \
+from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _ROUTE_CELL_STATES, \
     _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
@@ -203,6 +203,11 @@ class _BlockIndex:
         if was == now:
             return
         grid = self.grid
+        if grid is not None:  # the sets are views of it
+            for i, bit in enumerate(self.grid_bits):
+                if (was ^ now) & (1 << i):
+                    grid.put(pos, bit, bool(now & (1 << i)))
+            return
         for i, cells in enumerate((self.non_air, self.wire, self.torch, self.repeater)):
             bit = 1 << i
             if was & bit and not now & bit:
@@ -236,7 +241,8 @@ class IndexedWorkspace:
 
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
-        self._index.update(pos, self.region[pos], block)
+        region = self.region
+        self._index.update(pos, region._Region__palette[region._Region__blocks[pos]], block)
         self._write(pos, block)
 
     def __getattr__(self, name):
@@ -419,7 +425,8 @@ def _find_wire_path(
     walk_cache: dict[tuple[tuple[int, int, int], frozenset[tuple[int, int, int]]], bool] = {}
     _no_exempt: frozenset[tuple[int, int, int]] = frozenset()
     block_index = workspace.block_index() if hasattr(workspace, "block_index") else _BlockIndex(workspace)
-    ix_non_air, ix_wire, ix_torch, ix_repeater = (
+    grid = getattr(block_index, "grid", None)
+    ix_non_air, ix_wire, ix_torch, ix_repeater = grid.kind_sets() if grid is not None else (
         block_index.non_air, block_index.wire, block_index.torch, block_index.repeater)
 
     def walkable(
@@ -468,17 +475,11 @@ def _find_wire_path(
             cand = (start[0] + ddx, start[1] + ddy, start[2] + ddz)
             if walkable(cand):
                 seeds.append(cand)
-    n_start_seeds = len(seeds)
-    # Fan-out tree routing: existing own-net wire cells are valid branch seeds
-    if tree_seeds:
-        seed_set = set(seeds)
-        min_x, min_y, min_z, max_x, max_y, max_z = bounds
-        for ts in tree_seeds:
-            if ts not in seed_set and ts not in solid:
-                x, y, z = ts
-                if min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z:  # _in_bounds
-                    seeds.append(ts)
-                    seed_set.add(ts)
+    # Seeds in order, with their group (0 = start seeds, then one per tree seed): existing own-net wire cells are
+    # valid branch seeds.
+    seed_ids, seed_nodes, seed_groups, group_best_h, best = _astar.prepare_seeds(
+        seeds, tree_seeds, solid, tuple(bounds), pos_ids, pos_list, h_list, move_cache, gx, gy, gz, x_h_factor,
+        seed_depths or {})
     if not seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
@@ -490,31 +491,11 @@ def _find_wire_path(
     if not goal_set:
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
-    # A* search: seeds in order, with their group (0 = start seeds, then one per tree seed).
-    seed_depths = seed_depths or {}
-    # _pid of each seed, inline: hundreds per search.
-    seed_ids = []
-    for seed in seeds:
-        i = pos_ids.get(seed)
-        if i is None:
-            i = pos_ids[seed] = len(pos_list)
-            pos_list.append(seed)
-            h_list.append(abs(seed[0] - gx) * x_h_factor + abs(seed[1] - gy) * 4 + abs(seed[2] - gz))  # heuristic
-            move_cache.append(None)
-        seed_ids.append(i)
-    seed_nodes = [seed_ids[i] << _NODE_SHIFT
-                  | min(seed_depths.get(seed, 0) if i >= n_start_seeds else 0, _SIG_DEPTH_MASK) << _SIG_SHIFT
-                  for i, seed in enumerate(seeds)]
-    seed_groups = [0 if i < n_start_seeds else 1 + i - n_start_seeds for i in range(len(seeds))]
-    group_best_h: list[int] = [10 ** 9] * (1 + len(seeds) - n_start_seeds)
-    for node, group in zip(seed_nodes, seed_groups):
-        group_best_h[group] = min(group_best_h[group], h_list[node >> _NODE_SHIFT])
     goal_ids = {_pid(gc) for gc in goal_set}
 
     def node_str(node: int) -> str:
         return str((pos_list[node >> _NODE_SHIFT], node & _SNAP_MASK))
 
-    best = min(range(len(seeds)), key=lambda i: h_list[seed_ids[i]])  # the first seed of least heuristic
     best_node = seed_ids[best] << _NODE_SHIFT
     best_h: int = h_list[seed_ids[best]]
     group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
@@ -536,7 +517,15 @@ def _find_wire_path(
             getattr(block_index, "grid", None), _ASTAR_GRID == "check")
 
     search_started = time.perf_counter()
-    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(search_args, net_id, make_world, stagnation=stagnation, budget=budget)
+    # Most of a long search's expansions are its many states per cell (snapshots, signal depths): the first few of
+    # a cell almost always route as well. A search that fails that way searches again with all of them, unless
+    # it's a tight first try, whose failure only means ripping what's around the sink and trying again.
+    reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(
+        search_args, net_id, make_world, stagnation=stagnation, budget=budget, cell_cap=_ROUTE_CELL_STATES)
+    if reached is None and _ROUTE_CELL_STATES and stagnation < 0:
+        group_best_h[:] = initial_group_best_h
+        reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(
+            search_args, net_id, make_world, stagnation=stagnation, budget=budget)
     if reached is None and early_stop_reason is None and h_radius_pruned:
         # The open list ran dry only because the h-radius cull discarded detours (typically a
         # blocked approach close to the goal): search again without the cull.
@@ -636,10 +625,11 @@ def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
     last = _astar.LAST
     with open(_SEARCH_LOG, "a") as f:
         f.write(f"{net_id},{seed[0]},{seed[1]},{seed[2]},{goal[0]},{goal[1]},{goal[2]},{int(ok)},"
-                f"{(reason or '').split(' ')[0]},{last.get('exp', 0)},{last.get('pos', 0)},{seconds:.4f}\n")
+                f"{(reason or '').split(' ')[0]},{last.get('exp', 0)},{last.get('pos', 0)},{seconds:.4f},{last.get('pops', 0)},{last.get('reexp', 0)},{last.get('pruned', 0)},{last.get('seeds', 0)}\n")
 
 
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,
-                budget: int = 1):
+                budget: int = 1, cell_cap: int = 0):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
-    return _astar.search(*args, make_world(), h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget)
+    return _astar.search(*args, make_world(), h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget,
+                         cell_cap=cell_cap)

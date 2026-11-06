@@ -207,6 +207,8 @@ _MACRO_FANOUT = 2  # nets above this fanout are shared between instances, not gr
 _MACRO_MIN_CELLS = 8  # smallest repeated subcircuit worth a macro
 _MACRO_ROW_TILES = 0  # instances per array, sharing lanes; 0 = all instances of a pattern in one array
 _MACRO_BANK_COLUMNS = 4  # tiles per row in fixed two-row banks facing one lane plane
+_MACRO_MIN_COVERAGE = 0.5  # share of gates in repeats below which none become macros (floweypu: 22%, all layouts routed
+                           # worse than flat; the CPU these were built for: 90%, 2.6x faster)
 _MACRO_CHANNEL = 24  # Z kept clear past a long macro's input face
 _MACRO_EAST_ROOM = 20  # X past a bank stack's pin end where gates may go; the rest go on top
 _MACRO_HEADROOM = 32  # layers kept above the tallest macro
@@ -333,20 +335,24 @@ def main():
     set_long_edge_split(sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN) for c in component_list.components))
     spacing = {}
     if args.macros and not args.flat:
+        # Around RAM blocks, gates fill one region: banks there are wide plates that stack and wall gates in between,
+        # so each instance is its own tile, about a big gate's shape.
+        row_tiles, bank_columns = (1, 0) if rams else (_MACRO_ROW_TILES, _MACRO_BANK_COLUMNS)
+
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, SCHEMATICS_DIR,
-                               cache_dir=Path(args.macro_cache) / f"row{_MACRO_ROW_TILES}",
-                               io_lane_pins=_MACRO_ROW_TILES != 1)
+                               cache_dir=Path(args.macro_cache) / f"row{row_tiles}",
+                               io_lane_pins=row_tiles != 1)
 
         def report(cls, macro):
             log(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")
 
         component_list, macros, instances = extract_macros(component_list, build, _MACRO_FANOUT, _MACRO_MIN_CELLS,
-                                                           _MACRO_ROW_TILES,
-                                                           _MACRO_BANK_COLUMNS,
+                                                           row_tiles,
+                                                           bank_columns,
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
-                                                           on_class=report)
+                                                           on_class=report, min_coverage=_MACRO_MIN_COVERAGE)
         macros = {**macros, **rams}
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")

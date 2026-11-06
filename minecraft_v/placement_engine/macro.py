@@ -711,8 +711,13 @@ def _chains_within(cls: RepeatedClass) -> bool:
 
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
                    max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, min_instances: int = 2, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
+                   min_coverage: float = 0.0,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
-    """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances)."""
+    """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances).
+
+    min_coverage: below this share of the gates in repeats, nothing is replaced. Macros are obstacles the rest of the
+    wire has to go around; they pay for that only when they hold most of the design.
+    """
     macros: dict[str, Macro] = {}
     instances: list[Instance] = []
     new_components: list[Component] = []
@@ -723,6 +728,12 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
     # Small repeats route worse as macros than as gates.
     classes = [cls for cls in find_repeated(comp, max_fanout, min_cells) if len(cls.instances) >= min_instances
                and not _chains_within(cls)]
+    gates = sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM)
+                for c in comp.components)
+    covered = sum(len(cls.instances) * len(cls.cells) for cls in classes)
+    if classes and covered < min_coverage * gates:
+        log(f"[macro] repeats cover {covered} of {gates} gates, under {min_coverage:.0%}: none made")
+        return comp, {}, []
     for cls in classes:
         banked = bank_columns > 0 and len(cls.instances) >= 2 * bank_columns
         sub, ports = macro_netlist(cls, comp, back_unique=banked)

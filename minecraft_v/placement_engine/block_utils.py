@@ -31,9 +31,15 @@ def palette_writer(region: Region) -> Callable[[tuple[int, int, int], BlockState
     palette, blocks = region._Region__palette, region._Region__blocks
     ids = {block: i for i, block in reversed(list(enumerate(palette)))}
     known = len(palette)
+    # By object first: most writes are a few shared constants, and a BlockState hashes in Python. Holds what it saw.
+    by_object: dict[int, tuple[BlockState, int]] = {}
 
     def write(pos: tuple[int, int, int], block: BlockState) -> None:
         nonlocal known
+        hit = by_object.get(id(block))
+        if hit is not None and hit[0] is block:
+            blocks[pos] = hit[1]
+            return
         if len(palette) != known:  # written to directly since
             ids.update((b, i) for i, b in enumerate(palette[known:], known))
             known = len(palette)
@@ -42,6 +48,7 @@ def palette_writer(region: Region) -> Callable[[tuple[int, int, int], BlockState
             palette.append(block)
             i = ids[block] = known
             known += 1
+        by_object[id(block)] = (block, i)
         blocks[pos] = i
 
     return write

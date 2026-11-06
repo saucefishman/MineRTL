@@ -364,7 +364,8 @@ def _signal_returns(
         target: tuple[int, int, int],
         cut: tuple[int, int, int],
 ) -> bool:
-    """Whether signal from start reaches target through net_id's wire and repeaters, avoiding cut."""
+    """Whether signal from start reaches target through net_id's wire and repeaters, avoiding cut.
+    _astar.NetChecks.signal_returns is the compiled twin: change both."""
     def block_at(pos: tuple[int, int, int]) -> BlockState | None:
         try:
             return workspace[pos] if pos[1] >= 0 else None
@@ -443,8 +444,13 @@ def _place_repeaters_for_net(
         dust_owner: dict[tuple[int, int, int], str],
         net_id: str,
         ordered_paths: list[list[tuple[int, int, int]]],
+        pins: frozenset[tuple[int, int, int]] | None = None,
+        checks=None,
 ) -> None:
     """Walk each routed A* path linearly, placing repeaters as needed.
+
+    pins: gate pin cells; a path can also end at a waypoint, which a repeater may cover.
+    checks: an _astar.NetChecks over workspace's grid, whose signal_returns is _signal_returns compiled.
 
     Uses the ordered paths directly so wrap-around detours are measured at
     their true signal length, not the shorter adjacency-graph shortcut.
@@ -466,6 +472,8 @@ def _place_repeaters_for_net(
     }
 
     sinks = {path[-1] for path in ordered_paths}  # a later branch can run on through a sink's pin cell
+    if pins is not None:
+        sinks &= pins
 
     def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
         if j <= 0 or j >= len(path) - 1:
@@ -485,7 +493,8 @@ def _place_repeaters_for_net(
             return False  # turn after repeater
         if path[j] in branch_points:
             return False  # branch point — repeater drives only one output
-        if _signal_returns(workspace, dust_owner, net_id, path[j + 1], path[j - 1], path[j]):
+        if (checks.signal_returns(net_id, path[j + 1], path[j - 1], path[j]) if checks is not None
+                else _signal_returns(workspace, dust_owner, net_id, path[j + 1], path[j - 1], path[j])):
             return False  # wire past the repeater also touches its input: it would latch on
         return True
 
