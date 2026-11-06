@@ -1150,6 +1150,8 @@ cdef class World:
         cdef int d, dy, nx, ny, nz, vdy, vy
         cdef int o
         cdef unsigned int v
+        cdef uint16_t* w
+        cdef uint16_t g
         if not self.inb(x, y, z):
             return False
         v = self.base(x, y, z)
@@ -1164,6 +1166,22 @@ cdef class World:
         for d in range(4):
             for dy in range(-1, 2):
                 nx, ny, nz = x + HORIZ[d][0], y + dy, z + HORIZ[d][1]
+                w = self.gw(nx, ny, nz)
+                if w != NULL:  # the checks below off one grid word, as base(), owner() and efp() read it
+                    g = w[0]
+                    if g & F_INV:
+                        return False
+                    if has_exempt and nx == ex and ny == ey and nz == ez:
+                        continue
+                    if not g & (G_OWNED | F_TORCH | F_WIRE) or not self.inb(nx, ny, nz):
+                        continue  # no owner and no signal: nothing below can reject it
+                    o = self.owner_code(g, nx, ny, nz)
+                    if o >= 2:
+                        return False
+                    if (o == 0 and g & (F_TORCH | F_WIRE)
+                            and not (with_inv_fp and g & F_FP and not self.small_at(nx, ny, nz) & S_RELIEF)):
+                        return False
+                    continue
                 v = self.base(nx, ny, nz)
                 if v & F_INV:
                     return False
