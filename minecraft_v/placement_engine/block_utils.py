@@ -19,7 +19,8 @@ try:
 except ImportError:
     _signals = None  # not built: numpy does the same, slower
 
-_GZIP_CHUNK = 1 << 25
+_GZIP_CHUNK = 1 << 23
+_GZIP_LEVEL = 6  # 9 takes ten times as long for an 11% smaller file
 _GZIP_THREADS = 8
 
 Box = tuple[tuple[int, int, int], tuple[int, int, int]]  # lowest cell, one past the highest
@@ -75,7 +76,7 @@ def _gzip_threaded(data: memoryview, path: str) -> None:
     pieces = [data[i:i + _GZIP_CHUNK] for i in range(0, len(data), _GZIP_CHUNK)] or [data]
 
     def deflate(index: int) -> bytes:
-        c = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+        c = zlib.compressobj(_GZIP_LEVEL, zlib.DEFLATED, -zlib.MAX_WBITS)
         last = index == len(pieces) - 1
         return c.compress(pieces[index]) + c.flush(zlib.Z_FINISH if last else zlib.Z_SYNC_FLUSH)
 
