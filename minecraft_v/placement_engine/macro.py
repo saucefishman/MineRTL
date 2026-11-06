@@ -745,7 +745,8 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
             hidden_cells.update(instance.cell_map)
             instances.append(instance)
             new_components.append(Component(id=instance.component_id, type=ComponentType.CUSTOM, pins=macro.pins,
-                                            footprint=fp, metadata={"macro": name, **({"bank": True} if banked else {})}))
+                                            footprint=fp, metadata={"macro": name, "cells": len(row.instances) * len(cls.cells),
+                                                                       **({"bank": True} if banked else {})}))
             for pin in macro.pins:
                 pin_rows.append((instance.pin_net[pin.name], instance.component_id, pin.name, pin.direction))
     if not instances:

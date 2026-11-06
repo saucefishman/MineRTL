@@ -575,7 +575,8 @@ def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: boo
     fixed_box: banks stay put, and the gates stay out of this box around them.
     """
     n = netlist.n_gates
-    pinned = {i for i in range(n) if netlist.comps[i].metadata.get("bank")} if fixed_box is not None else set()
+    banks = [i for i in range(n) if netlist.comps[i].metadata.get("bank")]
+    pinned = set(_stacked(netlist.comps[:n], banks)) if fixed_box is not None else set()
     occ = _Occupancy(sizes if fixed_box is None else np.vstack([sizes, fixed_box[1]]))
     if fixed_box is not None:
         occ.add(n, tuple(int(v) for v in fixed_box[0]))
@@ -686,7 +687,7 @@ def _io_rows(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component], rou
             output_z = max(pos_all[i, 2] + netlist.comps[i].footprint.depth for i in blocks) + _SOUTH_PINS_OUTPUT_Z
             east = max(pos_all[i, 0] + netlist.comps[i].footprint.width for i in blocks) + _IO_COLUMN_CLEAR
             order = sorted(outputs, key=lambda i: pos_all[i, 0])
-            pitch = _south_pins_setting(n, _SOUTH_PINS_OUTPUT_PITCH, _SOUTH_PINS_OUTPUT_PITCH_LARGE)
+            pitch = _south_pins_setting(_cell_count(netlist.comps[:n]), _SOUTH_PINS_OUTPUT_PITCH, _SOUTH_PINS_OUTPUT_PITCH_LARGE)
             pos_all[order, 0] = east + pitch * np.arange(len(order))
     pos_all[outputs, 2] = output_z
 
@@ -706,6 +707,7 @@ _BANK_STACK_HEIGHT = 190  # worlds aren't tall enough for one stack of a big mem
 _BANK_COLUMN_GAP = 4
 _SOUTH_PINS_CLEAR = 24  # Z past a south_pins block's face, for the output row and wire to its pins
 _SOUTH_PINS_DENSITY = 0.15
+_SOUTH_PINS_MACRO_DENSITY = 0.5  # padded routed-macro volume / its share of the gate region
 _SOUTH_PINS_LARGE = 10000  # gates; at or above, a design has to fit a plot, with the tighter settings below
 _SOUTH_PINS_OUTPUT_PITCH = 4
 _SOUTH_PINS_OUTPUT_PITCH_LARGE = 2  # outputs differ in Y, so columns can be tight
@@ -718,6 +720,11 @@ def _south_pins_setting(gates: int, small: float | None, large: float) -> float 
     return large if gates >= _SOUTH_PINS_LARGE else small
 
 
+def _cell_count(comps: list[Component]) -> int:
+    """Gates in the flat design: a routed macro counts the cells it holds."""
+    return sum(c.metadata.get("cells", 1) for c in comps)
+
+
 _SOUTH_PINS_WIDTH = 0.35  # share of the block's width
 _SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
@@ -727,6 +734,14 @@ _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, again
 def _stretch_above(ys: np.ndarray, floor: float, factor: float) -> np.ndarray:
     """Scale heights above floor by factor, to whole blocks; lower ones stay."""
     return np.where(ys > floor, np.rint(floor + (ys - floor) * factor), ys)
+
+
+def _stacked(gates: list[Component], banks: list[int]) -> list[int]:
+    """The banks that go in the stack. RAM blocks set the layout when there are any: routed banks stacked on them would
+    tower over the world, so those go with the gates."""
+    if any(gates[i].metadata.get("south_pins") for i in banks):
+        return [i for i in banks if gates[i].metadata.get("south_pins")]
+    return banks
 
 
 def _stack_banks(gates: list[Component], banks: list[int], channel: int) -> tuple[dict[int, np.ndarray], float, float]:
@@ -755,6 +770,7 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
 
     The domain is the box's footprint plus east_room in X, and as tall as the gates need.
     """
+    banks = _stacked(gates, banks)
     depth = max(gates[i].footprint.depth for i in banks)
     fixed, width, y = _stack_banks(gates, banks, channel)
     free = [i for i in range(len(gates)) if i not in fixed]
@@ -763,8 +779,14 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
         # Every pin is on the south face and a net can't cross a block: all gates go south, past room for outputs and wire.
         box = (np.zeros(3), np.array([width, y, channel + depth + _SOUTH_PINS_CLEAR]))
         # Gates in the middle of the block's width, not stretched along it: long thin bands make long nets.
-        gate_width = width * _south_pins_setting(len(free), _SOUTH_PINS_WIDTH, _SOUTH_PINS_WIDTH_LARGE)
-        gate_depth = float(np.prod(sizes[free], axis=1).sum()) / _SOUTH_PINS_DENSITY / (gate_width * y)
+        cells = _cell_count([gates[i] for i in free])
+        gate_width = width * _south_pins_setting(cells, _SOUTH_PINS_WIDTH, _SOUTH_PINS_WIDTH_LARGE)
+        # Routed banks are already dense inside: only the room around their faces is left for wire.
+        routed = [i for i in free if gates[i].type == ComponentType.CUSTOM]
+        loose = [i for i in free if gates[i].type != ComponentType.CUSTOM]
+        volume = (float(np.prod(sizes[loose], axis=1).sum()) / _SOUTH_PINS_DENSITY
+                  + float(np.prod(sizes[routed], axis=1).sum()) / _SOUTH_PINS_MACRO_DENSITY)
+        gate_depth = volume / (gate_width * y)
         gate_shift = (width - gate_width) // 2
         repel = (np.zeros(3), np.array([gate_width, y, box[1][2]]))
         dims = np.array([gate_width, y, box[1][2] + gate_depth + float(sizes[free, 2].max())])
@@ -778,7 +800,7 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     held = {i: origin - np.array([gate_shift, 0.0, 0.0]) for i, origin in fixed.items()}
     pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, held, repel))
     pos[free, 0] += gate_shift
-    channel_z = _south_pins_setting(len(free), None, _SOUTH_PINS_CHANNEL_LARGE)
+    channel_z = _south_pins_setting(_cell_count([gates[i] for i in free]), None, _SOUTH_PINS_CHANNEL_LARGE)
     if all(gates[i].metadata.get("south_pins") for i in banks) and channel_z is not None:
         # The block's charge presses gates to the far end of the domain, leaving a void: close it to the channel wanted.
         # Moved as one, so global placement's density and legalization time don't change, as a shorter domain's would.
