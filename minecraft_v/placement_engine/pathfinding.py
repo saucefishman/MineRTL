@@ -371,7 +371,8 @@ def _find_wire_path(
 
     stagnation: this search's stagnation limit (negative: _ROUTE_STAGNATION). Kernel only.
 
-    budget: multiplies the search's stagnation, position and expansion limits. Kernel only.
+    budget: multiplies the search's stagnation, position and expansion limits, and the f-cap: a walled-in short net's
+    way round can be many times its straight distance. Kernel only.
 
     seed_depths: signal depth (_signal_depths) of tree seeds; missing seeds count as 0.
 
@@ -498,7 +499,7 @@ def _find_wire_path(
 
     best_node = seed_ids[best] << _NODE_SHIFT
     best_h: int = h_list[seed_ids[best]]
-    group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR for gh in group_best_h]
+    group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR * budget for gh in group_best_h]
     initial_group_best_h = list(group_best_h)
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
                    weight, time_limit, pos_list, h_list, None, congestion_cost)

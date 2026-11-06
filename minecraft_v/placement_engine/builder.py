@@ -1474,9 +1474,9 @@ class _GreedyRouter:
                     where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
                     wider = [] if where is None or job.key in escalated or not rip_blockers else \
                         self.blockers(where, job.key, keys, _ESCALATE_RADIUS)[:_ESCALATE_MAX]
-                    # A search that ran out of f-cap saw everything under it: more expansions can't change that.
+                    # The wide retry raises the f-cap too, so a walled-in net that ran out of it can still get round.
                     if wider or (where is not None and job.key not in escalated and rip_blockers
-                                 and not isinstance(e, LayConflict) and "f-cap" not in str(e)):
+                                 and not isinstance(e, LayConflict)):
                         escalated.add(job.key)
                         requeued.add(job.key)
                         self.wide_budget.add(job.key)
