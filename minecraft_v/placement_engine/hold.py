@@ -22,8 +22,8 @@ from litemapy import BlockState, Region
 from minecraft_v.cell_library import SCHEMATIC_MAP
 from .block_utils import Box
 from .ir import ComponentList, ComponentType
-from .verify import (Excluding, HiddenBoxes, Violation, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH,
-                     _WALL_TORCH, _World, _signals, cell_byte, signal_grid)
+from .verify import (Excluding, HiddenBoxes, Violation, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH, _WEAK,
+                     _World, _signals, cell_byte, signal_grid)
 
 Pos = tuple[int, int, int]
 _SEQUENTIAL = (ComponentType.DFF, ComponentType.DFFE, ComponentType.DLATCH)
@@ -630,23 +630,21 @@ class _KernelTiming(_HoldTiming):
         return list(dict.fromkeys(cells[:-1]))
 
 
-def _powers_torch_below(world: _World, p: Pos) -> bool:
-    """Whether dust at p drives a torch on the block under it, as a powered -4 drop does. A repeater wouldn't power that block."""
+def _powers_below(world: _World, p: Pos) -> bool:
+    """Whether dust at p drives something through the block under it: a torch on it, as a powered -4 drop has, or a
+    repeater reading it, as a branch down a level can. A repeater wouldn't power that block."""
     x, y, z = p
     if world.kind((x, y - 2, z)) == _TORCH:
         return True
-    for (dx, dz), facing in _DELTA_TO_FACING.items():
-        q = (x + dx, y - 1, z + dz)
-        if world.kind(q) == _WALL_TORCH and world.block(q)["facing"] == facing:
-            return True
-    return False
+    below = (x, y - 1, z)
+    return world.kind(below) == _OPAQUE and bool(world.successors((below, _WEAK)))
 
 
 def _straight_run(world: _World, p: Pos) -> tuple[Pos, Pos] | None:
     """A level dust cell with wire on exactly two opposite sides and nothing else touching: (one side, the other)."""
     x, y, z = p
     links = world.dust_links(p)
-    if len(links) > 2 or _powers_torch_below(world, p):
+    if len(links) > 2 or _powers_below(world, p):
         return None
     ends = []
     for dx, dz in _HORIZ_DIRS:
@@ -691,7 +689,7 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
             continue
         upstream = cells[i + 1]  # cells run back toward the source
         run = _straight_run(world, p)
-        if run is None or upstream not in run or any(q in terminals for q in run):
+        if run is None or upstream not in run or any(q in terminals for q in (*run, (p[0], p[1] - 1, p[2]))):
             continue
         delta = (upstream[0] - p[0], upstream[2] - p[2])
         ticks = min(_MAX_DELAY, need - added)

@@ -452,6 +452,26 @@ def test_hold_keeps_dust_that_powers_a_torch_below():
     assert set(_straight_run(world, (2, 3, 4))) == {(1, 3, 4), (3, 3, 4)}
 
 
+def test_hold_keeps_dust_whose_block_below_feeds_a_repeater():
+    # A branch can leave a straight run through its floor: the dust weakly powers the block, a repeater beside it
+    # reads that. A repeater in the dust's place doesn't power the block, and the branch goes dark (memread, seed 0).
+    from litemapy import BlockState, Region
+
+    from minecraft_v.placement_engine.hold import _straight_run
+    from minecraft_v.placement_engine.verify import _World
+
+    region = Region(0, 0, 0, 6, 4, 8)
+    for z in (1, 4):
+        for x in (2, 3, 4):
+            region[x, 2, z] = BlockState("minecraft:redstone_wire")
+        region[3, 1, z] = BlockState("minecraft:cyan_wool")
+    region[3, 1, 2] = BlockState("minecraft:repeater", facing="north")  # reads the wool under (3, 2, 1)
+    region[3, 1, 5] = BlockState("minecraft:repeater", facing="south")  # faces away from the wool under (3, 2, 4)
+    world = _World(region, frozenset(), frozenset())
+    assert _straight_run(world, (3, 2, 1)) is None
+    assert set(_straight_run(world, (3, 2, 4))) == {(2, 2, 4), (4, 2, 4)}
+
+
 def test_world_successors_follow_a_changed_block():
     from minecraft_v.placement_engine.verify import _World
     region = Region(0, 0, 0, 5, 3, 3)
