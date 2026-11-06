@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable
 
@@ -633,7 +634,8 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-_SEARCH_LOG: str | None = None  # a CSV path: one line per search (net, seed, goal, result, expansions, seconds)
+_TIGHT_POSITIONS = int(os.environ.get("MINECRAFT_V_TIGHT_POSITIONS", 0))  # see _run_search; 0: _ROUTE_MAX_NODES
+_SEARCH_LOG: str | None = os.environ.get("MINECRAFT_V_SEARCH_LOG") or None  # a CSV path: one line per search (net, seed, goal, result, expansions, seconds)
 
 
 def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
@@ -646,5 +648,8 @@ def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,
                 budget: int = 1, cell_cap: int = 0):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
+    # A tight first try (stagnation set) gives up sooner on positions too: past a few thousand it almost never succeeds,
+    # and a failure there only means ripping what's around the sink and trying again.
     return _astar.search(*args, make_world(), h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget,
+                         position_cap=_TIGHT_POSITIONS if stagnation >= 0 else 0,
                          cell_cap=cell_cap)
