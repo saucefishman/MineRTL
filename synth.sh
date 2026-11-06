@@ -239,8 +239,6 @@ techmap -map \"${here}/techmap/dffe_pn_decompose.v\"
 opt_clean
 ${abc_step}"
 
-# The same sources, script and yosys give the same netlist: keep it, keyed by all three. Sources that pull in other
-# files (`include, $readmem) aren't cached, as those files aren't in the key.
 # Names in the netlist carry the paths yosys read files by and, for $write cells, a memory address. Without them the
 # netlist is the same from any checkout and any run, and so is the build, as names feed hashing.
 unplace() {

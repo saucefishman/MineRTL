@@ -212,12 +212,8 @@ class _BlockIndex:
             bit = 1 << i
             if was & bit and not now & bit:
                 cells.discard(pos)
-                if grid is not None:
-                    grid.put(pos, self.grid_bits[i], False)
             elif now & bit and not was & bit:
                 cells.add(pos)
-                if grid is not None:
-                    grid.put(pos, self.grid_bits[i], True)
 
 
 class IndexedWorkspace:
@@ -520,10 +516,12 @@ def _find_wire_path(
     search_started = time.perf_counter()
     # Most of a long search's expansions are its many states per cell (snapshots, signal depths): the first few of
     # a cell almost always route as well. A search that fails that way searches again with all of them, unless
-    # it's a tight first try, whose failure only means ripping what's around the sink and trying again.
+    # it's a tight first try, whose failure only means ripping what's around the sink and trying again, or it ran
+    # out of time, which a second search would only spend again.
     reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(
         search_args, net_id, make_world, stagnation=stagnation, budget=budget, cell_cap=_ROUTE_CELL_STATES)
-    if reached is None and _ROUTE_CELL_STATES and stagnation < 0:
+    timed_out = early_stop_reason is not None and early_stop_reason.startswith("timeout")
+    if reached is None and _ROUTE_CELL_STATES and stagnation < 0 and not timed_out:
         group_best_h[:] = initial_group_best_h
         reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(
             search_args, net_id, make_world, stagnation=stagnation, budget=budget)

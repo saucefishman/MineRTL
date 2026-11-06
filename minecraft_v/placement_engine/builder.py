@@ -1222,6 +1222,7 @@ class _GreedyRouter:
                         # A waypoint is only a way to go: one over the net's own wire can't be laid, so go without it.
                         if dst not in leads and dst not in vias:
                             raise
+                        debug(f"[wire] {job.key}: dropped waypoint {dst}, can't be laid ({e})")
                         rollback(rec, job.key, mark)
                         path = None  # only a hint
                         break
