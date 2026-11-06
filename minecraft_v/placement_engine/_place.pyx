@@ -206,30 +206,24 @@ cdef extern from *:
                 }
             });
         }
-        // Sum of max(held - capacity, 0), in fixed chunks so the total doesn't depend on the thread count.
-        double overflow(const double* held, const double* capacity, size_t cells) const {
-            const int chunks = 64;
-            double part[chunks];
-            parallel(chunks, [&](int c0, int c1) {
-                for (int c = c0; c < c1; ++c) {
-                    size_t a = cells * c / chunks, b = cells * (c + 1) / chunks;
-                    double sum = 0;
-                    for (size_t i = a; i < b; ++i) sum += std::max(held[i] - capacity[i], 0.0);
-                    part[c] = sum;
-                }
-            });
-            double total = 0;
-            for (int c = 0; c < chunks; ++c) total += part[c];
-            return total;
-        }
-        void axpb(double* x, const double* a, const double* b, size_t cells) const {
+        // out = max(held - capacity, 0), as numpy's two steps.
+        void excess(const double* held, const double* capacity, double* out, size_t cells) const {
             parallel(64, [&](int c0, int c1) {
                 size_t lo = cells * c0 / 64, hi = cells * c1 / 64;
-                for (size_t i = lo; i < hi; ++i) x[i] = x[i] * a[i] + b[i];
+                for (size_t i = lo; i < hi; ++i) { double d = held[i] - capacity[i]; out[i] = d < 0.0 ? 0.0 : d; }
             });
         }
-        void gather(int n, const double* lo, const double* eff, const double* scale, const int* span,
-                    const double* f0, const double* f1, const double* f2, double* force) const {
+        // x = (x * s + f) * inv, rounding as numpy's three in-place steps (built with -ffp-contract=off).
+        void scale_shift(double* x, double s, const double* f, const double* inv, size_t cells) const {
+            parallel(64, [&](int c0, int c1) {
+                size_t lo = cells * c0 / 64, hi = cells * c1 / 64;
+                for (size_t i = lo; i < hi; ++i) { double t = x[i] * s; t = t + f[i]; x[i] = t * inv[i]; }
+            });
+        }
+        // Per box, from offset[k], one entry per bin it touches (x, then y, then z): its weight and the three fields
+        // there. Weights are the deposit's, so numpy can sum weight * field per box in its own order.
+        void values(int n, const double* lo, const double* eff, const double* scale, const int* span, const int64_t* offset,
+                    const double* f0, const double* f1, const double* f2, double* w, double* v0, double* v1, double* v2) const {
             parallel(n, [&](int k0, int k1) {
                 int bx[64], by[64], bz[64];
                 double lx[64], ly[64], lz[64];
@@ -238,17 +232,16 @@ cdef extern from *:
                     axis_bins(l[0], e[0], s[0], 0, bx, lx);
                     axis_bins(l[1], e[1], s[1], 1, by, ly);
                     axis_bins(l[2], e[2], s[2], 2, bz, lz);
-                    double g0 = 0, g1 = 0, g2 = 0;
+                    int64_t at = offset[k];
                     for (int i = 0; i < s[0]; ++i) for (int j = 0; j < s[1]; ++j) {
                         double lxy = lx[i] * ly[j];
                         size_t base = ((size_t)bx[i] * ny + by[j]) * nz;
-                        for (int q = 0; q < s[2]; ++q) {
-                            double w = lxy * lz[q] * scale[k];
+                        for (int q = 0; q < s[2]; ++q, ++at) {
                             size_t c = base + bz[q];
-                            g0 += w * f0[c]; g1 += w * f1[c]; g2 += w * f2[c];
+                            w[at] = lxy * lz[q] * scale[k];
+                            v0[at] = f0[c]; v1[at] = f1[c]; v2[at] = f2[c];
                         }
                     }
-                    force[3 * k] = g0; force[3 * k + 1] = g1; force[3 * k + 2] = g2;
                 }
             });
         }
@@ -273,8 +266,12 @@ cdef extern from *:
             for (auto& th : pool) th.join();
         }
         int n_nets() const { return (int)net_start.size() - 1; }
+        // As _Netlist.wa_gradient, rounding step for step: per-net sums and per-component sums run in pin order (as
+        // np.bincount), and std::exp is the libm exp numpy uses.
+        std::vector<double> pin_g;  // per pin, axis, sign
+        std::vector<double> comp_sum;
         void gradient(const double* pos, int m, const double* gamma, double* grad) {
-            pin_grad.assign(pin_comp.size() * 3, 0.0);
+            pin_g.assign(pin_comp.size() * 6, 0.0);
             parallel(n_nets(), [&](int a0, int a1) {
                 std::vector<double> x, e;
                 for (int net = a0; net < a1; ++net) {
@@ -283,24 +280,41 @@ cdef extern from *:
                     x.resize(k); e.resize(k);
                     for (int a = 0; a < 3; ++a) {
                         for (int64_t q = p0; q < p1; ++q) x[q - p0] = pos[3 * pin_comp[q] + a] + pin_off[3 * q + a];
-                        for (double sign : {1.0, -1.0}) {
-                            double top = -1e300;
-                            for (size_t i = 0; i < k; ++i) top = std::max(top, sign * x[i]);
+                        for (int si = 0; si < 2; ++si) {
+                            const double sign = si == 0 ? 1.0 : -1.0;
+                            double top = sign * x[0];
+                            for (size_t i = 1; i < k; ++i) top = std::max(top, sign * x[i]);
                             double s0 = 0, s1 = 0;
                             for (size_t i = 0; i < k; ++i) {
-                                e[i] = std::exp((sign * x[i] - top) / gamma[a]);
-                                s0 += e[i]; s1 += x[i] * e[i];
+                                double w = sign * x[i];
+                                w = w - top;
+                                w = w / gamma[a];
+                                e[i] = std::exp(w);
+                                s0 = s0 + e[i];
                             }
+                            for (size_t i = 0; i < k; ++i) { double xe = x[i] * e[i]; s1 = s1 + xe; }
                             double mean = s1 / s0;
-                            for (size_t i = 0; i < k; ++i)
-                                pin_grad[3 * (p0 + i) + a] += sign * weights[a] * (1 + sign * (x[i] - mean) / gamma[a]) * e[i] / s0;
+                            for (size_t i = 0; i < k; ++i) {
+                                double t = x[i] - mean;
+                                t = sign * t;
+                                t = t / gamma[a];
+                                t = 1 + t;
+                                t = t * e[i];
+                                pin_g[6 * (p0 + i) + 2 * a + si] = t / s0;
+                            }
                         }
                     }
                 }
             });
-            std::fill(grad, grad + 3 * (size_t)m, 0.0);
+            comp_sum.assign((size_t)m * 6, 0.0);
             for (size_t q = 0; q < pin_comp.size(); ++q)
-                for (int a = 0; a < 3; ++a) grad[3 * pin_comp[q] + a] += pin_grad[3 * q + a];
+                for (int j = 0; j < 6; ++j) comp_sum[6 * pin_comp[q] + j] += pin_g[6 * q + j];
+            for (int c = 0; c < m; ++c)
+                for (int a = 0; a < 3; ++a) {
+                    double plus = weights[a] * comp_sum[6 * c + 2 * a];
+                    double minus = (-weights[a]) * comp_sum[6 * c + 2 * a + 1];
+                    grad[3 * c + a] = plus + minus;
+                }
         }
         double hpwl(const double* pos) {
             const int chunks = 64;
@@ -391,10 +405,10 @@ cdef extern from *:
         double h[3]
         void deposit(int, const double*, const double*, const double*, const int*, double*) nogil
         void fields(const double*, double*, double*, double*) nogil
-        double overflow(const double*, const double*, size_t) nogil
-        void axpb(double*, const double*, const double*, size_t) nogil
-        void gather(int, const double*, const double*, const double*, const int*,
-                    const double*, const double*, const double*, double*) nogil
+        void scale_shift(double*, double, const double*, const double*, size_t) nogil
+        void excess(const double*, const double*, double*, size_t) nogil
+        void values(int, const double*, const double*, const double*, const int*, const int64_t*,
+                    const double*, const double*, const double*, double*, double*, double*, double*) nogil
     cdef cppclass WireKernel:
         vector[int64_t] pin_comp, net_start
         vector[double] pin_off, weights
@@ -510,6 +524,8 @@ cdef class Field:
     cdef double[::1] scale
     cdef int[:, ::1] span
     cdef double[:, :, ::1] f0, f1, f2
+    cdef public object offset
+    cdef public int64_t total
 
     def __init__(self, shape, h, eff, scale, span, int threads):
         self.k.nx, self.k.ny, self.k.nz = int(shape[0]), int(shape[1]), int(shape[2])
@@ -520,6 +536,9 @@ cdef class Field:
         self.span = np.ascontiguousarray(span, dtype=np.int32)
         if np.asarray(self.span).max(initial=0) > 64:
             raise ValueError("a box spans more than 64 bins")
+        per_box = np.prod(np.asarray(self.span, dtype=np.int64), axis=1)
+        self.offset = np.r_[0, np.cumsum(per_box)[:-1]].astype(np.int64)
+        self.total = int(per_box.sum())
         self.f0 = np.empty(tuple(shape))
         self.f1 = np.empty(tuple(shape))
         self.f2 = np.empty(tuple(shape))
@@ -533,34 +552,38 @@ cdef class Field:
             self.k.deposit(l.shape[0], &l[0, 0], &self.eff[0, 0], &self.scale[0], &self.span[0, 0], &held[0, 0, 0])
         return out
 
-    def gather(self, lo, phi):
-        """Force on each box from potential phi."""
+    def values(self, lo, phi):
+        """Per box, the weights of the bins it touches and the field (-grad phi) along each axis there, flat, box after
+        box; box k's entries start at offset[k]."""
         cdef double[:, ::1] l = np.ascontiguousarray(lo, dtype=np.float64)
         cdef double[:, :, ::1] p = np.ascontiguousarray(phi, dtype=np.float64)
-        out = np.empty((l.shape[0], 3))
-        cdef double[:, ::1] force = out
+        cdef int64_t[::1] off = self.offset
+        cdef int64_t total = self.total
+        w, v0, v1, v2 = (np.empty(total) for _ in range(4))
+        cdef double[::1] wv = w, a = v0, b = v1, c = v2
         with nogil:
             self.k.fields(&p[0, 0, 0], &self.f0[0, 0, 0], &self.f1[0, 0, 0], &self.f2[0, 0, 0])
-            self.k.gather(l.shape[0], &l[0, 0], &self.eff[0, 0], &self.scale[0], &self.span[0, 0],
-                          &self.f0[0, 0, 0], &self.f1[0, 0, 0], &self.f2[0, 0, 0], &force[0, 0])
-        return out
+            self.k.values(l.shape[0], &l[0, 0], &self.eff[0, 0], &self.scale[0], &self.span[0, 0], &off[0],
+                          &self.f0[0, 0, 0], &self.f1[0, 0, 0], &self.f2[0, 0, 0], &wv[0], &a[0], &b[0], &c[0])
+        return w, (v0, v1, v2)
 
-    def overflow(self, held, capacity):
-        """Charge over capacity, summed over bins."""
+    def excess(self, held, capacity):
+        """max(held - capacity, 0) per bin."""
         cdef double[:, :, ::1] h = held
         cdef double[:, :, ::1] c = capacity
-        cdef double out
+        out = np.empty_like(held)
+        cdef double[:, :, ::1] o = out
         with nogil:
-            out = self.k.overflow(&h[0, 0, 0], &c[0, 0, 0], <size_t>(self.k.nx * self.k.ny * self.k.nz))
+            self.k.excess(&h[0, 0, 0], &c[0, 0, 0], &o[0, 0, 0], <size_t>(self.k.nx * self.k.ny * self.k.nz))
         return out
 
-    def axpb(self, x, a, b):
-        """x = x * a + b, in place."""
+    def scale_shift(self, x, double s, f, inv):
+        """x = (x * s + f) * inv, in place, exactly as numpy's in-place steps."""
         cdef double[:, :, ::1] xv = x
-        cdef double[:, :, ::1] av = a
-        cdef double[:, :, ::1] bv = b
+        cdef double[:, :, ::1] fv = f
+        cdef double[:, :, ::1] iv = inv
         with nogil:
-            self.k.axpb(&xv[0, 0, 0], &av[0, 0, 0], &bv[0, 0, 0], <size_t>(self.k.nx * self.k.ny * self.k.nz))
+            self.k.scale_shift(&xv[0, 0, 0], s, &fv[0, 0, 0], &iv[0, 0, 0], <size_t>(self.k.nx * self.k.ny * self.k.nz))
 
 
 cdef class Wire:
@@ -589,3 +612,39 @@ cdef class Wire:
         with nogil:
             out = self.k.hpwl(&p[0, 0])
         return out
+
+
+def mirror(double[:, ::1] pos, pin_comp, pin_offset, net_start, comp_nets, comp_net_start, comp_pins, comp_pin_start,
+           widths):
+    """poisson._mirror_pass's choices: per gate (widths[i] > 0 to try it), 1 if mirroring it in X lowers HPWL, given the
+    gates before it as already decided."""
+    cdef Nets nets
+    cdef vector[int64_t] pins = np.asarray(comp_pins, dtype=np.int64).tolist()
+    cdef vector[int64_t] pin_start = np.asarray(comp_pin_start, dtype=np.int64).tolist()
+    cdef vector[int64_t] width = np.asarray(widths, dtype=np.int64).tolist()
+    cdef int n = width.size()
+    out = np.zeros(n, dtype=np.int8)
+    cdef signed char[::1] flags = out
+    cdef int i
+    cdef int64_t k, q
+    cdef double before
+    nets.pin_comp = np.asarray(pin_comp, dtype=np.int64).tolist()
+    nets.net_start = np.asarray(net_start, dtype=np.int64).tolist()
+    nets.pin_off = np.asarray(pin_offset, dtype=np.int64).ravel().tolist()
+    nets.comp_nets = np.asarray(comp_nets, dtype=np.int64).tolist()
+    nets.comp_net_start = np.asarray(comp_net_start, dtype=np.int64).tolist()
+    nets.pos = &pos[0, 0]
+    for i in range(n):
+        if width[i] < 2:
+            continue
+        before = nets.of(i)
+        for k in range(pin_start[i], pin_start[i + 1]):
+            q = pins[k]
+            nets.pin_off[3 * q] = width[i] - 1 - nets.pin_off[3 * q]
+        if nets.of(i) < before - 1e-9:
+            flags[i] = 1
+        else:
+            for k in range(pin_start[i], pin_start[i + 1]):
+                q = pins[k]
+                nets.pin_off[3 * q] = width[i] - 1 - nets.pin_off[3 * q]
+    return out

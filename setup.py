@@ -18,7 +18,7 @@ setup(
             "minecraft_v.placement_engine._place",
             ["minecraft_v/placement_engine/_place.pyx"],
             language="c++",
-            extra_compile_args=["-O3", "-std=c++17"],
+            extra_compile_args=["-O3", "-std=c++17", "-ffp-contract=off"],  # rounds as numpy does, step by step
         )],
         compiler_directives={"language_level": 3, "boundscheck": False, "wraparound": False,
                              "cdivision": True, "initializedcheck": False},

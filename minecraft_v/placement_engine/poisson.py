@@ -46,7 +46,7 @@ _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
 _REFINE_PASSES = 2  # a fixed amount of work, so a build is the same every run (on floweypu: 4s each, a third gains 0.1%)
 _REFINE_POPS = 60
-_FFT_WORKERS = 4             # threads for the Poisson solve's transforms
+_FFT_WORKERS = 4             # threads for the Poisson solve's transforms; the result depends on it, so placements do
 _FIELD_THREADS = 8           # threads for the charge deposit and force gather
 _STATUS_EVERY = 50           # gates between progress line updates
 _IO_COLUMN_CLEAR = 4         # a gate this close in X is in an IO column's way: nearer, a pin lands in the
@@ -141,7 +141,7 @@ class _Field:
         self._solve: tuple[np.ndarray, np.ndarray, np.ndarray | float] | None = None  # see _solver
         # The C++ deposit and gather take boxes in deposit order: group after group, so bins sum in numpy's order.
         self.kernel = None
-        self._fused: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._fused: tuple[np.ndarray, np.ndarray] | None = None  # capacity and fixed charge's transform, full grids
         if _place is not None and len(sizes) and int(spans.max()) <= 64:
             self.order = np.concatenate([members for members, _ in self.groups])
             self.kernel = _place.Field(self.shape, self.h, self.eff[self.order], self.scale[self.order],
@@ -233,19 +233,27 @@ class _Field:
         return fft.idctn(coeff, type=2, norm="ortho", workers=_FFT_WORKERS), overflow
 
     def _forces_kernel(self, pos: np.ndarray) -> tuple[np.ndarray, float]:
+        """forces() with the deposit, field and weights from the C++ kernel; every float comes out the same."""
         lo = pos[self.order]
         held = self.kernel.deposit(lo)
+        capacity, inverse, fixed = self._solver()
         if self._fused is None:
-            capacity, inverse, fixed = self._solver()
             self._fused = (np.array(np.broadcast_to(capacity, self.shape), dtype=np.float64),
-                           inverse / float(np.prod(self.h)), np.array(np.broadcast_to(fixed * inverse, self.shape), dtype=np.float64))
-        capacity, scale, shift = self._fused
-        overflow = self.kernel.overflow(held, capacity) / float(self.charge.sum())
+                           np.array(np.broadcast_to(fixed, self.shape), dtype=np.float64))
+        overflow = float(self.kernel.excess(held, self._fused[0]).sum() / self.charge.sum())
         coeff = fft.dctn(held, type=2, norm="ortho", workers=_FFT_WORKERS, overwrite_x=True)
-        self.kernel.axpb(coeff, scale, shift)  # (coeff / bin volume + fixed) / eigenvalue, as _potential
+        self.kernel.scale_shift(coeff, 1.0 / float(np.prod(self.h)), self._fused[1], inverse)  # as _potential
         phi = fft.idctn(coeff, type=2, norm="ortho", workers=_FFT_WORKERS, overwrite_x=True)
+        weight, fields = self.kernel.values(lo, phi)
         force = np.empty_like(pos)
-        force[self.order] = self.kernel.gather(lo, phi)
+        start = 0
+        for members, span in self.groups:
+            k = span[0] * span[1] * span[2]
+            end = start + len(members) * k
+            w = weight[start:end].reshape(len(members), k)
+            for a in range(3):
+                force[members, a] = np.einsum("nk,nk->n", w, fields[a][start:end].reshape(len(members), k))
+            start = end
         return force, overflow
 
 
@@ -422,7 +430,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     wire_kernel = _place.Wire(netlist.pin_comp, netlist.pin_offset, np.r_[netlist.net_start, len(netlist.pin_net)],
                               _WEIGHTS, _FIELD_THREADS) if _place is not None and netlist.n_nets else None
     wa_gradient = wire_kernel.gradient if wire_kernel is not None else netlist.wa_gradient
-    hpwl_of = wire_kernel.hpwl if wire_kernel is not None else netlist.hpwl
+    hpwl_of = netlist.hpwl  # numpy's pairwise sum; cheap next to the rest
 
     rng = np.random.default_rng(seed)
     pos = np.zeros((m, 3))
@@ -447,25 +455,27 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     it = 0
     max_move = _MAX_STEP_BINS * field.h
     t0 = time.monotonic()
+    lo_free, hi_free, degree_free = lo[free], hi[free], netlist.degree[free, None]
     for it in range(_MAX_ITERS):
         status(f"global placement, iteration {it + 1}, overflow {overflow:.2f}")
-        force, overflow = field.forces(v[free])
+        v_free = v[free]
+        force, overflow = field.forces(v_free)
         gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
         wire = wa_gradient(origins(v), gamma)[free]
         if lam is None:
             lam = np.abs(wire).sum() / max(np.abs(force).sum(), 1e-9)
-        g = (wire - lam * force) / np.maximum(1.0, netlist.degree[free, None] + lam * field.charge[:, None])
+        g = (wire - lam * force) / np.maximum(1.0, degree_free + lam * field.charge[:, None])
         if prev_g is not None:
-            dv, dg = v[free] - prev_v, g - prev_g
+            dv, dg = v_free - prev_v, g - prev_g
             step = np.linalg.norm(dv) / max(np.linalg.norm(dg), 1e-12)
-        prev_v, prev_g = v[free].copy(), g
+        prev_v, prev_g = v_free, g
         move = step * g
         worst = (np.abs(move) / max_move).max()
         if worst > 1:
             move = move / worst
-        new = np.clip(v[free] - move, lo[free], hi[free])
+        new = np.clip(v_free - move, lo_free, hi_free)
         a_next = (1 + math.sqrt(1 + 4 * a * a)) / 2
-        v[free] = np.clip(new + (a - 1) / a_next * (new - u[free]), lo[free], hi[free])
+        v[free] = np.clip(new + (a - 1) / a_next * (new - u[free]), lo_free, hi_free)
         u[free] = new
         a = a_next
 
@@ -639,6 +649,11 @@ class _NetCost:
         self.comp_pins = self._pins_by_comp(netlist)
         self._gather: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
+    def nets_csr(self) -> tuple[np.ndarray, np.ndarray]:
+        """Every component's nets, flat, and where each component's start."""
+        return (np.array([ni for nets in self.comp_nets for ni in nets], dtype=np.int64),
+                np.cumsum([0] + [len(nets) for nets in self.comp_nets]))
+
     @staticmethod
     def _pins_by_comp(netlist: _Netlist) -> list[np.ndarray]:
         order = np.argsort(netlist.pin_comp, kind="stable")
@@ -707,14 +722,13 @@ def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: boo
         if i not in pinned:
             occ.add(i, tuple(int(v) for v in pos_all[i]))
     cost = _NetCost(netlist, pos_all)
-    if isinstance(occ, _Occupancy) or not (pos_all.dtype == np.float64 and pos_all.flags.c_contiguous):
+    if isinstance(occ, _Occupancy) or not (pos_all.dtype == np.float64 and pos_all.flags.c_contiguous) \
+            or not np.array_equal(np.floor(cost.pin_offset), cost.pin_offset):
         _refine_py(netlist, pos_all, flat, fixed_box, pinned, occ, cost)
         return
     skip = np.array([i in pinned or (fixed_box is not None and netlist.comps[i].type == ComponentType.CUSTOM)
                      for i in range(n)], dtype=np.int8)
-    comp_net_start = np.cumsum([0] + [len(nets) for nets in cost.comp_nets])
-    comp_nets = np.array([ni for nets in cost.comp_nets for ni in nets], dtype=np.int64)
-    _place.refine(occ, pos_all, netlist.pin_comp, cost.pin_offset, cost.net_start, comp_nets, comp_net_start,
+    _place.refine(occ, pos_all, netlist.pin_comp, cost.pin_offset, cost.net_start, *cost.nets_csr(),
                   skip, flat, _REFINE_PASSES, _REFINE_POPS, status)
 
 
@@ -753,6 +767,14 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
     """Mirror each gate in X if that lowers HPWL (one pass)."""
     cost = _NetCost(netlist, pos_all)
     out = list(gates)
+    if _place is not None and pos_all.dtype == np.float64 and pos_all.flags.c_contiguous \
+            and np.array_equal(np.floor(cost.pin_offset), cost.pin_offset):
+        status("mirroring")
+        widths = [0 if c.metadata.get("bank") else c.footprint.width for c in gates]
+        flags = _place.mirror(pos_all, netlist.pin_comp, cost.pin_offset, cost.net_start, *cost.nets_csr(),
+                              np.concatenate(cost.comp_pins[:len(gates)] or [np.zeros(0, np.int64)]),
+                              np.cumsum([0] + [len(p) for p in cost.comp_pins[:len(gates)]]), widths)
+        return [_mirror_component_x(c) if f else c for c, f in zip(gates, flags.tolist())]
     for i, c in enumerate(gates):
         if i % _STATUS_EVERY == 0:
             status(f"mirroring, gate {i}/{len(gates)}")

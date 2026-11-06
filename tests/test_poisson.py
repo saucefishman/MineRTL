@@ -328,8 +328,7 @@ def test_kernel_forces_match_numpy():
     got, got_overflow = field.forces(centres)
     field.kernel = None
     want, want_overflow = field.forces(centres)
-    assert abs(got_overflow - want_overflow) < 1e-12
-    assert np.abs(got - want).max() <= 1e-9 * np.abs(want).max()
+    assert got_overflow == want_overflow and np.array_equal(got, want)  # the same floats, so the same placement
 
 
 def test_kernel_wirelength_matches_numpy():
@@ -342,5 +341,20 @@ def test_kernel_wirelength_matches_numpy():
                        poisson._WEIGHTS, 4)
     pos = np.random.default_rng(4).uniform(0, 50, (len(netlist.comps), 3))
     gamma = np.array([2.0, 1.5, 3.0])
-    assert np.allclose(wire.gradient(pos, gamma), netlist.wa_gradient(pos, gamma), rtol=1e-12, atol=1e-12)
-    assert abs(wire.hpwl(pos) - netlist.hpwl(pos)) < 1e-9
+    assert np.array_equal(wire.gradient(pos, gamma), netlist.wa_gradient(pos, gamma))
+
+
+def test_kernel_mirror_matches_python():
+    _kernel()
+    comp = _setup()
+    gates = [c for c in comp.components if c.type not in _IO]
+    io = [c for c in comp.components if c.type in _IO]
+    netlist = poisson._Netlist(gates, io, comp.nets)
+    pos = np.random.default_rng(6).integers(0, 40, (len(netlist.comps), 3)).astype(float)
+    got = poisson._mirror_pass(netlist, pos, gates)
+    saved, poisson._place = poisson._place, None
+    try:
+        want = poisson._mirror_pass(netlist, pos, gates)
+    finally:
+        poisson._place = saved
+    assert [c.model_dump() for c in got] == [c.model_dump() for c in want] and got != gates
