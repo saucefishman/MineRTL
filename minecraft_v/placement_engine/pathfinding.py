@@ -9,7 +9,7 @@ from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
 from .wire import LayConflict, _foot_repeaters
-from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _ROUTE_CELL_STATES, \
+from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _ROUTE_CELL_STATES, _ROUTE_TIGHT_POSITIONS, \
     _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
@@ -634,7 +634,7 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-_TIGHT_POSITIONS = int(os.environ.get("MINECRAFT_V_TIGHT_POSITIONS", 0))  # see _run_search; 0: _ROUTE_MAX_NODES
+_TIGHT_POSITIONS = int(os.environ.get("MINECRAFT_V_TIGHT_POSITIONS", _ROUTE_TIGHT_POSITIONS))  # 0: _ROUTE_MAX_NODES
 _SEARCH_LOG: str | None = os.environ.get("MINECRAFT_V_SEARCH_LOG") or None  # a CSV path: one line per search (net, seed, goal, result, expansions, seconds)
 
 
