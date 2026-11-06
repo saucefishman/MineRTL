@@ -637,7 +637,10 @@ cdef class CellGrid:
         if self.g == NULL:
             raise MemoryError("CellGrid")
         self.owner_ids = {}
-        self.non_air, self.wire, self.torch, self.repeater = index.non_air, index.wire, index.torch, index.repeater
+        # The grid holds every region cell's kind, and nothing outside the region has one: the index's sets give way to
+        # views of the grid (GridKind), and searches get empty sets for cells beyond it. Millions of cells (a RAM block)
+        # made each write's set.add a cache miss.
+        self.non_air = self.wire = self.torch = self.repeater = frozenset()
         self.solid, self.dust_owner, self.inverted, self.fp, self.terminal = solid, dust_owner, inverted, fp, terminal
         cdef size_t cells = <size_t>(self.sx * self.nx)
         flat = np.asarray(<uint16_t[:cells]>self.g)
@@ -650,6 +653,8 @@ cdef class CellGrid:
             self.put_owner(pos, value)
         index.grid = self
         index.grid_bits = (F_NONAIR, F_WIRE, F_TORCH, F_REP)
+        index.non_air, index.wire = GridKind(self, F_NONAIR), GridKind(self, F_WIRE)
+        index.torch, index.repeater = GridKind(self, F_TORCH), GridKind(self, F_REP)
         solid._grid, solid._grid_bit = self, F_SOLID
         inverted._grid, inverted._grid_bit = self, F_INV
         dust_owner._grid = self
@@ -659,6 +664,10 @@ cdef class CellGrid:
 
     def fp_set(self):
         return self.fp
+
+    def kind_sets(self):
+        """The non_air, wire, torch and repeater sets a World over this grid takes: cells beyond it."""
+        return self.non_air, self.wire, self.torch, self.repeater
 
     def terminal_set(self):
         return self.terminal
@@ -750,6 +759,27 @@ cdef struct _CellVectors:
 cdef inline int exempt_code(int ox, int oy, int oz) noexcept nogil:
     """Single exempt cell as an offset from the queried cell (0 = no exempt)."""
     return 1 + (ox + 2) * 25 + (oy + 2) * 5 + (oz + 2)
+
+
+@cython.final
+cdef class GridKind:
+    """One of _BlockIndex's sets (non_air, wire, torch, repeater) answered from a CellGrid's kind bits. A cell outside
+    the grid is outside the region, so has no kind. add and discard write the bit."""
+    cdef CellGrid grid
+    cdef unsigned int bit
+
+    def __init__(self, CellGrid grid, unsigned int bit):
+        self.grid, self.bit = grid, bit
+
+    def __contains__(self, tuple pos):
+        cdef uint16_t* w = self.grid.word(pos[0], pos[1], pos[2])
+        return w != NULL and (w[0] & self.bit) != 0
+
+    def add(self, tuple pos):
+        self.grid.put(pos, self.bit, True)
+
+    def discard(self, tuple pos):
+        self.grid.put(pos, self.bit, False)
 
 
 @cython.final
@@ -954,6 +984,11 @@ cdef class World:
         return n > 1 or (n == 1 and not PySet_Contains(spec[6], key))
 
     cdef unsigned int probe(self, int x, int y, int z, unsigned int bit) except? 0xFFFFFFFF:
+        cdef uint16_t* w
+        if bit == F_NONAIR or bit == F_WIRE or bit == F_TORCH or bit == F_REP:
+            w = self.gw(x, y, z)
+            if w != NULL:
+                return w[0] & bit
         key = (x, y, z)
         cdef bint v
         if bit == F_SOLID:
@@ -1010,10 +1045,13 @@ cdef class World:
             return 0
         key = (x, y, z)
         if PySet_Contains(self.solid, key): v |= F_SOLID
-        if PySet_Contains(self.non_air, key): v |= F_NONAIR
-        if PySet_Contains(self.wire, key): v |= F_WIRE
-        if PySet_Contains(self.torch, key): v |= F_TORCH
-        if PySet_Contains(self.repeater, key): v |= F_REP
+        if w != NULL:
+            v |= w[0] & (F_NONAIR | F_WIRE | F_TORCH | F_REP)
+        else:
+            if PySet_Contains(self.non_air, key): v |= F_NONAIR
+            if PySet_Contains(self.wire, key): v |= F_WIRE
+            if PySet_Contains(self.torch, key): v |= F_TORCH
+            if PySet_Contains(self.repeater, key): v |= F_REP
         if self.keepout_has(self.eprot, key): v |= F_EPROT
         if self.keepout_has(self.prot, key): v |= F_PROT
         if PySet_Contains(self.fp, key):
@@ -1717,6 +1755,55 @@ cdef extern from *:
     int count_trailing_zeros(unsigned int x) nogil
 
 
+def prepare_seeds(list seeds, tree_seeds, solid, tuple bounds, dict pos_ids, list pos_list, list h_list,
+                  list move_cache, int gx, int gy, int gz, int x_h_factor, dict seed_depths):
+    """_find_wire_path's seeds, compiled: hundreds per search. seeds holds the start's; tree seeds not among them,
+    in solid or out of bounds are appended. Returns (seed ids, seed nodes, seed groups, group best h, index of the first
+    seed of least heuristic)."""
+    cdef int n_start = len(seeds), i, n, cid, x, y, z, h, best = 0, depth
+    cdef int min_x = bounds[0], min_y = bounds[1], min_z = bounds[2], max_x = bounds[3], max_y = bounds[4], max_z = bounds[5]
+    cdef tuple ts
+    cdef long long best_h = 1LL << 60
+    if tree_seeds:
+        seed_set = set(seeds)
+        for ts in tree_seeds:
+            if ts in seed_set or ts in solid:
+                continue
+            x, y, z = ts
+            if min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z:
+                seeds.append(ts)
+                seed_set.add(ts)
+    n = len(seeds)
+    cdef list seed_ids = [None] * n, seed_nodes = [None] * n, seed_groups = [None] * n
+    cdef list group_best_h = [10 ** 9] * (1 + n - n_start)
+    for i in range(n):
+        ts = seeds[i]
+        found = pos_ids.get(ts)
+        x, y, z = ts
+        h = abs(x - gx) * x_h_factor + abs(y - gy) * 4 + abs(z - gz)
+        if found is None:
+            cid = len(pos_list)
+            pos_ids[ts] = cid
+            pos_list.append(ts)
+            h_list.append(h)
+            move_cache.append(None)
+        else:
+            cid = found
+            h = h_list[cid]
+        seed_ids[i] = cid
+        depth = 0
+        if i >= n_start:
+            depth = min(<int>seed_depths.get(ts, 0), 15)
+        seed_nodes[i] = (<long long>cid << NODE_SHIFT) | (<long long>depth << SIG_SHIFT)
+        seed_groups[i] = 0 if i < n_start else 1 + i - n_start
+        if h < group_best_h[0 if i < n_start else 1 + i - n_start]:
+            group_best_h[0 if i < n_start else 1 + i - n_start] = h
+        if h < best_h:
+            best_h = h
+            best = i
+    return seed_ids, seed_nodes, seed_groups, group_best_h, best
+
+
 def cell_pos(int cid):
     """A cell of the last search, which may be past pos_list: good until the next search starts."""
     cdef int x = SEARCH_CELLS.x[cid], y = SEARCH_CELLS.y[cid], z = SEARCH_CELLS.z[cid]
@@ -1749,12 +1836,13 @@ def set_foot_repeaters(bint on) -> None:
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False,
-           double h_radius_factor=-1, int stagnation=-1, int budget=1):
+           double h_radius_factor=-1, int stagnation=-1, int budget=1, int cell_cap=0):
     """With world, cells' static moves are generated here instead of
     by expand(); verify additionally checks each against expand(). stagnation: this search's limit
     (negative: _ROUTE_STAGNATION). h_radius_factor: the h-radius
     cull for this search (0: off; negative: _H_RADIUS_FACTOR). budget: multiplies the stagnation,
-    position and expansion limits."""
+    position and expansion limits. cell_cap: with subset dominance, a state is dropped once its cell has had this many
+    expanded (0: no cap), counting toward the limits as a dominated one does."""
     global STAT_SEARCHES, STAT_POPS, STAT_PUSHES, STAT_CELLS, STAT_LOAD_TIME
     if not _init_done:
         raise RuntimeError("_astar.init() was not called")
@@ -1776,7 +1864,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef vector[int] expanded_head  # by cell: its latest Expanded, or -1
     cdef vector[Expanded] expanded
     cdef Expanded* xp
-    cdef int xi, x_sig = 0, x_depth, x_cand
+    cdef int xi, x_sig = 0, x_depth, x_cand, x_count
     cdef uint32_t x_snap = 0
     cdef bint subset_dominated
     cdef HeapEntry e, ne
@@ -1865,8 +1953,13 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             x_cand = x_sig & 0x70
             subset_dominated = False
             xi = expanded_head[cid] if cid < <int>expanded_head.size() else -1
+            x_count = 0
             while xi >= 0:
                 xp = &expanded[xi]
+                x_count += 1
+                if cell_cap > 0 and x_count >= cell_cap:
+                    subset_dominated = True
+                    break
                 if (not xp.snap & ~x_snap and xp.g <= e.g and (xp.sig & 128) == (x_sig & 128)
                         and (xp.sig & 15) <= x_depth and (x_cand == 0 or (xp.sig & 0x70) == x_cand)):
                     subset_dominated = True
@@ -2444,6 +2537,65 @@ cdef class NetChecks:
                     if self.kind(qx, y, qz) == K_OPAQUE and self.gate.find(cell_key(qx, y, qz)) != NULL:
                         return True
         return False
+
+    def signal_returns(self, net_id, tuple start, tuple target, tuple cut):
+        """wire._signal_returns, from the grid: whether signal from start reaches target through net_id's wire and
+        repeaters, avoiding cut. Change both when the rule changes."""
+        cdef int own = self.grid.owner_id(net_id), ins, x, y, z, nx_, ny_, nz_, d, dy, n, dx, dz
+        cdef int tx = target[0], ty = target[1], tz = target[2]
+        cdef uint16_t* w
+        cdef uint16_t* wn
+        cdef bint at_repeater, follows
+        cdef const BlockKind* k
+        cdef int cand[12][3]
+        cdef vector[int] stack
+        self.bind()
+        hiding, self.hiding = self.hiding, False
+        self.seen.reset(1 << 8)
+        self.seen.get(cell_key(start[0], start[1], start[2]), &ins)
+        self.seen.get(cell_key(cut[0], cut[1], cut[2]), &ins)
+        stack.push_back(start[0]); stack.push_back(start[1]); stack.push_back(start[2])
+        try:
+            while not stack.empty():
+                z = stack.back(); stack.pop_back()
+                y = stack.back(); stack.pop_back()
+                x = stack.back(); stack.pop_back()
+                if x == tx and y == ty and z == tz:
+                    return True
+                w = self.grid.word(x, y, z)
+                at_repeater = w != NULL and (w[0] & F_REP) != 0
+                n = 0
+                if at_repeater:
+                    k = self.at(x, y, z)
+                    for dy in range(-1, 2):
+                        cand[n][0], cand[n][1], cand[n][2] = x - k.dx, y + dy, z - k.dz
+                        n += 1
+                else:
+                    for d in range(4):
+                        for dy in range(-1, 2):
+                            cand[n][0], cand[n][1], cand[n][2] = x + HORIZ[d][0], y + dy, z + HORIZ[d][1]
+                            n += 1
+                for d in range(n):
+                    nx_, ny_, nz_ = cand[d][0], cand[d][1], cand[d][2]
+                    if self.seen.find(cell_key(nx_, ny_, nz_)) != NULL:
+                        continue
+                    wn = self.grid.word(nx_, ny_, nz_)
+                    if wn == NULL:
+                        continue
+                    if wn[0] & F_WIRE:
+                        follows = (wn[0] & G_OWNED) != 0 and self.grid.owner_map.find(cell_key(nx_, ny_, nz_))[0] == own
+                    elif wn[0] & F_REP and not at_repeater and y >= 0:
+                        k = self.at(nx_, ny_, nz_)
+                        follows = ((not wn[0] & G_OWNED or self.grid.owner_map.find(cell_key(nx_, ny_, nz_))[0] == own)
+                                   and nx_ + k.dx == x and nz_ + k.dz == z)
+                    else:
+                        follows = False
+                    if follows:
+                        self.seen.get(cell_key(nx_, ny_, nz_), &ins)
+                        stack.push_back(nx_); stack.push_back(ny_); stack.push_back(nz_)
+            return False
+        finally:
+            self.hiding = hiding
 
     cpdef int faults(self, tuple source, sinks, stop_own, list journal) except -1:
         """Bits of FAULT_*: those of a finished net's checks with something to report.

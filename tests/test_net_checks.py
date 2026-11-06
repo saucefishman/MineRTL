@@ -70,3 +70,24 @@ def test_scenes_have_every_fault():
         _, router, _, _, _, source, sinks, _, journal = scene(seed)
         seen |= router.net_checks.faults(source, sinks, {source, *sinks}, journal)
     assert seen == FAULT_LATCH | FAULT_INVERTED | FAULT_GATE
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_signal_returns_same_as_python(seed):
+    """NetChecks.signal_returns is wire._signal_returns compiled, over the grid."""
+    from minecraft_v.placement_engine.wire import _signal_returns
+    region, router, *_ = scene(seed)
+    rng = random.Random(seed + 1000)
+    cells = [(x, y, z) for x in range(SIZE) for y in range(SIZE) for z in range(SIZE)]
+    for pos in cells:
+        if rng.random() < 0.7:
+            router.dust_owner[pos] = rng.choice("aab")
+    for pos in rng.sample(cells, 40):
+        router.dust_owner.pop(pos, None)
+    for _ in range(40):
+        start = rng.choice(cells)
+        target, cut = ((min(SIZE - 1, max(0, c + rng.randint(-2, 2))) for c in start) for _ in range(2))
+        target, cut = tuple(target), tuple(cut)
+        net = rng.choice("ab")
+        assert (router.net_checks.signal_returns(net, start, target, cut)
+                == _signal_returns(router.indexed, router.dust_owner, net, start, target, cut))

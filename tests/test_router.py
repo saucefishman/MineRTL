@@ -372,11 +372,11 @@ def test_no_repeater_slot_reroutes_only_the_branch_at_the_fault(monkeypatch):
     place = builder._place_repeaters_for_net
     calls = []
 
-    def failing_once(ws, dust_owner, net_id, paths):
+    def failing_once(ws, dust_owner, net_id, paths, *args):
         calls.append(paths)
         if len(calls) == 1:
             raise LayConflict("Net 'n': cannot place repeater to extend signal", tuple(paths[-1][1:]))
-        place(ws, dust_owner, net_id, paths)
+        place(ws, dust_owner, net_id, paths, *args)
 
     monkeypatch.setattr(builder, "_find_wire_path", counting_find)
     monkeypatch.setattr(builder, "_place_repeaters_for_net", failing_once)
