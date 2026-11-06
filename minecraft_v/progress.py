@@ -23,6 +23,33 @@ _debug = False
 _phase_times = os.environ.get("MINECRAFT_V_PHASE_TIMES") == "1"  # log each phase's seconds when it ends
 
 
+def _load_counters():
+    """This process's instructions retired, all threads (macOS only): a cost that barely moves with machine load,
+    unlike wall or CPU time. Forked workers count in their own process, not here."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+    except OSError:
+        return None
+    info = (ctypes.c_uint64 * 64)()  # rusage_info_v4: 16-byte uuid, then uint64 fields; ri_instructions is the 30th
+
+    def instructions() -> int:
+        if libproc.proc_pid_rusage(os.getpid(), 4, ctypes.byref(info)) != 0:
+            return 0
+        return info[2 + 29]
+    return instructions
+
+
+_instructions = _load_counters() if _phase_times else None
+
+
+def _cost() -> tuple[float, float, int]:
+    times = os.times()
+    return time.process_time(), times.children_user + times.children_system, _instructions() if _instructions else 0
+
+
 def _tick() -> None:
     while True:
         time.sleep(_TICK_SECONDS)
@@ -52,6 +79,7 @@ class ProgressBar:
         self.detail = ""
         self.live = sys.stderr.isatty() and not _forked
         self._t0 = time.monotonic()
+        self._cost0 = _cost() if _phase_times else None
         self._last_draw = 0.0
 
     def __enter__(self) -> ProgressBar:
@@ -68,8 +96,11 @@ class ProgressBar:
         with _lock:
             _stack.remove(self)
             self._clear()
-            if _phase_times and not _forked:
-                print(f"[phase] {self.label}: {time.monotonic() - self._t0:.1f}s", flush=True)
+            if self._cost0 is not None and not _forked:
+                cpu, children, instructions = (b - a for a, b in zip(self._cost0, _cost()))
+                print(f"[phase] {self.label}: {time.monotonic() - self._t0:.1f}s (cpu {cpu:.1f}s"
+                      + (f", reaped workers {children:.1f}s" if children >= 0.05 else "")
+                      + (f", {instructions / 1e9:.1f}G instr" if _instructions else "") + ")", flush=True)
             if _stack:
                 _stack[-1]._draw()
 
