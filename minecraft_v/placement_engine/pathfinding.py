@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable
 
@@ -8,7 +9,7 @@ from litemapy import BlockState, Region
 
 from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
 from .wire import LayConflict, _foot_repeaters
-from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _ROUTE_CELL_STATES, \
+from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _ROUTE_CELL_STATES, _ROUTE_TIGHT_POSITIONS, \
     _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
@@ -166,6 +167,14 @@ class _BlockIndex:
         self.repeater = cells(8)
         self.grid = None  # _astar.CellGrid mirroring these sets; update keeps it current
 
+    @classmethod
+    def empty(cls) -> _BlockIndex:
+        """An index of nothing, for an _astar.CellGrid to fill with views of itself."""
+        idx = cls.__new__(cls)
+        idx.non_air, idx.wire, idx.torch, idx.repeater = set(), set(), set(), set()
+        idx.grid = None
+        return idx
+
     @staticmethod
     def kinds(region: Region) -> np.ndarray:
         """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater."""
@@ -226,8 +235,14 @@ class IndexedWorkspace:
 
     def __init__(self, region: Region):
         self.region = region
-        self._index = _BlockIndex(region)
+        self._built: _BlockIndex | None = None  # built when first used: attach_grid needs none of its sets
         self._write = palette_writer(region)
+
+    @property
+    def _index(self) -> _BlockIndex:
+        if self._built is None:
+            self._built = _BlockIndex(self.region)
+        return self._built
 
     def __getitem__(self, pos) -> BlockState:
         # Region.__getitem__ without its coordinate conversion, a no-op for a positive-size region. Saving a schematic
@@ -255,7 +270,9 @@ class IndexedWorkspace:
                 or not all(hasattr(c, "_grid") for c in (solid, dust_owner, inverted_cells))):
             return
         region = self.region
-        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._index, solid, dust_owner,
+        if self._built is None:  # the grid replaces the sets with views of itself: millions of cells not to collect
+            self._built = _BlockIndex.empty()
+        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._built, solid, dust_owner,
                         inverted_cells, footprint_blocked, terminal_positions)
 
 
@@ -617,7 +634,8 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-_SEARCH_LOG: str | None = None  # a CSV path: one line per search (net, seed, goal, result, expansions, seconds)
+_TIGHT_POSITIONS = int(os.environ.get("MINECRAFT_V_TIGHT_POSITIONS", _ROUTE_TIGHT_POSITIONS))  # 0: _ROUTE_MAX_NODES
+_SEARCH_LOG: str | None = os.environ.get("MINECRAFT_V_SEARCH_LOG") or None  # a CSV path: one line per search (net, seed, goal, result, expansions, seconds)
 
 
 def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
@@ -630,5 +648,8 @@ def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,
                 budget: int = 1, cell_cap: int = 0):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
+    # A tight first try (stagnation set) gives up sooner on positions too: past a few thousand it almost never succeeds,
+    # and a failure there only means ripping what's around the sink and trying again.
     return _astar.search(*args, make_world(), h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget,
+                         position_cap=_TIGHT_POSITIONS if stagnation >= 0 else 0,
                          cell_cap=cell_cap)

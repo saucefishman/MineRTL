@@ -951,7 +951,7 @@ _BIG_RIP_SINKS = 4  # escalating, a big-fanout net's branch near the sink is rip
 _DETOUR_REACH = 8  # blocks to a detour's far end, on top of one per tick short
 _DETOUR_ROUNDS = 4  # of laying short paths again and padding them
 _REPAIR_ROUNDS = 3  # re-routes of nets verify still finds fault with
-_NEAREST_SEEDS = 256  # a sink search starts from this many of the net's wire cells, nearest first
+_NEAREST_SEEDS = int(os.environ.get("MINECRAFT_V_NEAREST_SEEDS", 256))  # a sink search starts from this many of the net's wire cells, nearest first
 
 Pos = tuple[int, int, int]
 
@@ -2733,3 +2733,27 @@ def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int
             save_macro(macro, cache_dir)
         return macro
     raise RuntimeError(f"macro {name} did not route clean in {_MACRO_SEEDS} seeds")
+
+
+if os.environ.get("MINECRAFT_V_WIRE_TIMES"):  # development: seconds in each part of routing, logged at exit
+    import atexit as _atexit
+    _wire_times: dict[str, list] = {}
+
+    def _timed(name, fn):
+        def wrapper(*args, **kwargs):
+            t = time.perf_counter()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                entry = _wire_times.setdefault(name, [0, 0.0])
+                entry[0] += 1
+                entry[1] += time.perf_counter() - t
+        return wrapper
+
+    for _name in ("_lay_redstone_path", "_place_repeaters_for_net", "_find_wire_path", "_signal_depths", "rip_up",
+                  "rollback"):
+        globals()[_name] = _timed(_name, globals()[_name])
+    for _cls, _name in ((_GreedyRouter, "_check_net"), (_GreedyRouter, "_open_via"), (_TreeCells, "nearest"),
+                        (_GreedyRouter, "route_job"), (_GreedyRouter, "_cells_since"), (_GreedyRouter, "net_paths")):
+        setattr(_cls, _name, _timed(_name, getattr(_cls, _name)))
+    _atexit.register(lambda: log("[wire times] " + ", ".join(f"{k} {v[1]:.1f}s/{v[0]}" for k, v in _wire_times.items())))

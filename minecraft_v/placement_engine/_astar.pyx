@@ -1853,12 +1853,13 @@ def set_foot_repeaters(bint on) -> None:
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False,
-           double h_radius_factor=-1, int stagnation=-1, int budget=1, int cell_cap=0):
+           double h_radius_factor=-1, int stagnation=-1, int budget=1, int cell_cap=0, long long position_cap=0):
     """With world, cells' static moves are generated here instead of
     by expand(); verify additionally checks each against expand(). stagnation: this search's limit
     (negative: _ROUTE_STAGNATION). h_radius_factor: the h-radius
     cull for this search (0: off; negative: _H_RADIUS_FACTOR). budget: multiplies the stagnation,
-    position and expansion limits. cell_cap: with subset dominance, a state is dropped once its cell has had this many
+    position and expansion limits. position_cap: positions to expand before failing, in place of the budgeted
+    MAX_NODES (0: that). cell_cap: with subset dominance, a state is dropped once its cell has had this many
     expanded (0: no cap), counting toward the limits as a dominated one does."""
     global STAT_SEARCHES, STAT_POPS, STAT_PUSHES, STAT_CELLS, STAT_LOAD_TIME
     if not _init_done:
@@ -1910,7 +1911,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     early_stop_reason = None
     cdef double radius = H_RADIUS_FACTOR if h_radius_factor < 0 else h_radius_factor
     cdef long long stagnation_limit = budget * (STAGNATION if stagnation < 0 else stagnation)
-    cdef long long max_nodes = budget * MAX_NODES, max_expansions = budget * MAX_EXPANSIONS
+    cdef long long max_nodes = position_cap if position_cap > 0 else budget * MAX_NODES
+    cdef long long max_expansions = budget * MAX_EXPANSIONS
     py_max_f = max(group_max_f)
     max_f = py_max_f
 

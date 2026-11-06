@@ -129,10 +129,13 @@ class JournalingWorkspace:
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
         rec = self._rec
-        if rec.active is not None:
-            rec.log(("block", self.region, pos, self.region[pos], rec.writer.get(pos)))
-            rec.writer[pos] = rec.active
-        self.region[pos] = block
+        active = rec.active
+        region = self.region
+        if active is not None:
+            writer = rec.writer
+            rec.journals[active].append(("block", region, pos, region[pos], writer.get(pos)))
+            writer[pos] = active
+        region[pos] = block
 
 
 def _support_dependent(
