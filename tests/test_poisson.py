@@ -266,3 +266,81 @@ def test_net_cost_matches_hpwl():
             q = p[netlist.pin_net == ni]
             want += float(((q.max(axis=0) - q.min(axis=0)) * poisson._WEIGHTS).sum())
         assert abs(cost.of(i) - want) < 1e-9
+
+
+def _kernel():
+    import pytest
+    if poisson._place is None:
+        pytest.skip("C++ placement kernel not built")
+    return poisson._place
+
+
+def test_kernel_occupancy_matches_python():
+    kernel = _kernel()
+    rng = np.random.default_rng(5)
+    sizes = rng.integers(1, 20, (300, 3)).astype(float)
+    py, cc = poisson._Occupancy(sizes), kernel.Occupancy(sizes)
+    for i in range(0, 300, 2):
+        p = tuple(int(v) for v in rng.integers(-40, 200, 3))
+        py.add(i, p)
+        cc.add(i, p)
+    for i in range(0, 100, 4):
+        py.remove(i)
+        cc.remove(i)
+    for i in range(1, 300, 2):
+        target = tuple(int(v) for v in rng.integers(-20, 180, 3))
+        for flat in (False, True):
+            for pops in (5, 60, 2000):
+                assert py.nearest_free(i, target, flat, pops) == cc.nearest_free(i, target, flat, pops)
+        s = tuple(int(v) for v in sizes[i])
+        assert py.conflicts(target, s, skip=i) == cc.conflicts(target, s, skip=i)
+
+
+def test_kernel_refine_matches_python():
+    kernel = _kernel()
+    comp = _setup()
+    gates = [c for c in comp.components if c.type not in _IO]
+    io = [c for c in comp.components if c.type in _IO]
+    netlist = poisson._Netlist(gates, io, comp.nets)
+    sizes = np.array([[c.footprint.width + 4, c.footprint.height + 1, c.footprint.depth + 4] for c in gates], float)
+    rng = np.random.default_rng(2)
+    start = poisson._legalize(rng.integers(0, 30, (len(gates), 3)).astype(float), sizes, False)
+    pos_all = np.vstack([start, rng.integers(-10, 40, (len(io), 3)).astype(float)])
+    want = pos_all.copy()
+    saved, poisson._place = poisson._place, None
+    try:
+        poisson._refine(netlist, want, sizes, False)
+    finally:
+        poisson._place = saved
+    got = pos_all.copy()
+    poisson._refine(netlist, got, sizes, False)
+    assert np.array_equal(got, want) and not np.array_equal(got, pos_all)
+
+
+def test_kernel_forces_match_numpy():
+    _kernel()
+    rng = np.random.default_rng(0)
+    sizes = np.vstack([rng.integers(3, 12, (400, 3)).astype(float), [[60.0, 20.0, 40.0]]])
+    dims = np.array([120.0, 60.0, 200.0])
+    field = poisson._Field(sizes, dims)
+    field.fix_box(np.zeros(3), np.array([30.0, 20.0, 30.0]))
+    centres = rng.uniform(0, 1, (len(sizes), 3)) * dims
+    got, got_overflow = field.forces(centres)
+    field.kernel = None
+    want, want_overflow = field.forces(centres)
+    assert abs(got_overflow - want_overflow) < 1e-12
+    assert np.abs(got - want).max() <= 1e-9 * np.abs(want).max()
+
+
+def test_kernel_wirelength_matches_numpy():
+    kernel = _kernel()
+    comp = _setup()
+    gates = [c for c in comp.components if c.type not in _IO]
+    io = [c for c in comp.components if c.type in _IO]
+    netlist = poisson._Netlist(gates, io, comp.nets)
+    wire = kernel.Wire(netlist.pin_comp, netlist.pin_offset, np.r_[netlist.net_start, len(netlist.pin_net)],
+                       poisson._WEIGHTS, 4)
+    pos = np.random.default_rng(4).uniform(0, 50, (len(netlist.comps), 3))
+    gamma = np.array([2.0, 1.5, 3.0])
+    assert np.allclose(wire.gradient(pos, gamma), netlist.wa_gradient(pos, gamma), rtol=1e-12, atol=1e-12)
+    assert abs(wire.hpwl(pos) - netlist.hpwl(pos)) < 1e-9

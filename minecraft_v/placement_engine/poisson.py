@@ -27,6 +27,11 @@ from minecraft_v.placement_engine.layout import _BIT_INDEX_RE, _Placed, _assign_
 from minecraft_v.progress import debug, log, phase, status
 from minecraft_v.placement_engine.template import _mirror_component_x, _rotate_component_180
 
+try:
+    from minecraft_v.placement_engine import _place  # C++ _Occupancy and _refine, same results
+except ImportError:  # not built: the Python here does the same, slower
+    _place = None
+
 _WEIGHTS = np.array([1.0, 2.0, 1.0])  # wirelength per block in X, Y, Z: Y needs slopes and towers
 _BINS_PER_BOX = 2            # bins per mean box size along each axis
 _TARGET_DENSITY = 0.8        # padded box volume / domain volume
@@ -42,6 +47,7 @@ _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y co
 _REFINE_PASSES = 2  # a fixed amount of work, so a build is the same every run (on floweypu: 4s each, a third gains 0.1%)
 _REFINE_POPS = 60
 _FFT_WORKERS = 4             # threads for the Poisson solve's transforms
+_FIELD_THREADS = 8           # threads for the charge deposit and force gather
 _STATUS_EVERY = 50           # gates between progress line updates
 _IO_COLUMN_CLEAR = 4         # a gate this close in X is in an IO column's way: nearer, a pin lands in the
                              # keepout of the gate's terminal and its wire can't start
@@ -133,6 +139,13 @@ class _Field:
         self.laplace = eig[0][:, None, None] + eig[1][None, :, None] + eig[2][None, None, :]
         self.laplace[0, 0, 0] = 1.0
         self._solve: tuple[np.ndarray, np.ndarray, np.ndarray | float] | None = None  # see _solver
+        # The C++ deposit and gather take boxes in deposit order: group after group, so bins sum in numpy's order.
+        self.kernel = None
+        self._fused: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        if _place is not None and len(sizes) and int(spans.max()) <= 64:
+            self.order = np.concatenate([members for members, _ in self.groups])
+            self.kernel = _place.Field(self.shape, self.h, self.eff[self.order], self.scale[self.order],
+                                       spans[self.order], _FIELD_THREADS)
 
     def fix_box(self, lo: np.ndarray, size: np.ndarray) -> None:
         """A solid box that never moves: it repels gates and takes up its bins."""
@@ -144,6 +157,7 @@ class _Field:
         taken = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
         self.fixed = taken if self.fixed is None else np.minimum(self.fixed + taken, 1.0)
         self._solve = None
+        self._fused = None
 
     def _solver(self) -> tuple[np.ndarray, np.ndarray, np.ndarray | float]:
         """Per bin: the charge a bin holds before it overflows, 1 / the Laplacian's eigenvalues (0 for the mean, which
@@ -177,6 +191,8 @@ class _Field:
     def forces(self, centres: np.ndarray) -> tuple[np.ndarray, float]:
         """Electrostatic force on each box and the overflow, for boxes given by their centres."""
         pos = centres - self.eff / 2
+        if self.kernel is not None:
+            return self._forces_kernel(pos)
         cells = int(np.prod(self.shape))
         deposits = []
         for members, span in self.groups:
@@ -188,14 +204,7 @@ class _Field:
             deposits.append((members, index, weight))
         held = np.bincount(np.concatenate([d[1].ravel() for d in deposits]),
                            np.concatenate([d[2].ravel() for d in deposits]), cells).reshape(self.shape)
-        capacity, inverse, fixed = self._solver()
-        overflow = float(np.maximum(held - capacity, 0.0).sum() / self.charge.sum())
-        # Density is held / bin volume, plus the fixed boxes; the transform is linear, so theirs is done once.
-        coeff = fft.dctn(held, type=2, norm="ortho", workers=_FFT_WORKERS)
-        coeff *= 1.0 / float(np.prod(self.h))
-        coeff += fixed
-        coeff *= inverse
-        phi = fft.idctn(coeff, type=2, norm="ortho", workers=_FFT_WORKERS)
+        phi, overflow = self._potential(held)
 
         # Field per bin, -dphi/dx by central differences, one-sided at the walls.
         force = np.zeros_like(pos)
@@ -210,6 +219,33 @@ class _Field:
             field = field.ravel()
             for members, index, weight in deposits:
                 force[members, a] = np.einsum("nk,nk->n", weight, field[index])
+        return force, overflow
+
+
+    def _potential(self, held: np.ndarray) -> tuple[np.ndarray, float]:
+        capacity, inverse, fixed = self._solver()
+        overflow = float(np.maximum(held - capacity, 0.0).sum() / self.charge.sum())
+        # Density is held / bin volume, plus the fixed boxes; the transform is linear, so theirs is done once.
+        coeff = fft.dctn(held, type=2, norm="ortho", workers=_FFT_WORKERS)
+        coeff *= 1.0 / float(np.prod(self.h))
+        coeff += fixed
+        coeff *= inverse
+        return fft.idctn(coeff, type=2, norm="ortho", workers=_FFT_WORKERS), overflow
+
+    def _forces_kernel(self, pos: np.ndarray) -> tuple[np.ndarray, float]:
+        lo = pos[self.order]
+        held = self.kernel.deposit(lo)
+        if self._fused is None:
+            capacity, inverse, fixed = self._solver()
+            self._fused = (np.array(np.broadcast_to(capacity, self.shape), dtype=np.float64),
+                           inverse / float(np.prod(self.h)), np.array(np.broadcast_to(fixed * inverse, self.shape), dtype=np.float64))
+        capacity, scale, shift = self._fused
+        overflow = self.kernel.overflow(held, capacity) / float(self.charge.sum())
+        coeff = fft.dctn(held, type=2, norm="ortho", workers=_FFT_WORKERS, overwrite_x=True)
+        self.kernel.axpb(coeff, scale, shift)  # (coeff / bin volume + fixed) / eigenvalue, as _potential
+        phi = fft.idctn(coeff, type=2, norm="ortho", workers=_FFT_WORKERS, overwrite_x=True)
+        force = np.empty_like(pos)
+        force[self.order] = self.kernel.gather(lo, phi)
         return force, overflow
 
 
@@ -382,6 +418,12 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
         out[:n] -= pad
         return out
 
+    # The C++ kernel when built: pins don't change during global placement (macros turn later).
+    wire_kernel = _place.Wire(netlist.pin_comp, netlist.pin_offset, np.r_[netlist.net_start, len(netlist.pin_net)],
+                              _WEIGHTS, _FIELD_THREADS) if _place is not None and netlist.n_nets else None
+    wa_gradient = wire_kernel.gradient if wire_kernel is not None else netlist.wa_gradient
+    hpwl_of = wire_kernel.hpwl if wire_kernel is not None else netlist.hpwl
+
     rng = np.random.default_rng(seed)
     pos = np.zeros((m, 3))
     pos[:n] = dims / 2 + rng.normal(0.0, 0.01, (n, 3)) * dims
@@ -409,7 +451,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
         status(f"global placement, iteration {it + 1}, overflow {overflow:.2f}")
         force, overflow = field.forces(v[free])
         gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
-        wire = netlist.wa_gradient(origins(v), gamma)[free]
+        wire = wa_gradient(origins(v), gamma)[free]
         if lam is None:
             lam = np.abs(wire).sum() / max(np.abs(force).sum(), 1e-9)
         g = (wire - lam * force) / np.maximum(1.0, netlist.degree[free, None] + lam * field.charge[:, None])
@@ -427,7 +469,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
         u[free] = new
         a = a_next
 
-        hpwl = netlist.hpwl(origins(u))
+        hpwl = hpwl_of(origins(u))
         if prev_hpwl is not None:
             ratio = (hpwl - prev_hpwl) / (_MU_REF * max(prev_hpwl, 1.0))
             lam *= _MU_MAX if ratio < 0 else max(_MU_MIN, _MU_MAX ** (1 - ratio))
@@ -518,6 +560,13 @@ class _Occupancy:
                             seen.add(q)
                             heapq.heappush(heap, (w0 * abs(q[0] - g0) + w1 * abs(q[1] - g1) + w2 * abs(q[2] - g2), q))
         return None
+
+
+def _occupancy(sizes: np.ndarray):
+    """An _Occupancy, from the C++ kernel when it's built and the boxes are whole blocks."""
+    if _place is not None and np.array_equal(np.floor(sizes), sizes):
+        return _place.Occupancy(sizes)
+    return _Occupancy(sizes)
 
 
 def _legalize(pos: np.ndarray, sizes: np.ndarray, flat: bool) -> np.ndarray:
@@ -651,13 +700,28 @@ def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: boo
     n = netlist.n_gates
     banks = [i for i in range(n) if netlist.comps[i].metadata.get("bank")]
     pinned = set(_stacked(netlist.comps[:n], banks)) if fixed_box is not None else set()
-    occ = _Occupancy(sizes if fixed_box is None else np.vstack([sizes, fixed_box[1]]))
+    occ = _occupancy(sizes if fixed_box is None else np.vstack([sizes, fixed_box[1]]))
     if fixed_box is not None:
         occ.add(n, tuple(int(v) for v in fixed_box[0]))
     for i in range(n):
         if i not in pinned:
             occ.add(i, tuple(int(v) for v in pos_all[i]))
     cost = _NetCost(netlist, pos_all)
+    if isinstance(occ, _Occupancy) or not (pos_all.dtype == np.float64 and pos_all.flags.c_contiguous):
+        _refine_py(netlist, pos_all, flat, fixed_box, pinned, occ, cost)
+        return
+    skip = np.array([i in pinned or (fixed_box is not None and netlist.comps[i].type == ComponentType.CUSTOM)
+                     for i in range(n)], dtype=np.int8)
+    comp_net_start = np.cumsum([0] + [len(nets) for nets in cost.comp_nets])
+    comp_nets = np.array([ni for nets in cost.comp_nets for ni in nets], dtype=np.int64)
+    _place.refine(occ, pos_all, netlist.pin_comp, cost.pin_offset, cost.net_start, comp_nets, comp_net_start,
+                  skip, flat, _REFINE_PASSES, _REFINE_POPS, status)
+
+
+def _refine_py(netlist: _Netlist, pos_all: np.ndarray, flat: bool, fixed_box: tuple[np.ndarray, np.ndarray] | None,
+               pinned: set[int], occ: _Occupancy, cost: _NetCost) -> None:
+    """_refine's passes in Python: what the C++ kernel computes."""
+    n = netlist.n_gates
     for refine_pass in range(_REFINE_PASSES):
         moved = 0
         for i in range(n):
@@ -875,7 +939,7 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
         # Moved as one, so global placement's density and legalization time don't change, as a shorter domain's would.
         near = float(np.percentile(pos[free, 2], 2))
         pos[free, 2] = np.maximum(pos[free, 2] - max(0.0, near - box[1][2] - channel_z), box[1][2])
-    occ = _Occupancy(np.vstack([sizes, box[1]]))
+    occ = _occupancy(np.vstack([sizes, box[1]]))
     occ.add(len(gates), (0, 0, 0))
     for i in fixed:
         pos[i] = fixed[i]
