@@ -1073,6 +1073,8 @@ class _GreedyRouter:
                                 try:
                                     return search_from(tree.nearest(dst, _NEAREST_SEEDS), stagnation)
                                 except ValueError:
+                                    if stagnation >= 0:  # a tight try: from every seed it almost never does better
+                                        raise
                                     rollback(rec, job.key, mark)  # a failed search marks its way with lamps
                             return search_from(tree_seeds, stagnation)
 
@@ -1187,7 +1189,8 @@ class _GreedyRouter:
         self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
-        _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths, self.terminal_positions)
+        _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths, self.terminal_positions,
+                                 self.net_checks)
         # Wire branches off the net's own sinks, so signal has to be followed through those. Not into a RAM block, though:
         # it's millions of cells, tested on its own, and nothing inside can come back onto this net.
         stop = Excluding(self.terminal_positions, {job.src, *(t for t in job.sinks if t not in self.block_inputs)})
@@ -1655,6 +1658,9 @@ def _route_all_nets(
              and (p.component.metadata.get("bank")
                   or (p.component.footprint.width >= 2 * p.component.footprint.depth
                       and not p.component.metadata.get("thin")))]  # others are easy to go around
+    # As run does: the world's millions of cells aren't garbage, and walking them per collection cost seconds here.
+    gc.freeze()
+    gc.set_threshold(200_000, 10, 10)
     with phase("[wire] preparing nets"):
         router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                                frozenset(pin_terminal.values()), resume=resume,
