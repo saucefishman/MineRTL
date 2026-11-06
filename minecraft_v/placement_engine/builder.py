@@ -826,6 +826,7 @@ _BLOCKER_MAX = 4
 _RIP_ROUNDS = 3  # per job: rip-and-retry rounds, each for a sink that hasn't had one yet
 _ESCALATE_RADIUS = 6  # a job out of retries gets this wider ring ripped, once, even nets ripped before
 _ESCALATE_MAX = 8
+_BIG_RIP_SINKS = 4  # escalating, a big-fanout net's branch near the sink is ripped too if it carries at most this many
 _DETOUR_REACH = 8  # blocks to a detour's far end, on top of one per tick short
 _DETOUR_ROUNDS = 4  # of laying short paths again and padding them
 _REPAIR_ROUNDS = 3  # re-routes of nets verify still finds fault with
@@ -1007,24 +1008,7 @@ class _GreedyRouter:
         if laid is None:
             self.rip(job.key)
             return
-
-        def distance(i: int) -> int:
-            return min((abs(c[0] - a[0]) + abs(c[1] - a[1]) + abs(c[2] - a[2]) for c in laid.cells[i] for a in around),
-                       default=1 << 30)
-
-        # On a tie the later branch: fewer can hang off it.
-        nearest = min(reversed(range(len(laid.paths))), key=distance, default=None)
-        gone, keep = set(laid.paths[nearest]) if nearest is not None else set(), []
-        kept_cells = {job.src}  # sibling branches start here too
-        for i, path in enumerate(laid.paths):
-            if i == nearest:
-                continue
-            if path[0] in gone and path[0] not in kept_cells:
-                gone.update(path)
-            else:
-                keep.append(i)
-                kept_cells.update(path)
-        ripped_via = any(laid.targets[i] in laid.vias for i in range(len(laid.paths)) if i not in keep)
+        keep, ripped_via = self._branch_split(job, laid, around)
         self.rip(job.key)
         if ripped_via or not keep:
             return
@@ -1049,6 +1033,39 @@ class _GreedyRouter:
                                            [*sinks, *(s for s in laid.sinks if s not in sinks)],
                                            len(laid.vias) + len(sinks), targets, cells)
         self.has_kept_wire.add(job.key)
+
+    @staticmethod
+    def _branch_split(job: _RouteJob, laid: _KeptBranches, around: list[Pos]) -> tuple[list[int], bool]:
+        """For rip_branch: the indices of the paths it keeps, and whether a via goes with the rest."""
+        def distance(i: int) -> int:
+            return min((abs(c[0] - a[0]) + abs(c[1] - a[1]) + abs(c[2] - a[2]) for c in laid.cells[i] for a in around),
+                       default=1 << 30)
+
+        # On a tie the later branch: fewer can hang off it.
+        nearest = min(reversed(range(len(laid.paths))), key=distance, default=None)
+        gone, keep = set(laid.paths[nearest]) if nearest is not None else set(), []
+        kept_cells = {job.src}  # sibling branches start here too
+        for i, path in enumerate(laid.paths):
+            if i == nearest:
+                continue
+            if path[0] in gone and path[0] not in kept_cells:
+                gone.update(path)
+            else:
+                keep.append(i)
+                kept_cells.update(path)
+        ripped_via = any(laid.targets[i] in laid.vias for i in range(len(laid.paths)) if i not in keep)
+        return keep, ripped_via
+
+    def branch_rip_sinks(self, job: _RouteJob, around: list[Pos]) -> int | None:
+        """How many sinks rip_branch(job, around) would take with it, or None if it would take the whole net."""
+        laid = self.laid.get(job.key)
+        if laid is None or job.key in self.has_kept_wire:
+            return None
+        keep, ripped_via = self._branch_split(job, laid, around)
+        if ripped_via or not keep:
+            return None
+        kept = {laid.targets[i] for i in keep}
+        return sum(1 for t in laid.targets if t in laid.sinks and t not in kept)
 
     def _cells_since(self, key: str, mark: int) -> frozenset[Pos]:
         return frozenset(e[2] for e in self.rec.journals[key][mark:] if e[0] == "block")
@@ -1447,9 +1464,11 @@ class _GreedyRouter:
             jobs = self.resume.in_saved_order(jobs)
         failures: list[tuple[str, Exception]] = []
         keep_fanout = _first_fanout[0]
-        # Blockers to rip: not nets routed first for being huge. Redoing one costs more than the sink it would free.
+        # Blockers to rip: not nets routed first for being huge. Redoing one costs more than the sink it would free,
+        # unless a job is out of retries and the branch to rip carries few of its sinks (big_keys).
         pool = jobs if pool is None else pool
         keys = {job.key for job in pool if not keep_fanout or len(job.sinks) < keep_fanout}
+        big_keys = {job.key for job in pool} - keys
         by_key = {job.key: job for job in pool}
         queue = deque(enumerate(jobs, 1))
         cleared_for: dict[str, set[Pos]] = {}  # job key -> sinks whose blockers were ripped
@@ -1529,6 +1548,14 @@ class _GreedyRouter:
                     where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
                     wider = [] if where is None or job.key in escalated or not rip_blockers else \
                         self.blockers(where, job.key, keys, _ESCALATE_RADIUS)[:_ESCALATE_MAX]
+                    if where is not None and job.key not in escalated and rip_blockers:
+                        # A net routed first for its fanout can wall a pin in on its own, going round its keepout.
+                        # Its branch there is all that has to go, which costs little if few sinks hang off it.
+                        cost = {v: self.branch_rip_sinks(by_key[v], [where]) for v in self.blockers(where, job.key, big_keys)}
+                        cheap = [v for v, n in cost.items() if n is not None and n <= _BIG_RIP_SINKS]
+                        if cheap:
+                            log(f"{label} {job.key}: also ripping a branch of {', '.join(cheap)}, fanout routed first")
+                        wider = [*cheap, *wider]
                     # The wide retry raises the f-cap too, so a walled-in net that ran out of it can still get round.
                     if wider or (where is not None and job.key not in escalated and rip_blockers
                                  and not isinstance(e, LayConflict)):

@@ -409,6 +409,32 @@ def test_failed_sink_keeps_the_jobs_branches_and_rips_only_blockers(monkeypatch)
     assert len(router.paths["n"][1]) == 3
 
 
+def test_sink_walled_in_by_a_big_fanout_net_gets_its_branch_ripped(monkeypatch):
+    # A net routed first for its fanout isn't ripped for a failed sink, but it can wall a pin in on its own (floweypu
+    # seed 0, net_8787). Out of retries, the branch of it beside the sink goes if it carries few sinks.
+    monkeypatch.setattr(builder, "_first_fanout", [2])
+    router, region, _, dust_owner = _router()
+    big = _job("big", (1, 1, 1), [(20, 1, 1), (1, 1, 20)])
+    goal = (4, 1, 12)
+    net = _job("n", (12, 1, 12), [goal])
+    find = builder._find_wire_path
+    searches = []
+
+    def walled_while_big_is_near(ws, solid, owner, start, dst, net_id, *args, **kwargs):
+        searches.append((net_id, dst))
+        if net_id == "n" and any(owner.get((goal[0] + dx, goal[1], goal[2] + dz)) == "big"
+                                 for dx in range(-3, 4) for dz in range(-3, 4)):
+            raise ValueError("No route")
+        return find(ws, solid, owner, start, dst, net_id, *args, **kwargs)
+
+    monkeypatch.setattr(builder, "_find_wire_path", walled_while_big_is_near)
+    assert router.run([big, net], "[test]") == []
+    assert searches.count(("big", (20, 1, 1))) == 1  # the far branch stays
+    assert searches.count(("big", (1, 1, 20))) == 2  # ripped, then routed after n
+    assert not router.kept and not router.has_kept_wire
+    assert not verify_signals(region, {"big": (big.src, big.sinks), "n": (net.src, net.sinks)}, dust_owner)
+
+
 def test_rip_branch_keeps_the_other_branches_and_reroutes_only_its_sink(monkeypatch):
     router, region, solid, dust_owner = _router()
     job = _job("n", (2, 1, 2), [(8, 1, 2), (2, 1, 14)])
