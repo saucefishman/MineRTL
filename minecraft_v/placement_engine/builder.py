@@ -5,6 +5,7 @@ import gc
 import time
 import zlib
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Collection
 from math import ceil
@@ -27,7 +28,7 @@ from minecraft_v.placement_engine.ir import (
     ComponentType,
     NetConnection,
 )
-from .block_utils import Box, BulkRegion, save_schematic, _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
+from .block_utils import Box, BulkRegion, palette_writer, save_schematic, _is_air, _ensure_support, _is_redstone_wire, _is_repeater, _is_torch, _block_str, _is_glass
 from .constants import (
     _HORIZ_DIRS, _DIRS_6, _SIDE_NORMAL, _OPPOSITE_SIDE, WOOLS, REDSTONE, STONE, _REPEATER_MAX_DELAY,
     _ROUTE_STAGNATION_FIRST, _ROUTE_RETRY_BUDGET,
@@ -84,6 +85,7 @@ def _place_gate_templates(
     ref_lm_sub = 1
     oriented_blocks: dict[tuple[str, bool, bool], BlockArrays] = {}
     refs: dict[str, Schematic] = {}
+    write = palette_writer(workspace)
     for item in placed:
         c = item.component
         if c.type == ComponentType.CUSTOM:
@@ -112,7 +114,7 @@ def _place_gate_templates(
         _paste_template(workspace, template, item.origin, solid,
                         dust_owner, f"__schematic__{c.id}", pin_positions,
                         mirror_width=c.footprint.width if c.metadata.get("mirror_x") else None,
-                        block_states=INIT_HIGH_STATES.get(c.type) if c.metadata.get("init") else None)
+                        block_states=INIT_HIGH_STATES.get(c.type) if c.metadata.get("init") else None, write=write)
     return (ref_mc_version, ref_lm_version, ref_lm_sub)
 
 
@@ -465,26 +467,75 @@ _MACRO_WALL = 4  # keepout thickness inside a macro's box: thicker than any rout
 
 def _macro_shell(item: _Placed, margin: tuple[int, int, int, int] = (0, 0, 0, 0)) -> set[tuple[int, int, int]]:
     """Hull of a macro's box grown by margin (sides, below, above, unused); the middle stays out of the sets."""
+    return _cells_in(_shell_slabs(item, margin))
+
+
+def _shell_slabs(item: _Placed, margin: tuple[int, int, int, int] = (0, 0, 0, 0)) -> list[Box]:
+    """_macro_shell as disjoint boxes (lowest cell, one past the highest)."""
     ox, oy, oz = item.origin
     fp = item.component.footprint
     side, below, above, _ = margin
     wall = _MACRO_WALL
-    xs = np.arange(ox - side, ox + fp.width + side)
-    ys = np.arange(oy - below, oy + fp.height + above)
-    zs = np.arange(oz - side, oz + fp.depth + side)
-    gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
-    keep = ((gx < ox + wall) | (gx >= ox + fp.width - wall) | (gy < oy + wall) | (gy >= oy + fp.height - wall)
-            | (gz < oz + wall) | (gz >= oz + fp.depth - wall))
-    return set(zip(gx[keep].tolist(), gy[keep].tolist(), gz[keep].tolist()))
+    grown = ((ox - side, ox + fp.width + side), (oy - below, oy + fp.height + above), (oz - side, oz + fp.depth + side))
+    hollow = ((ox + wall, ox + fp.width - wall), (oy + wall, oy + fp.height - wall), (oz + wall, oz + fp.depth - wall))
+    if any(lo >= hi for lo, hi in hollow):
+        slabs = [grown]
+    else:  # the grown box less the hollow, as disjoint slabs: x outside it, then y, then z
+        (gx, gy, gz), (hx, hy, hz) = grown, hollow
+        slabs = [((gx[0], hx[0]), gy, gz), ((hx[1], gx[1]), gy, gz),
+                 (hx, (gy[0], hy[0]), gz), (hx, (hy[1], gy[1]), gz),
+                 (hx, hy, (gz[0], hz[0])), (hx, hy, (hz[1], gz[1]))]
+    return [(lo, hi) for lo, hi in (tuple(zip(*slab)) for slab in slabs) if all(a < b for a, b in zip(lo, hi))]
+
+
+def _cells_in(boxes: list[Box]) -> set[tuple[int, int, int]]:
+    """Every cell of the union of boxes."""
+    if not boxes:
+        return set()
+    low = np.min([lo for lo, _ in boxes], axis=0)
+    grid = np.zeros(np.max([hi for _, hi in boxes], axis=0) - low, dtype=bool)
+    for lo, hi in boxes:
+        grid[lo[0] - low[0]:hi[0] - low[0], lo[1] - low[1]:hi[1] - low[1], lo[2] - low[2]:hi[2] - low[2]] = True
+    cells = np.argwhere(grid)
+    cells += low
+    return set(zip(cells[:, 0].tolist(), cells[:, 1].tolist(), cells[:, 2].tolist()))
 
 
 def _hidden_cells(placed: list[_Placed]) -> frozenset[tuple[int, int, int]]:
     """Cells verification treats as air: gate interiors and macro walls (nothing reaches past those)."""
-    cells = _component_interior(placed)
-    for item in placed:
-        if item.component.type == ComponentType.CUSTOM:
-            cells |= _macro_shell(item)
-    return frozenset(cells)
+    boxes = [slab for item in placed if item.component.type == ComponentType.CUSTOM for slab in _shell_slabs(item)]
+    boxes += [(item.origin, tuple(o + n for o, n in zip(item.origin, (fp.width, fp.height, fp.depth))))
+              for item in placed
+              if item.component.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM)
+              for fp in [item.component.footprint] if fp.width > 0 and fp.height > 0 and fp.depth > 0]
+    return frozenset(_cells_in(boxes))
+
+
+@contextmanager
+def _no_collections():
+    """No garbage collection while millions of tuples are made, none of them garbage: each pass would walk them all.
+    What's made is frozen after, or the first collection would walk it anyway."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.freeze()
+        if enabled:
+            gc.enable()
+
+
+class _LazyCells:
+    """`p in cells` for a set made only when first asked: support checks rarely get past their own tests."""
+
+    def __init__(self, make: Callable[[], Collection[tuple[int, int, int]]]):
+        self._make = make
+        self._cells: Collection[tuple[int, int, int]] | None = None
+
+    def __contains__(self, p) -> bool:
+        if self._cells is None:
+            self._cells = self._make()
+        return p in self._cells
 
 
 def _build_footprint_blocked(
@@ -498,19 +549,23 @@ def _build_footprint_blocked(
 ) -> frozenset[tuple[int, int, int]]:
     """Hard-block zone: footprint interiors + expanded borders + IO repeater tops + const air-gaps
     + the lever/lamp cells (and their neighbours) behind input / in front of output repeaters."""
-    fp_interior = _component_interior(placed)
-    fp_expanded: set[tuple[int, int, int]] = set(fp_interior)
+    boxes: list[Box] = []
     for item in placed:
         if item.component.type == ComponentType.CUSTOM:
-            fp_expanded |= _macro_shell(item, (1, 1, 2, 0))  # same margins as the gate expansion below
-    for cx, cy, cz in fp_interior:
-        for ddx, ddy, ddz in _DIRS_6:
-            fp_expanded.add((cx + ddx, cy + ddy, cz + ddz))
-        fp_expanded.add((cx, cy + 2, cz))  # extra upward block: support placed below wire
-        # Vertical diagonals: signal coupling and support-block placement reach footprint through these
-        for ddx, ddz in _HORIZ_DIRS:
-            fp_expanded.add((cx + ddx, cy + 1, cz + ddz))
-            fp_expanded.add((cx + ddx, cy - 1, cz + ddz))
+            boxes += _shell_slabs(item, (1, 1, 2, 0))  # same margins as the gate expansion below
+    # Each gate's interior (_component_interior), and the interior moved to its 6 neighbours, an extra block up (support
+    # placed below wire), and the vertical diagonals (signal coupling and support-block placement reach it through those).
+    shifts = ((0, 0, 0), *_DIRS_6, (0, 2, 0), *((dx, dy, dz) for dx, dz in _HORIZ_DIRS for dy in (1, -1)))
+    for item in placed:
+        if item.component.type in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM):
+            continue
+        fp = item.component.footprint
+        if fp.width <= 0 or fp.height <= 0 or fp.depth <= 0:
+            continue
+        ox, oy, oz = item.origin
+        boxes += [((ox + dx, oy + dy, oz + dz), (ox + dx + fp.width, oy + dy + fp.height, oz + dz + fp.depth))
+                  for dx, dy, dz in shifts]
+    fp_expanded = _cells_in(boxes)
     for rx, ry, rz in io_repeater_cells:
         fp_expanded.add((rx, ry + 1, rz))
     for (rx, ry, rz), (nx, nz), is_input in io_fixtures:
@@ -2211,31 +2266,36 @@ def build_litematic_from_component_list(
             for sink in net.sinks
             if sink.component_id in output_component_ids
         }
-        footprint_blocked = _build_footprint_blocked(
-            placed, pin_terminal, io_repeater_cells, const_positions, io_fixtures, block_output_lamps=not output_pin_targets,
-            envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
-        )
+        with phase("[layout] keepout"), _no_collections():
+            footprint_blocked = _build_footprint_blocked(
+                placed, pin_terminal, io_repeater_cells, const_positions, io_fixtures,
+                block_output_lamps=not output_pin_targets,
+                envelope=_io_envelope_blocked(placed, ws_bounds, block_outputs=not output_pin_targets),
+            )
         all_terminals = _build_terminal_map(work_nets, pin_terminal)
         all_terminals.update(_unused_output_terminals(placed, all_terminals, pin_terminal))
+    # The layout lives to the end, millions of cells in sets: full collections needn't walk it again and again.
+    gc.freeze()
 
-    save_artifact("component_layout.json", [
-        {
-            "id": p.component.id,
-            "type": p.component.type.value,
-            "origin": list(p.origin),
-            "footprint": {
-                "width": p.component.footprint.width,
-                "height": p.component.footprint.height,
-                "depth": p.component.footprint.depth,
-            },
-            "pins": [
-                {"name": pin.name, "direction": pin.direction.value, "offset": list(pin.offset),
-                 "const_value": pin.const_value}
-                for pin in p.component.pins
-            ],
-        }
-        for p in placed
-    ])
+    with phase("[layout] saving layout"):
+        save_artifact("component_layout.json", [
+            {
+                "id": p.component.id,
+                "type": p.component.type.value,
+                "origin": list(p.origin),
+                "footprint": {
+                    "width": p.component.footprint.width,
+                    "height": p.component.footprint.height,
+                    "depth": p.component.footprint.depth,
+                },
+                "pins": [
+                    {"name": pin.name, "direction": pin.direction.value, "offset": list(pin.offset),
+                     "const_value": pin.const_value}
+                    for pin in p.component.pins
+                ],
+            }
+            for p in placed
+        ], indent=None)
 
     # Snapshots are slow debug output (litematic serialization); stale ones are cleared either way.
     if DEFAULT_SNAPSHOT_DIR.exists():
@@ -2278,8 +2338,9 @@ def build_litematic_from_component_list(
         # Placement splits multi-bit IO into one component per bit, named after the bit.
         flat_ends = flat_terminals(flat, lambda cid, pin: pin_terminal.get((cid, pin), pin_terminal.get((pin, pin))), inner)
         probed = probe_components(probes) if probes else frozenset()
-        flat_period = _hold_with_detours(workspace, flat, flat_ends, failed_nets, probed, opaque, macros, clock_requirement,
-                                         hold_shorts, kept_router[0] if kept_router else None)
+        with phase("[hold] fixing hold"):
+            flat_period = _hold_with_detours(workspace, flat, flat_ends, failed_nets, probed, opaque, macros, clock_requirement,
+                                             hold_shorts, kept_router[0] if kept_router else None)
     if macros:
         signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
                                                     failed_nets)
@@ -2293,8 +2354,9 @@ def build_litematic_from_component_list(
             log(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
-    unused = _unused_output_terminals(placed, _build_terminal_map(work_nets, pin_terminal), pin_terminal)
-    live_pins = find_live_pin_wire(workspace, {name: next(iter(cells)) for name, cells in unused.items()})
+    with phase("[verify] live pins"):
+        unused = _unused_output_terminals(placed, _build_terminal_map(work_nets, pin_terminal), pin_terminal)
+        live_pins = find_live_pin_wire(workspace, {name: next(iter(cells)) for name, cells in unused.items()})
     for violation in live_pins:
         log(f"[verify] live_pin {sorted(violation.nets)} has wire on its cell {violation.pos}")
     signal_violations = signal_violations + live_pins
@@ -2338,7 +2400,8 @@ def build_litematic_from_component_list(
         elif snapshot_dir is not None:
             save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
 
-    _report_unsupported_blocks(workspace, dust_owner, _hidden_cells(placed), opaque)
+    with phase("[verify] unsupported blocks"):
+        _report_unsupported_blocks(workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)
 
     if capture is not None:
         capture.update(
@@ -2354,11 +2417,12 @@ def build_litematic_from_component_list(
         )
         return out_path
 
-    with phase("[timing] critical path"):
-        critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
-                                                     probe_components(probes) if probes else frozenset(), flat_period)
     if clock_requirement and not clock_requirement[0].unclocked:  # static timing edge by edge, where it covers every flip-flop
         critical_path_ticks = 2 * clock_requirement[0].half_period
+    else:
+        with phase("[timing] critical path"):
+            critical_path_ticks = _compute_critical_path(comp, dust_owner, workspace, pin_terminal, macros,
+                                                         probe_components(probes) if probes else frozenset(), flat_period)
     log(f"[timing] critical path {critical_path_ticks} ticks")
 
     # Cosmetic only, after all verification: dust shapes, then label signs above I/O repeaters.

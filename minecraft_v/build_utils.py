@@ -24,10 +24,11 @@ def save_schematic_artifact(filename: str, region: Region, snapshot_dir: Path = 
     return out
 
 
-def save_artifact(filename: str, data: Any, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR) -> Path:
+def save_artifact(filename: str, data: Any, artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR, indent: int | None = 2) -> Path:
+    """indent=None writes one line, several times faster for big data: json only indents in Python."""
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     out = artifacts_dir / filename
-    out.write_text(json.dumps(data, indent=2))
+    out.write_text(json.dumps(data, indent=indent))
     return out
 
 

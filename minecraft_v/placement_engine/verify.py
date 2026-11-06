@@ -22,6 +22,7 @@ Rules (see tests/test_verify.py):
 """
 from __future__ import annotations
 
+import itertools
 from collections import deque
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
@@ -502,6 +503,8 @@ def verify_signals(
     terminals = frozenset(p for src, sinks in nets.values() for p in (src, *sinks))
     world = _World(region, blocked, terminals)
     grid = signal_grid(region, blocked, terminals)
+    if grid is not None and hasattr(grid, "check_net_keys"):
+        return _verify_on_grid(region, nets, owner, blocked, on_net, terminals, world, grid)
     violations: list[Violation] = []
     reached_by: dict[Pos, str] = {}
     short_pairs: set[frozenset[str]] = set()
@@ -550,6 +553,95 @@ def verify_signals(
     return violations
 
 
+def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owner: dict[Pos, str],
+                    blocked: Collection[Pos], on_net: Callable[[str], None] | None, terminals: frozenset[Pos],
+                    world: _World, grid) -> list[Violation]:
+    """verify_signals on the kernel, the same violations in the same order. Every net is searched first; then the
+    cells reached are checked for shorts in bulk, and only nets with a suspect cell go through them one by one."""
+    _, h, l = region._Region__blocks.shape
+    found: list[list[Violation]] = []
+    reached: list[np.ndarray] = []
+    for net_id, (source, sinks) in nets.items():
+        own = {source, *sinks}
+        stop = Excluding(terminals, own)
+        keys, strong, has_latch, inverted, in_reach = grid.check_net_keys(source, sinks, own)
+        strong_enough = {sink for sink, ok in zip(sinks, strong) if ok}
+        net: list[Violation] = []
+        for sink, hit in zip(sinks, in_reach):
+            if not hit or world.passes_by(sink):
+                net.append(Violation("open", frozenset({net_id}), sink))
+        for sink, hit in zip(sinks, in_reach):
+            if hit and sink not in strong_enough:
+                net.append(Violation("weak", frozenset({net_id}), sink))
+        latch = _latch_cycle(world, source, stop) if has_latch else []
+        if latch:
+            net.append(Violation("latch", frozenset({net_id}), latch[0]))
+        if inverted is not None:
+            net.append(Violation("inverted", frozenset({net_id}), inverted))
+        found.append(net)
+        reached.append(keys)
+        if on_net is not None:
+            on_net(net_id)
+
+    names = list(nets)
+    ids = {net_id: i for i, net_id in enumerate(names)}
+    all_keys = np.concatenate(reached) if reached else np.empty(0, dtype=np.int64)
+    offsets = np.cumsum([0, *map(len, reached)])
+    net_of = np.repeat(np.arange(len(reached)), np.diff(offsets))
+    suspect = np.zeros(len(reached), dtype=bool)
+    first_net = np.empty(len(all_keys), dtype=np.int64)
+    if len(all_keys):
+        by_key = np.argsort(all_keys, kind="stable")
+        sorted_keys = all_keys[by_key]
+        sorted_nets = net_of[by_key]
+        # Owned by another net. Which cells are blocked is left to the check one by one.
+        if owner:
+            cells = np.fromiter(itertools.chain.from_iterable(owner), dtype=np.int64, count=3 * len(owner)).reshape(-1, 3)
+            values = list(owner.values())
+            for name in set(values):
+                ids.setdefault(name, len(ids))
+            owners = np.fromiter(map(ids.__getitem__, values), dtype=np.int64, count=len(values))
+            inside = ((cells >= 0) & (cells < region._Region__blocks.shape)).all(axis=1)
+            cell_keys = (cells[inside, 0] * h + cells[inside, 1]) * l + cells[inside, 2]
+            owners = owners[inside]
+            if len(cell_keys):
+                order = np.argsort(cell_keys)
+                cell_keys, owners = cell_keys[order], owners[order]
+                at = np.minimum(np.searchsorted(cell_keys, sorted_keys), len(cell_keys) - 1)
+                owned = (cell_keys[at] == sorted_keys) & (owners[at] != sorted_nets)
+                suspect[sorted_nets[owned]] = True
+        # Reached by an earlier net: the first net to reach each cell, against each net reaching it.
+        starts = np.r_[True, sorted_keys[1:] != sorted_keys[:-1]]
+        group_start = np.maximum.accumulate(np.where(starts, np.arange(len(sorted_keys)), 0))
+        first_net[by_key] = sorted_nets[group_start]
+        suspect[net_of[first_net != net_of]] = True
+
+    violations: list[Violation] = []
+    short_pairs: set[frozenset[str]] = set()
+
+    def short(a: str, b: str, pos: Pos) -> None:
+        pair = frozenset((a, b))
+        if pair not in short_pairs:
+            short_pairs.add(pair)
+            violations.append(Violation("short", pair, pos))
+
+    for k, net_id in enumerate(names):
+        violations += found[k]
+        if not suspect[k]:
+            continue
+        keys = all_keys[offsets[k]:offsets[k + 1]]
+        cells = list(zip((keys // (h * l)).tolist(), ((keys // l) % h).tolist(), (keys % l).tolist()))
+        earlier = {pos: names[first] for pos, first in zip(cells, first_net[offsets[k]:offsets[k + 1]].tolist()) if first != k}
+        for pos in set(cells):  # the order verify_signals goes through them in, which decides the cell a short reports
+            cell_owner = owner.get(pos)
+            if cell_owner is not None and cell_owner != net_id and pos not in blocked:
+                short(net_id, cell_owner, pos)
+            other = earlier.get(pos)
+            if other is not None and world.kind(pos) != _OPAQUE:
+                short(net_id, other, pos)
+    return violations
+
+
 _NEEDS_FLOOR = ("minecraft:redstone_wire", "minecraft:repeater", "minecraft:comparator", "minecraft:redstone_torch")
 _NO_FLOOR_MARKERS = ("air", "redstone_wire", "torch", "repeater", "comparator", "lever", "button", "pressure_plate")
 
@@ -580,24 +672,32 @@ def verify_support(
     """
     palette = region._Region__palette
     blocks = region._Region__blocks
-    needy = [i for i, b in enumerate(palette) if b.id in _NEEDS_FLOOR or b.id == "minecraft:redstone_wall_torch"]
-    if not needy:
+    # Per palette entry: whether it needs support, from where, and whether it gives some.
+    offsets = np.zeros((len(palette), 3), dtype=np.int64)
+    needs = np.zeros(len(palette), dtype=bool)
+    for i, b in enumerate(palette):
+        if b.id == "minecraft:redstone_wall_torch":
+            dx, dz = _FACING_TO_DELTA[b["facing"]]  # faces away from its wall
+            offsets[i] = (-dx, 0, -dz)
+            needs[i] = True
+        elif b.id in _NEEDS_FLOOR:
+            offsets[i] = (0, -1, 0)
+            needs[i] = True
+    if not needs.any():
         return []
-    violations: list[Violation] = []
-    mask = np.isin(blocks, needy)
+    gives = np.array([_gives_support(b) for b in palette], dtype=bool)
+    mask = needs[blocks]
     for lo, hi in skip:
         mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
-    for p in map(tuple, np.argwhere(mask).tolist()):
+    cells = np.argwhere(mask)
+    support = cells + offsets[blocks[cells[:, 0], cells[:, 1], cells[:, 2]]]
+    in_region = ((support >= 0) & (support < (region.width, region.height, region.length))).all(axis=1)
+    held = np.zeros(len(cells), dtype=bool)
+    inside = support[in_region]
+    held[in_region] = gives[blocks[inside[:, 0], inside[:, 1], inside[:, 2]]]
+    violations: list[Violation] = []
+    for p in map(tuple, cells[~held].tolist()):
         if p in blocked:
-            continue
-        block = palette[blocks[p]]
-        if block.id == "minecraft:redstone_wall_torch":
-            dx, dz = _FACING_TO_DELTA[block["facing"]]  # faces away from its wall
-            support = (p[0] - dx, p[1], p[2] - dz)
-        else:
-            support = (p[0], p[1] - 1, p[2])
-        in_region = all(0 <= c < n for c, n in zip(support, (region.width, region.height, region.length)))
-        if in_region and _gives_support(palette[blocks[support]]):
             continue
         net = owner.get(p)
         violations.append(Violation("unsupported", frozenset({net} if net else ()), p))

@@ -15,6 +15,7 @@ Synthesis options:
   --artifacts-dir DIR   Where the netlist and build files go (default: build/artifacts)
   --synth-only          Stop after writing the netlist
   --no-tiled-ram        Build memories from flip-flops instead of RAM blocks
+  --no-synth-cache      Run yosys even if build/synth_cache has this netlist (same sources, script and yosys)
 
 Build options:
 EOF
@@ -34,6 +35,8 @@ args=()
 out_litematic_dir=""
 out_litematic="build/result.litematic"
 synth_only=false
+use_synth_cache=true
+synth_cache_dir="build/synth_cache"
 debug_prints=true
 tiled_ram=true
 top=main
@@ -62,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-tiled-ram)  # every memory becomes flip-flops and muxes; also skips the ABC pass below
             tiled_ram=false
+            shift
+            ;;
+        --no-synth-cache)  # run yosys even when build/synth_cache has the netlist
+            use_synth_cache=false
             shift
             ;;
         --synth-only)  # stop after writing the netlist
@@ -209,8 +216,7 @@ opt_clean
 abc -g AND,OR,XOR,MUX -script +strash;&get,-n;&syn2;&dch,-f;&nf;&put
 opt_clean"
 fi
-yosys_status=0
-yosys -q -l "$yosys_log" -p "
+yosys_script="
 read_verilog -sv \"${dir}/*.v\"
 read_verilog -lib \"${here}/techmap/ram_cells.v\"
 hierarchy -check -top ${top}
@@ -231,14 +237,54 @@ opt -nosdff
 techmap -map \"${here}/techmap/sdff_decompose.v\" -map \"${here}/techmap/sdffe_decompose.v\"
 techmap -map \"${here}/techmap/dffe_pn_decompose.v\"
 opt_clean
-${abc_step}
+${abc_step}"
+
+# The same sources, script and yosys give the same netlist: keep it, keyed by all three. Sources that pull in other
+# files (`include, $readmem) aren't cached, as those files aren't in the key.
+# Names in the netlist carry the paths yosys read files by and, for $write cells, a memory address. Without them the
+# netlist is the same from any checkout and any run, and so is the build, as names feed hashing.
+unplace() {
+    DIR="${dir%/}/" HERE="${here}/" perl -p -e 's/\Q$ENV{DIR}\E//g; s/\Q$ENV{HERE}\E//g; s/\$0x[0-9a-f]+:/\$:/g' "$@"
+}
+
+# The same sources, script, yosys and abc give the same netlist: keep it, keyed by all of them. Sources that pull in
+# other files (`include, $readmem) aren't cached, as those files aren't in the key.
+synth_cache=""
+if [[ "$use_synth_cache" == true ]] && ! grep -qE '`include[[:space:]]|\$readmem[hb][[:space:]]*\(' "${dir%/}"/*.v 2>/dev/null; then
+    if command -v sha256sum >/dev/null; then sha=(sha256sum); else sha=(shasum -a 256); fi
+    yosys_bin="$(command -v yosys)"
+    datdir="$(yosys-config --datdir 2>/dev/null || echo "$(dirname "$yosys_bin")/../share/yosys")"  # its own techmap.v
+    key="$( { yosys -V; cat "$yosys_bin"; cat "$(dirname "$yosys_bin")/yosys-abc" 2>/dev/null; cat "$datdir"/*.v 2>/dev/null;
+              cat "${BASH_SOURCE[0]}";
+              printf '%s\n' "$yosys_script" | unplace; for f in "${dir%/}"/*.v "${here}"/techmap/*.v; do
+                  printf '%s\n' "${f##*/}"; cat "$f"; done; } | "${sha[@]}" | cut -c1-24)"
+    synth_cache="${synth_cache_dir%/}/${key}"
+fi
+if [[ -n "$synth_cache" && -f "$synth_cache/netlist.json" ]]; then
+    stop_spinner
+    cp "$synth_cache/netlist.json" "$synth_cache/yosys.log" "$synth_cache/yosys.err" "$artifacts_dir/"
+    echo "[yosys] netlist from $synth_cache (--no-synth-cache to run yosys)" >&2
+    cat "$yosys_err"
+else
+    yosys_status=0
+    yosys -q -l "$yosys_log" -p "${yosys_script}
 write_json \"${artifacts_dir}/netlist.json\"
 stat
 " > "$yosys_err" 2>&1 || yosys_status=$?
-stop_spinner
-cat "$yosys_err"
-if [[ $yosys_status -ne 0 ]]; then
-    exit "$yosys_status"
+    stop_spinner
+    cat "$yosys_err"
+    if [[ $yosys_status -ne 0 ]]; then
+        exit "$yosys_status"
+    fi
+    unplace "${artifacts_dir}/netlist.json" > "${artifacts_dir}/netlist.json.tmp"
+    mv "${artifacts_dir}/netlist.json.tmp" "${artifacts_dir}/netlist.json"
+    if [[ -n "$synth_cache" ]]; then
+        mkdir -p "$synth_cache.tmp$$"
+        cp "$artifacts_dir/netlist.json" "$yosys_log" "$yosys_err" "$synth_cache.tmp$$/"
+        if [[ -e "$synth_cache" ]] || ! mv "$synth_cache.tmp$$" "$synth_cache" 2>/dev/null; then
+            rm -rf "$synth_cache.tmp$$"  # another build got there first
+        fi
+    fi
 fi
 
 if [[ "$synth_only" == true ]]; then

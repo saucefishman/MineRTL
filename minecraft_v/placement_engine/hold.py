@@ -124,6 +124,23 @@ class _HoldTiming:
         clock_nets = [n for n in self.nets.values() if any(s.pin_name == "C" for s in n.sinks)]
         self.clock_net_ids = {n.net_id for n in clock_nets}
         self.roots = self._clock_inputs(clock_nets)
+        self.clock_tree = self._clock_tree()
+        self._clock: dict[str, int] | None = None
+
+    def _clock_tree(self) -> set[str]:
+        """Every net a clock arrival can go through: from the roots, through gates up to flip-flops and outputs."""
+        nets: set[str] = set()
+        seen = set(self.roots)
+        todo = list(self.roots)
+        while todo:
+            for n in self.nets_from.get(todo.pop(), ()):
+                nets.add(n.net_id)
+                for s in n.sinks:
+                    kind = self.by_id[s.component_id].type
+                    if kind not in _SEQUENTIAL and kind != ComponentType.OUTPUT_PIN and s.component_id not in seen:
+                        seen.add(s.component_id)
+                        todo.append(s.component_id)
+        return nets
 
     def _clock_inputs(self, clock_nets: list) -> set[str]:
         """Input pins whose edges can reach a clock pin: directly, or through gates such as clk & enable."""
@@ -151,17 +168,22 @@ class _HoldTiming:
 
     def clock_arrivals(self) -> dict[str, int]:
         """Each flip-flop's clock arrival. Through a gate, any of several inputs may be the clock, so the latest counts:
-        an arrival taken from a quick enable path would understate how long data has to hold."""
-        clock: dict[str, int] = {}
-        for root in self.roots:
-            for (cid, pin), t in self._clock_pins(root).items():
-                if pin == "C":
-                    clock[cid] = max(clock.get(cid, 0), t)
-        return clock
+        an arrival taken from a quick enable path would understate how long data has to hold.
+        Kept until a net in the clock tree changes."""
+        if self._clock is None:
+            clock: dict[str, int] = {}
+            for root in self.roots:
+                for (cid, pin), t in self._clock_pins(root).items():
+                    if pin == "C":
+                        clock[cid] = max(clock.get(cid, 0), t)
+            self._clock = clock
+        return dict(self._clock)
 
     def forget(self, net_id: str) -> None:
         """A net's wire changed. Other nets keep what they found until they change too."""
         self.cache.pop(net_id, None)
+        if net_id in self.clock_tree:
+            self._clock = None
 
     def wire_ticks(self, n, s) -> int | None:
         return self.net_search(n.net_id)[0].get(self.terminals[s.component_id, s.pin_name])
@@ -718,16 +740,18 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
         progress = 0
         for margin, pin in bad:
             need = _HOLD_MARGIN - margin
+            padded = 0
             for net_id, sink in timing.path_nets(pin, via):
                 if net_id in timing.clock_net_ids:
                     continue
                 got = _pad_net(timing, net_id, sink, need, protected, counts, edits)
                 need -= got
-                progress += got
+                padded += got
                 if need <= 0:
                     break
-            # Another pin's path may share these nets, and its numbers are now stale.
-            clock, margins, via = timing.margins()
+            progress += padded
+            if padded:  # another pin's path may share these nets, and its numbers are now stale
+                clock, margins, via = timing.margins()
         total += progress
         if not progress:
             break

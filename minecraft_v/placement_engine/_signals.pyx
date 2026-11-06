@@ -425,31 +425,54 @@ cdef class Grid:
 
     def check_net(self, source, sinks, own):
         """(cells reached in order, whether each sink has strength left, whether there's a latch, lowest inverted contact)."""
+        return self._check_net(source, sinks, own, False)
+
+    def check_net_keys(self, source, sinks, own):
+        """check_net with the cells reached as an int64 array of flat indices into the grid, x * h * l + y * l + z, and
+        after the rest whether each sink was reached."""
+        return self._check_net(source, sinks, own, True)
+
+    cdef tuple _check_net(self, source, sinks, own, bint as_keys):
         cdef int x, y, z, m, node
-        cdef size_t i
+        cdef size_t i, n
         cdef int64_t c, inverted
+        cdef int64_t[:] kv
         self._set_stop(own, False)
         try:
             x, y, z = source
             self.graph.build(self.c, self.c.cell(x, y, z))
             reach_cells(self.graph, self.cells_out, self.seen, self.queue)
-            reached = [self._pos(self.cells_out[i]) for i in range(self.cells_out.size())]
+            if as_keys:
+                n = self.cells_out.size()
+                reached = np.empty(n, dtype=np.int64)
+                kv = reached
+                for i in range(n):
+                    kv[i] = self.cells_out[i]
+            else:
+                reached = [self._pos(self.cells_out[i]) for i in range(self.cells_out.size())]
             strengths(self.c, self.graph, self.best, self.queue)
             strong = []
+            hit = []
             self.sink_cells.clear()
             for x, y, z in sinks:
                 c = self.c.cell(x, y, z)
                 self.sink_cells.push_back(c)
                 ok = False
+                seen = False
                 for m in range(3):
                     node = self.graph.ids.get(c * 3 + m)
                     if node >= 0 and self.best[node] > 0:
                         ok = True
+                    if node >= 0 and self.seen[node]:
+                        seen = True
                 strong.append(ok)
+                hit.append(seen)
             latch = has_latch(self.c, self.graph)
             inverted = first_inverted(self.c, self.graph, self.sink_cells)
         finally:
             self._set_stop(own, True)
+        if as_keys:
+            return reached, strong, latch, (self._pos(inverted) if inverted >= 0 else None), hit
         return reached, strong, latch, (self._pos(inverted) if inverted >= 0 else None)
 
     def search(self, source, own, sinks):
@@ -1203,9 +1226,9 @@ cdef class Settler:
     def results(self):
         """Per block that has a state to write, sorted by position: positions n x 3, what kind of state, power, locked.
         Kind: 0 repeater, 1 dust, 2 torch or lamp, 3 comparator. Inside a box, only the ones that moved."""
-        cdef size_t i
+        cdef size_t i, row, n
         cdef int k
-        keep = []
+        cdef vector[int] keep
         for i in range(self.cells.size()):
             k = self.cells[i].kind
             if k == S_LEVER or k == S_BLOCK:
@@ -1213,19 +1236,23 @@ cdef class Settler:
             if self.cells[i].inside and self.cells[i].power == self.cells[i].saved_power \
                     and self.cells[i].locked == self.cells[i].saved_locked:
                 continue
-            keep.append(i)
-        n = len(keep)
+            keep.push_back(i)
+        n = keep.size()
         pos = np.empty((n, 3), dtype=np.int32)
         state = np.empty(n, dtype=np.int8)
         power = np.empty(n, dtype=np.int32)
         locked = np.empty(n, dtype=bool)
-        for row, c in enumerate(keep):
-            i = c
-            pos[row, 0], pos[row, 1], pos[row, 2] = self.cells[i].x, self.cells[i].y, self.cells[i].z
+        cdef int32_t[:, :] pv = pos
+        cdef signed char[:] sv = state
+        cdef int32_t[:] wv = power
+        cdef uint8_t[:] lv = locked.view(np.uint8)
+        for row in range(n):
+            i = keep[row]
+            pv[row, 0], pv[row, 1], pv[row, 2] = self.cells[i].x, self.cells[i].y, self.cells[i].z
             k = self.cells[i].kind
-            state[row] = 0 if k == S_REPEATER else 1 if k == S_DUST else 3 if k == S_COMPARATOR else 2
-            power[row] = self.cells[i].power
-            locked[row] = self.cells[i].locked
+            sv[row] = 0 if k == S_REPEATER else 1 if k == S_DUST else 3 if k == S_COMPARATOR else 2
+            wv[row] = self.cells[i].power
+            lv[row] = 1 if self.cells[i].locked else 0
         order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
         return pos[order], state[order], power[order], locked[order]
 

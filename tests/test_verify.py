@@ -12,6 +12,7 @@ Model (Java redstone, simplified to what the router builds):
 - Short: a cell reached from two nets' sources, or another net's owned cell reached.
   Open: a sink its own source can't reach.
 """
+import pytest
 from litemapy import BlockState, Region
 
 from minecraft_v.placement_engine.constants import GLASS, REDSTONE, REDSTONE_TORCH, STONE, _DELTA_TO_FACING
@@ -528,3 +529,32 @@ def test_repeater_into_a_pin_is_not_open():
     region[4, 3, 4] = _repeater((0, 1))
     violations = verify_signals(region, {"a": ((4, 3, 7), [(4, 3, 5)])}, owner, blocked=frozenset({(4, 3, 4)}))
     assert not violations
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_kernel_and_python_find_the_same_violations(monkeypatch, seed):
+    """The kernel checks shorts in bulk; the Python checks them cell by cell. Same violations, same order, same cells."""
+    import random
+
+    from minecraft_v.placement_engine import verify
+
+    rng = random.Random(seed)
+    region, owner = Region(0, 0, 0, 24, 8, 24), {}
+    nets = {}
+    for i in range(14):
+        net = f"n{i}"
+        x, z = rng.randrange(1, 22), rng.randrange(1, 22)
+        cells = [(x, 2, z)]
+        for _ in range(rng.randrange(3, 12)):
+            dx, dz = rng.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+            x, z = min(max(x + dx, 1), 22), min(max(z + dz, 1), 22)
+            if (x, 2, z) not in cells:
+                cells.append((x, 2, z))
+        _wire(region, owner, net, cells)
+        nets[net] = (cells[0], [cells[-1], cells[len(cells) // 2], (23, 2, i)])  # the last one unwired: open
+    owner[(5, 2, 5)] = "__schematic__gate"  # an owner that isn't a net
+    blocked = frozenset({(5, 2, 5), (6, 2, 6)})
+    kernel = verify_signals(region, nets, owner, blocked)
+    assert sum(v.kind == "short" for v in kernel) > 3 and sum(v.kind == "open" for v in kernel) >= 14
+    monkeypatch.setattr(verify, "_signals", None)
+    assert verify_signals(region, nets, owner, blocked) == kernel

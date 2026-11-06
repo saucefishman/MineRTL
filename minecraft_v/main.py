@@ -1,5 +1,6 @@
 import argparse
 import atexit
+import gc
 import json
 import sys
 from collections import defaultdict
@@ -295,10 +296,12 @@ def main():
         available = ", ".join(sorted(netlist.modules))
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     set_block_cache(Path(args.macro_cache) / "ram")
-    component_list = module_to_component_list(module)
-    probes = extract_probes(module) if args.debug_prints else None
+    with phase("[load] netlist to components"):
+        component_list = module_to_component_list(module)
+        probes = extract_probes(module) if args.debug_prints else None
 
-    save_build_artifacts(component_list)
+    with phase("[load] saving component list"):
+        save_build_artifacts(component_list)
 
     allow_routing_failures = args.allow_routing_failures or args.route_deadline is not None
     output_pin_targets = (
@@ -321,10 +324,12 @@ def main():
 
     macros = None
     flat_comp = component_list
-    rams = {c.metadata["macro"]: built_block(c.metadata["macro"])
-            for c in component_list.components if c.type == ComponentType.CUSTOM}
+    with phase("[ram] loading blocks"):
+        rams = {c.metadata["macro"]: built_block(c.metadata["macro"])
+                for c in component_list.components if c.type == ComponentType.CUSTOM}
     if rams:
         macros = rams
+    gc.freeze()  # the netlist and RAM blocks live to the end: full collections needn't walk them
     pathfinding.set_foot_repeaters(not rams)
     set_first_fanout(64 if rams else 0)
     set_long_edge_split(sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN) for c in component_list.components))
