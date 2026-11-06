@@ -657,7 +657,11 @@ def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owne
     net_of = np.repeat(np.arange(len(reached)), np.diff(offsets))
     suspect = np.zeros(len(reached), dtype=bool)
     first_net = np.empty(len(all_keys), dtype=np.int64)
-    if len(all_keys):
+    if len(all_keys) and _signals is not None and hasattr(_signals, "short_suspects"):
+        suspect, first_net = _signals.short_suspects(np.ascontiguousarray(all_keys, dtype=np.int64),
+                                                     np.ascontiguousarray(offsets, dtype=np.int64), owner, ids,
+                                                     *region._Region__blocks.shape)
+    elif len(all_keys):
         by_key = np.argsort(all_keys, kind="stable")
         sorted_keys = all_keys[by_key]
         sorted_nets = net_of[by_key]

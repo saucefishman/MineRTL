@@ -339,6 +339,7 @@ cdef extern from *:
     cdef cppclass IntMap:
         int get(int64_t)
         void put(int64_t, int)
+        void reset(size_t)
     cdef cppclass NetGraph:
         vector[int64_t] node
         IntMap ids
@@ -1255,6 +1256,54 @@ cdef class Settler:
             lv[row] = 1 if self.cells[i].locked else 0
         order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
         return pos[order], state[order], power[order], locked[order]
+
+
+def short_suspects(int64_t[::1] keys, int64_t[::1] offsets, owner, dict ids, int w, int h, int l):
+    """verify._verify_on_grid's bulk short check, with hash maps instead of sorting. keys: every net's reached cells, net
+    after net, offsets[k]:offsets[k + 1] net k's; owner: cell -> owning net's name; ids: net name -> k.
+    Returns (per net, whether it has a cell owned by another net or reached by an earlier one; per key, the first net
+    that reached it)."""
+    cdef Py_ssize_t n_nets = offsets.shape[0] - 1, k, i
+    suspect = np.zeros(n_nets, dtype=bool)
+    first = np.empty(keys.shape[0], dtype=np.int64)
+    cdef uint8_t[:] sv = suspect.view(np.uint8)
+    cdef int64_t[:] fv = first
+    cdef IntMap owners, firsts
+    cdef size_t cap = 1 << 10
+    cdef int x, y, z, f, o
+    cdef int64_t key
+    while cap < 2 * (<size_t>len(owner) + 1):
+        cap <<= 1
+    owners.reset(cap)
+    others = {}
+    for pos, name in owner.items():
+        x, y, z = pos
+        if not (0 <= x < w and 0 <= y < h and 0 <= z < l):
+            continue
+        oid = ids.get(name)
+        if oid is None:
+            oid = others.get(name)
+            if oid is None:
+                oid = others[name] = len(ids) + len(others)
+        owners.put((<int64_t>x * h + y) * l + z, oid)
+    cap = 1 << 10
+    while cap < 2 * (<size_t>keys.shape[0] + 1):
+        cap <<= 1
+    firsts.reset(cap)
+    for k in range(n_nets):
+        for i in range(offsets[k], offsets[k + 1]):
+            key = keys[i]
+            f = firsts.get(key)
+            if f < 0:
+                firsts.put(key, <int>k)
+                f = <int>k
+            fv[i] = f
+            if f != k:
+                sv[k] = 1
+            o = owners.get(key)
+            if o >= 0 and o != k:
+                sv[k] = 1
+    return suspect, first
 
 
 def table_gather(uint32_t[:, :, ::1] blocks, uint8_t[::1] table):
