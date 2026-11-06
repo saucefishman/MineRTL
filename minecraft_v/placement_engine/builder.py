@@ -1145,7 +1145,8 @@ class _GreedyRouter:
                         self.resume.forget(job.key, dst)
                     cell = next((c for c in e.cells if c not in ends and c not in blocked), None)
                     if cell is None or len(blocked) >= len(job_blocked) + _LAY_RETRIES:
-                        if dst not in leads:
+                        # A waypoint is only a way to go: one over the net's own wire can't be laid, so go without it.
+                        if dst not in leads and dst not in vias:
                             raise
                         rollback(rec, job.key, mark)
                         path = None  # only a hint
@@ -1186,7 +1187,7 @@ class _GreedyRouter:
         self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
         # last repeater upstream rather than from where it joins.
-        _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths)
+        _place_repeaters_for_net(ws, self.dust_owner, job.net_id, self.net_paths(job.net_id) + paths, self.terminal_positions)
         # Wire branches off the net's own sinks, so signal has to be followed through those. Not into a RAM block, though:
         # it's millions of cells, tested on its own, and nothing inside can come back onto this net.
         stop = Excluding(self.terminal_positions, {job.src, *(t for t in job.sinks if t not in self.block_inputs)})
@@ -1658,8 +1659,10 @@ def _route_all_nets(
         router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                                frozenset(pin_terminal.values()), resume=resume,
                                gate_cells=frozenset(_component_interior(placed)),
+                               # A net's checks stop at macro inputs: past them is the macro's own wire, checked when built,
+                               # and a routed bank's flip-flops would read as the net's latch.
                                block_inputs=frozenset(pin_terminal[(p.component.id, pin.name)] for p in placed
-                                                      if p.component.metadata.get("south_pins")
+                                                      if p.component.type == ComponentType.CUSTOM
                                                       for pin in p.component.pins if pin.direction == Direction.IN))
         jobs = [
             _RouteJob(

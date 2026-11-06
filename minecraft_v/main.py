@@ -328,17 +328,21 @@ def main():
     set_long_edge_split(sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN) for c in component_list.components))
     spacing = {}
     if args.macros and not args.flat:
+        # Around RAM blocks, gates fill one region: banks there are wide plates that stack and wall gates in between,
+        # so each instance is its own tile, about a big gate's shape.
+        row_tiles, bank_columns = (1, 0) if rams else (_MACRO_ROW_TILES, _MACRO_BANK_COLUMNS)
+
         def build(name, sub, ports, cells):
             return build_macro(name, sub, ports, cells, SCHEMATICS_DIR,
-                               cache_dir=Path(args.macro_cache) / f"row{_MACRO_ROW_TILES}",
-                               io_lane_pins=_MACRO_ROW_TILES != 1)
+                               cache_dir=Path(args.macro_cache) / f"row{row_tiles}",
+                               io_lane_pins=row_tiles != 1)
 
         def report(cls, macro):
             log(f"[macro] {len(cls.instances)} x {macro.name} ({macro.cells} cells)")
 
         component_list, macros, instances = extract_macros(component_list, build, _MACRO_FANOUT, _MACRO_MIN_CELLS,
-                                                           _MACRO_ROW_TILES,
-                                                           _MACRO_BANK_COLUMNS,
+                                                           row_tiles,
+                                                           bank_columns,
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
                                                            on_class=report)

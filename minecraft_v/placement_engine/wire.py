@@ -443,8 +443,11 @@ def _place_repeaters_for_net(
         dust_owner: dict[tuple[int, int, int], str],
         net_id: str,
         ordered_paths: list[list[tuple[int, int, int]]],
+        pins: frozenset[tuple[int, int, int]] | None = None,
 ) -> None:
     """Walk each routed A* path linearly, placing repeaters as needed.
+
+    pins: gate pin cells; a path can also end at a waypoint, which a repeater may cover.
 
     Uses the ordered paths directly so wrap-around detours are measured at
     their true signal length, not the shorter adjacency-graph shortcut.
@@ -466,6 +469,8 @@ def _place_repeaters_for_net(
     }
 
     sinks = {path[-1] for path in ordered_paths}  # a later branch can run on through a sink's pin cell
+    if pins is not None:
+        sinks &= pins
 
     def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
         if j <= 0 or j >= len(path) - 1:
