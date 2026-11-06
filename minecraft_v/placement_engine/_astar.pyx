@@ -817,6 +817,8 @@ cdef class World:
     cdef dict owner_ids
     cdef FlatMap[CellInfo] info
     cdef FlatMap[char] walk_cache, mid_cache  # 0 unknown, 1 false, 2 true
+    # Likewise for m4_cell_clear and next_to_terminal: a cell is asked about from many neighbours' moves.
+    cdef FlatMap[char] m4_clear_cache, terminal_cache
     cdef object no_exempt
     # With a grid: reads go through it (see base(), owner(), eprot_at(), prot_at(), efp()).
     cdef CellGrid grid
@@ -1301,11 +1303,15 @@ cdef class World:
         self.gp = NULL
         self.walk_cache.reset(1 << 12)
         self.mid_cache.reset(1 << 12)
+        self.m4_clear_cache.reset(1 << 12)
+        self.terminal_cache.reset(1 << 12)
         self.info.reset(1 << 12)
         want = self._static_moves(x, y, z)
         self.gp = gp
         self.walk_cache.reset(1 << 12)
         self.mid_cache.reset(1 << 12)
+        self.m4_clear_cache.reset(1 << 12)
+        self.terminal_cache.reset(1 << 12)
         self.info.reset(1 << 12)
         if got != want:
             raise AssertionError(f"CellGrid moves differ at {(x, y, z)} for net {self.net_id}:\n"
@@ -1482,6 +1488,16 @@ cdef class World:
         rejects cells beside inverted ones); own-net terminals of later sinks aren't keepout.
         Sinks this net has yet to reach also need their approach cells walkable, and those are
         one step further out, so an inverted cell can wall a pin off from a diagonal."""
+        cdef unsigned long long key = cell_key(x, y, z)
+        cdef char* hit = self.terminal_cache.find(key)
+        if hit != NULL:
+            return hit[0] == 2
+        cdef bint v = self.next_to_terminal_uncached(x, y, z)
+        cdef int ins
+        self.terminal_cache.get(key, &ins)[0] = 2 if v else 1
+        return v
+
+    cdef bint next_to_terminal_uncached(self, int x, int y, int z) except -1:
         cdef int k, ddy
         for k in range(4):
             for ddy in range(-1, 2):
@@ -1510,6 +1526,16 @@ cdef class World:
         return False
 
     cdef bint m4_cell_clear(self, int x, int y, int z) except -1:
+        cdef unsigned long long key = cell_key(x, y, z)
+        cdef char* hit = self.m4_clear_cache.find(key)
+        if hit != NULL:
+            return hit[0] == 2
+        cdef bint v = self.m4_cell_clear_uncached(x, y, z)
+        cdef int ins
+        self.m4_clear_cache.get(key, &ins)[0] = 2 if v else 1
+        return v
+
+    cdef bint m4_cell_clear_uncached(self, int x, int y, int z) except -1:
         cdef int k, ddy, sx, sy, sz
         for k in range(4):
             for ddy in range(-1, 2):
