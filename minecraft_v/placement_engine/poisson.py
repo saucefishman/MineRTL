@@ -41,6 +41,7 @@ _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
 _REFINE_PASSES = 3
 _REFINE_POPS = 60
+_FFT_WORKERS = 4             # threads for the Poisson solve's transforms
 _STATUS_EVERY = 50           # gates between progress line updates
 _IO_COLUMN_CLEAR = 4         # a gate this close in X is in an IO column's way: nearer, a pin lands in the
                              # keepout of the gate's terminal and its wire can't start
@@ -76,24 +77,27 @@ class _Netlist:
         self.pin_offset = np.array(offset, dtype=float).reshape(-1, 3)
         self.n_nets = n_nets
         self.degree = np.bincount(self.pin_comp, minlength=len(self.comps)).astype(float)
+        # Pins come net after net, so per-net extremes are segment reductions.
+        self.net_start = np.flatnonzero(np.r_[True, np.diff(self.pin_net) != 0]) if n_nets else np.zeros(0, np.int64)
 
     def hpwl(self, pos: np.ndarray) -> float:
+        if not self.n_nets:
+            return 0.0
         p = pos[self.pin_comp] + self.pin_offset
-        hi = np.full((self.n_nets, 3), -np.inf)
-        lo = np.full((self.n_nets, 3), np.inf)
-        np.maximum.at(hi, self.pin_net, p)
-        np.minimum.at(lo, self.pin_net, p)
-        return float(((hi - lo) * _WEIGHTS).sum()) if self.n_nets else 0.0
+        hi = np.maximum.reduceat(p, self.net_start, axis=0)
+        lo = np.minimum.reduceat(p, self.net_start, axis=0)
+        return float(((hi - lo) * _WEIGHTS).sum())
 
     def wa_gradient(self, pos: np.ndarray, gamma: np.ndarray) -> np.ndarray:
         """Gradient of the weighted-average wirelength model per component."""
-        p = pos[self.pin_comp] + self.pin_offset
         grad = np.zeros_like(pos)
+        if not self.n_nets:
+            return grad
+        p = pos[self.pin_comp] + self.pin_offset
         for axis in range(3):
             x = p[:, axis]
             for sign in (1.0, -1.0):
-                top = np.full(self.n_nets, -np.inf)
-                np.maximum.at(top, self.pin_net, sign * x)
+                top = np.maximum.reduceat(sign * x, self.net_start)
                 e = np.exp((sign * x - top[self.pin_net]) / gamma[axis])
                 s0 = np.bincount(self.pin_net, e, self.n_nets)
                 mean = np.bincount(self.pin_net, x * e, self.n_nets) / s0
@@ -120,10 +124,15 @@ class _Field:
         self.eff = np.maximum(sizes, self.h)
         self.charge = np.prod(sizes, axis=1)
         self.scale = self.charge / np.prod(self.eff, axis=1)
-        self.span = [int(math.ceil(self.eff[:, a].max() / self.h[a])) + 1 for a in range(3)]
+        # Bins a box can touch along each axis. Boxes are grouped by that, so one big box doesn't make every small
+        # one carry its span of empty bins through the deposit and the force gather.
+        spans = np.ceil(self.eff / self.h).astype(np.int64) + 1
+        keys, group = np.unique(spans, axis=0, return_inverse=True)
+        self.groups = [(np.flatnonzero(group.ravel() == k), tuple(int(v) for v in key)) for k, key in enumerate(keys)]
         eig = [(2 - 2 * np.cos(np.pi * np.arange(m) / m)) / self.h[a] ** 2 for a, m in enumerate(self.shape)]
         self.laplace = eig[0][:, None, None] + eig[1][None, :, None] + eig[2][None, None, :]
         self.laplace[0, 0, 0] = 1.0
+        self._solve: tuple[np.ndarray, np.ndarray, np.ndarray | float] | None = None  # see _solver
 
     def fix_box(self, lo: np.ndarray, size: np.ndarray) -> None:
         """A solid box that never moves: it repels gates and takes up its bins."""
@@ -134,15 +143,32 @@ class _Field:
                         / self.h[a])
         taken = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
         self.fixed = taken if self.fixed is None else np.minimum(self.fixed + taken, 1.0)
+        self._solve = None
 
-    def _overlaps(self, pos: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    def _solver(self) -> tuple[np.ndarray, np.ndarray, np.ndarray | float]:
+        """Per bin: the charge a bin holds before it overflows, 1 / the Laplacian's eigenvalues (0 for the mean, which
+        drops out of the potential), and the fixed boxes' transformed charge, which never changes."""
+        if self._solve is None:
+            volume = float(np.prod(self.h))
+            free = 1.0 if self.fixed is None else 1.0 - self.fixed
+            mean = self.charge.sum() / max(float((free * volume).sum() if self.fixed is not None
+                                                  else np.prod(self.dims)), 1.0)
+            capacity = max(mean, _TARGET_DENSITY) * free * volume
+            inverse = 1.0 / self.laplace
+            inverse[0, 0, 0] = 0.0
+            fixed = 0.0 if self.fixed is None else fft.dctn(self.fixed, type=2, norm="ortho", workers=_FFT_WORKERS)
+            self._solve = (capacity, inverse, fixed)
+        return self._solve
+
+    def _overlaps(self, pos: np.ndarray, span: tuple[int, int, int], eff: np.ndarray
+                  ) -> tuple[list[np.ndarray], list[np.ndarray]]:
         """Per axis: the bins each box touches and its overlap length with them."""
         bins, lens = [], []
         for a in range(3):
             lo = pos[:, a]
-            hi = lo + self.eff[:, a]
+            hi = lo + eff[:, a]
             first = np.floor(lo / self.h[a]).astype(np.int64)
-            idx = first[:, None] + np.arange(self.span[a])
+            idx = first[:, None] + np.arange(span[a])
             overlap = np.minimum(hi[:, None], (idx + 1) * self.h[a]) - np.maximum(lo[:, None], idx * self.h[a])
             bins.append(np.clip(idx, 0, self.shape[a] - 1))
             lens.append(np.maximum(overlap, 0.0))
@@ -151,29 +177,39 @@ class _Field:
     def forces(self, centres: np.ndarray) -> tuple[np.ndarray, float]:
         """Electrostatic force on each box and the overflow, for boxes given by their centres."""
         pos = centres - self.eff / 2
-        (bx, by, bz), (lx, ly, lz) = self._overlaps(pos)
-        weight = (lx[:, :, None, None] * ly[:, None, :, None] * lz[:, None, None, :]
-                  * self.scale[:, None, None, None])
-        index = (bx[:, :, None, None] * self.shape[1] * self.shape[2]
-                 + by[:, None, :, None] * self.shape[2] + bz[:, None, None, :])
-        volume = float(np.prod(self.h))
-        rho = np.bincount(index.ravel(), weight.ravel(), int(np.prod(self.shape))).reshape(self.shape) / volume
-        free = 1.0 if self.fixed is None else 1.0 - self.fixed
-        mean = self.charge.sum() / max(float((free * volume).sum() if self.fixed is not None else np.prod(self.dims)), 1.0)
-        overflow = float(np.maximum(rho - max(mean, _TARGET_DENSITY) * free, 0.0).sum() * volume / self.charge.sum())
-        if self.fixed is not None:
-            rho = rho + self.fixed
+        cells = int(np.prod(self.shape))
+        deposits = []
+        for members, span in self.groups:
+            (bx, by, bz), (lx, ly, lz) = self._overlaps(pos[members], span, self.eff[members])
+            weight = (lx[:, :, None, None] * ly[:, None, :, None] * lz[:, None, None, :]
+                      * self.scale[members, None, None, None]).reshape(len(members), -1)
+            index = (bx[:, :, None, None] * self.shape[1] * self.shape[2]
+                     + by[:, None, :, None] * self.shape[2] + bz[:, None, None, :]).reshape(len(members), -1)
+            deposits.append((members, index, weight))
+        held = np.bincount(np.concatenate([d[1].ravel() for d in deposits]),
+                           np.concatenate([d[2].ravel() for d in deposits]), cells).reshape(self.shape)
+        capacity, inverse, fixed = self._solver()
+        overflow = float(np.maximum(held - capacity, 0.0).sum() / self.charge.sum())
+        # Density is held / bin volume, plus the fixed boxes; the transform is linear, so theirs is done once.
+        coeff = fft.dctn(held, type=2, norm="ortho", workers=_FFT_WORKERS)
+        coeff *= 1.0 / float(np.prod(self.h))
+        coeff += fixed
+        coeff *= inverse
+        phi = fft.idctn(coeff, type=2, norm="ortho", workers=_FFT_WORKERS)
 
-        coeff = fft.dctn(rho - rho.mean(), type=2, norm="ortho") / self.laplace
-        coeff[0, 0, 0] = 0.0
-        phi = fft.idctn(coeff, type=2, norm="ortho")
-
+        # Field per bin, -dphi/dx by central differences, one-sided at the walls.
         force = np.zeros_like(pos)
         for a in range(3):
-            m = self.shape[a]
-            up, down = np.minimum(np.arange(m) + 1, m - 1), np.maximum(np.arange(m) - 1, 0)
-            field = (np.take(phi, down, axis=a) - np.take(phi, up, axis=a)) / (2 * self.h[a])
-            force[:, a] = (field.ravel()[index.ravel()] * weight.ravel()).reshape(weight.shape).sum(axis=(1, 2, 3))
+            field = np.zeros(self.shape)
+            if self.shape[a] > 1:
+                p, f = np.moveaxis(phi, a, 0), np.moveaxis(field, a, 0)
+                np.subtract(p[:-2], p[2:], out=f[1:-1])
+                np.subtract(p[0], p[1], out=f[0])
+                np.subtract(p[-2], p[-1], out=f[-1])
+                field *= 1 / (2 * self.h[a])
+            field = field.ravel()
+            for members, index, weight in deposits:
+                force[members, a] = np.einsum("nk,nk->n", weight, field[index])
         return force, overflow
 
 
@@ -414,7 +450,7 @@ class _Occupancy:
     CELL = 16
 
     def __init__(self, sizes: np.ndarray):
-        self.sizes = sizes
+        self.sizes = [tuple(float(v) for v in row) for row in sizes]  # plain floats: this is all scalar work
         self.grid: dict[tuple[int, int, int], set[int]] = defaultdict(set)
         self.origin: dict[int, tuple[int, int, int]] = {}
 
@@ -427,14 +463,19 @@ class _Occupancy:
 
     def conflicts(self, p: tuple[int, int, int], s: tuple[int, int, int], skip: int = -1) -> list[int]:
         seen: set[int] = set()
+        grid = self.grid
         for cell in self._cells(p, s):
-            seen |= self.grid.get(cell, set())
+            found = grid.get(cell)
+            if found:
+                seen |= found
         seen.discard(skip)
         out = []
+        p0, p1, p2 = p
+        e0, e1, e2 = p0 + s[0], p1 + s[1], p2 + s[2]
         for j in sorted(seen):
-            o = self.origin[j]
-            t = self.sizes[j]
-            if all(p[a] < o[a] + t[a] and o[a] < p[a] + s[a] for a in range(3)):
+            o0, o1, o2 = self.origin[j]
+            t0, t1, t2 = self.sizes[j]
+            if p0 < o0 + t0 and o0 < e0 and p1 < o1 + t1 and o1 < e1 and p2 < o2 + t2 and o2 < e2:
                 out.append(j)
         return out
 
@@ -452,9 +493,9 @@ class _Occupancy:
                      ) -> tuple[int, int, int] | None:
         """Free origin closest to ``target``: best-first search, stepping out of each blocking box."""
         s = tuple(int(v) for v in self.sizes[i])
-
-        def cost(p: tuple[int, int, int]) -> float:
-            return sum(_WEIGHTS[a] * abs(p[a] - target[a]) for a in range(3))
+        w0, w1, w2 = (float(w) for w in _WEIGHTS)
+        g0, g1, g2 = target
+        axes = (0, 2) if flat else (0, 1, 2)
 
         heap = [(0.0, target)]
         seen = {target}
@@ -468,16 +509,14 @@ class _Occupancy:
             for j in blockers:
                 o = self.origin[j]
                 t = self.sizes[j]
-                for a in range(3):
-                    if a == 1 and flat:
-                        continue
+                for a in axes:
                     for v in (int(o[a] + t[a]), int(o[a] - s[a])):
                         if a != 0 and v < 0:  # X may go negative; the final shift absorbs it
                             continue
-                        q = tuple(v if b == a else p[b] for b in range(3))
+                        q = (v, p[1], p[2]) if a == 0 else (p[0], v, p[2]) if a == 1 else (p[0], p[1], v)
                         if q not in seen:
                             seen.add(q)
-                            heapq.heappush(heap, (cost(q), q))
+                            heapq.heappush(heap, (w0 * abs(q[0] - g0) + w1 * abs(q[1] - g1) + w2 * abs(q[2] - g2), q))
         return None
 
 
@@ -534,37 +573,72 @@ def _compact(pos: np.ndarray, sizes: np.ndarray, axis: int) -> None:
 
 
 class _NetCost:
-    """Exact weighted HPWL with per-component recomputation, for refinement."""
+    """Exact weighted HPWL with per-component recomputation, for refinement.
+
+    Pins are the netlist's, which come grouped by net; offsets are a copy, so a mirrored gate can change its own.
+    """
 
     def __init__(self, netlist: _Netlist, pos: np.ndarray):
         self.pos = pos
-        self.net_pins: list[list[tuple[int, np.ndarray]]] = [[] for _ in range(netlist.n_nets)]
+        self.pin_comp = netlist.pin_comp
+        self.pin_offset = netlist.pin_offset.copy()
+        self.net_start = np.r_[netlist.net_start, len(netlist.pin_net)].astype(np.int64)
         self.comp_nets: list[list[int]] = [[] for _ in netlist.comps]
-        for c, ni, off in zip(netlist.pin_comp.tolist(), netlist.pin_net.tolist(), netlist.pin_offset):
-            self.net_pins[ni].append((c, off))
+        for c, ni in zip(netlist.pin_comp.tolist(), netlist.pin_net.tolist()):
             if not self.comp_nets[c] or self.comp_nets[c][-1] != ni:
                 self.comp_nets[c].append(ni)
+        self.comp_pins = self._pins_by_comp(netlist)
+        self._gather: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
-    def net(self, ni: int) -> float:
-        coords = [self.pos[c] + off for c, off in self.net_pins[ni]]
-        return sum(_WEIGHTS[a] * (max(p[a] for p in coords) - min(p[a] for p in coords)) for a in range(3))
+    @staticmethod
+    def _pins_by_comp(netlist: _Netlist) -> list[np.ndarray]:
+        order = np.argsort(netlist.pin_comp, kind="stable")
+        bounds = np.searchsorted(netlist.pin_comp[order], np.arange(len(netlist.comps) + 1))
+        return [order[bounds[c]:bounds[c + 1]] for c in range(len(netlist.comps))]
+
+    def _pins_of_nets(self, i: int) -> tuple[np.ndarray, np.ndarray]:
+        """All pins on component i's nets, net after net, and where each net starts in that list."""
+        found = self._gather.get(i)
+        if found is None:
+            nets = self.comp_nets[i]
+            lo, hi = self.net_start[nets], self.net_start[np.asarray(nets, dtype=np.int64) + 1]
+            idx = np.concatenate([np.arange(a, b) for a, b in zip(lo.tolist(), hi.tolist())]) if nets \
+                else np.zeros(0, np.int64)
+            seg = np.r_[0, np.cumsum(hi - lo)[:-1]].astype(np.int64) if nets else np.zeros(0, np.int64)
+            found = self._gather[i] = (idx, seg)
+        return found
 
     def of(self, i: int) -> float:
-        return sum(self.net(ni) for ni in self.comp_nets[i])
+        idx, seg = self._pins_of_nets(i)
+        if not len(idx):
+            return 0.0
+        p = self.pos[self.pin_comp[idx]] + self.pin_offset[idx]
+        span = np.maximum.reduceat(p, seg, axis=0) - np.minimum.reduceat(p, seg, axis=0)
+        return float((span @ _WEIGHTS).sum())
 
     def median_target(self, i: int) -> tuple[int, int, int]:
         """Origin at the median of the other pins' net bounding boxes: the HPWL-optimal region."""
+        idx, seg = self._pins_of_nets(i)
+        if not len(idx):
+            return tuple(int(v) for v in self.pos[i])
+        mine = self.pin_comp[idx] == i
+        p = self.pos[self.pin_comp[idx]] + self.pin_offset[idx]
+        has_other = np.add.reduceat((~mine).astype(np.int64), seg) > 0
+        # Own offset in each net: the first of i's pins there.
+        mine_at = np.flatnonzero(mine)
+        _, first = np.unique(np.searchsorted(seg, mine_at, side="right") - 1, return_index=True)
+        own_at = mine_at[first]  # every net here has a pin of i's
         out = []
         for a in range(3):
-            ends: list[float] = []
-            own = 0.0
-            for ni in self.comp_nets[i]:
-                others = [self.pos[c][a] + off[a] for c, off in self.net_pins[ni] if c != i]
-                mine = [off[a] for c, off in self.net_pins[ni] if c == i]
-                own = mine[0]
-                if others:
-                    ends += [min(others) - own, max(others) - own]
-            out.append(int(round(float(np.median(ends)))) if ends else int(self.pos[i][a]))
+            if not has_other.any():
+                out.append(int(self.pos[i][a]))
+                continue
+            x = p[:, a]
+            lo = np.minimum.reduceat(np.where(mine, np.inf, x), seg)
+            hi = np.maximum.reduceat(np.where(mine, -np.inf, x), seg)
+            own = self.pin_offset[idx[own_at], a]
+            ends = np.concatenate([(lo - own)[has_other], (hi - own)[has_other]])
+            out.append(int(round(float(np.median(ends)))))
         return out[0], out[1], out[2]
 
 
@@ -624,16 +698,13 @@ def _mirror_pass(netlist: _Netlist, pos_all: np.ndarray, gates: list[Component])
         if w < 2 or c.metadata.get("bank"):
             continue
         before = cost.of(i)
-        saved = {ni: cost.net_pins[ni] for ni in cost.comp_nets[i]}
-        flipped = {ni: [(o, np.array([w - 1 - off[0], off[1], off[2]]) if o == i else off) for o, off in pins]
-                   for ni, pins in saved.items()}
-        for ni, pins in flipped.items():
-            cost.net_pins[ni] = pins
+        pins = cost.comp_pins[i]
+        saved = cost.pin_offset[pins, 0].copy()
+        cost.pin_offset[pins, 0] = w - 1 - saved
         if cost.of(i) < before - 1e-9:
             out[i] = _mirror_component_x(c)
         else:
-            for ni, pins in saved.items():
-                cost.net_pins[ni] = pins
+            cost.pin_offset[pins, 0] = saved
     return out
 
 
