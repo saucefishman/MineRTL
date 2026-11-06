@@ -241,10 +241,23 @@ ${abc_step}"
 
 # The same sources, script and yosys give the same netlist: keep it, keyed by all three. Sources that pull in other
 # files (`include, $readmem) aren't cached, as those files aren't in the key.
+# Names in the netlist carry the paths yosys read files by and, for $write cells, a memory address. Without them the
+# netlist is the same from any checkout and any run, and so is the build, as names feed hashing.
+unplace() {
+    DIR="${dir%/}/" HERE="${here}/" perl -p -e 's/\Q$ENV{DIR}\E//g; s/\Q$ENV{HERE}\E//g; s/\$0x[0-9a-f]+:/\$:/g' "$@"
+}
+
+# The same sources, script, yosys and abc give the same netlist: keep it, keyed by all of them. Sources that pull in
+# other files (`include, $readmem) aren't cached, as those files aren't in the key.
 synth_cache=""
 if [[ "$use_synth_cache" == true ]] && ! grep -qE '`include[[:space:]]|\$readmem[hb][[:space:]]*\(' "${dir%/}"/*.v 2>/dev/null; then
     if command -v sha256sum >/dev/null; then sha=(sha256sum); else sha=(shasum -a 256); fi
-    key="$( { yosys -V; printf '%s\n' "$yosys_script"; cat "${dir%/}"/*.v "${here}"/techmap/*.v; } | "${sha[@]}" | cut -c1-24)"
+    yosys_bin="$(command -v yosys)"
+    datdir="$(yosys-config --datdir 2>/dev/null || echo "$(dirname "$yosys_bin")/../share/yosys")"  # its own techmap.v
+    key="$( { yosys -V; cat "$yosys_bin"; cat "$(dirname "$yosys_bin")/yosys-abc" 2>/dev/null; cat "$datdir"/*.v 2>/dev/null;
+              cat "${BASH_SOURCE[0]}";
+              printf '%s\n' "$yosys_script" | unplace; for f in "${dir%/}"/*.v "${here}"/techmap/*.v; do
+                  printf '%s\n' "${f##*/}"; cat "$f"; done; } | "${sha[@]}" | cut -c1-24)"
     synth_cache="${synth_cache_dir%/}/${key}"
 fi
 if [[ -n "$synth_cache" && -f "$synth_cache/netlist.json" ]]; then
@@ -263,6 +276,8 @@ stat
     if [[ $yosys_status -ne 0 ]]; then
         exit "$yosys_status"
     fi
+    unplace "${artifacts_dir}/netlist.json" > "${artifacts_dir}/netlist.json.tmp"
+    mv "${artifacts_dir}/netlist.json.tmp" "${artifacts_dir}/netlist.json"
     if [[ -n "$synth_cache" ]]; then
         mkdir -p "$synth_cache.tmp$$"
         cp "$artifacts_dir/netlist.json" "$yosys_log" "$yosys_err" "$synth_cache.tmp$$/"

@@ -231,3 +231,32 @@ def test_synth_runs_on_a_project_path_with_spaces(tmp_path: Path):
                          cwd=root, capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
     assert (tmp_path / "art dir" / "netlist.json").exists()
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_synth_netlist_is_the_same_from_any_checkout(tmp_path: Path):
+    """Names in the netlist feed hashing, so paths and $write's memory address would make every build differ."""
+    import re
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    project = tmp_path / "src"
+    project.mkdir()
+    (project / "main.v").write_text("""module main(input clk, output reg [3:0] q);
+    always @(posedge clk) begin q <= q + 1; $display("q %d", q); end
+endmodule
+""")
+    netlists = []
+    for checkout in ("a", "b dir"):
+        copy = tmp_path / checkout
+        copy.mkdir()
+        shutil.copy(root / "synth.sh", copy)
+        shutil.copytree(root / "techmap", copy / "techmap")
+        art = tmp_path / f"art {checkout}"
+        run = subprocess.run([copy / "synth.sh", project, "--synth-only", "--no-synth-cache", "--artifacts-dir", art],
+                             cwd=tmp_path, capture_output=True, text=True, timeout=300)
+        assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+        netlists.append((art / "netlist.json").read_text())
+    assert netlists[0] == netlists[1]
+    assert "$print" in netlists[0] or "$write" in netlists[0]
+    assert str(tmp_path) not in netlists[0] and not re.search(r"\$0x[0-9a-f]+:", netlists[0])
