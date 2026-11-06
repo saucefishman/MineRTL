@@ -764,8 +764,10 @@ cdef class Settler:
     cdef int _at(self, int x, int y, int z) noexcept:
         if not (0 <= x < self.w and 0 <= y < self.h and 0 <= z < self.l):
             return -1
+        if self.kind_id[self.blocks[x, y, z]] < 0:  # blocks don't change here: only redstone is ever numbered
+            return -1
         cdef int i = self.index.get(self._key(x, y, z))
-        if i < 0 and self.kind_id[self.blocks[x, y, z]] >= 0:
+        if i < 0:
             i = self._load(x, y, z)
         return i
 
@@ -1305,6 +1307,18 @@ def short_suspects(int64_t[::1] keys, int64_t[::1] offsets, owner, dict ids, int
             if o >= 0 and o != k:
                 sv[k] = 1
     return suspect, first
+
+
+def paint_boxes(mask, int64_t[:, ::1] lo, int64_t[:, ::1] hi):
+    """mask[lo[i]:hi[i]] = True for each box, every box inside mask (a C-ordered bool array)."""
+    cdef uint8_t[:, :, ::1] m = mask.view(np.uint8)
+    cdef Py_ssize_t i
+    cdef int64_t x, y, z
+    for i in range(lo.shape[0]):
+        for x in range(lo[i, 0], hi[i, 0]):
+            for y in range(lo[i, 1], hi[i, 1]):
+                for z in range(lo[i, 2], hi[i, 2]):
+                    m[x, y, z] = 1
 
 
 def table_gather(uint32_t[:, :, ::1] blocks, uint8_t[::1] table):
