@@ -239,3 +239,30 @@ def test_ram_blocks_start_a_new_stack():
     fixed, width, _ = poisson._stack_banks(gates, [0, 1], 24)
     assert sorted(origin[0] for origin in fixed.values()) == [0.0, 300.0 + poisson._BANK_COLUMN_GAP]
     assert width == 600 + poisson._BANK_COLUMN_GAP
+
+
+def test_forces_with_boxes_of_many_spans():
+    """Boxes are deposited in groups by how many bins they span; a big box doesn't stop small ones pushing apart."""
+    dims = np.array([96.0, 64.0, 96.0])
+    sizes = np.vstack([np.full((2, 3), 8.0), [[40.0, 8.0, 40.0]]])
+    field = poisson._Field(sizes, dims)
+    members = np.sort(np.concatenate([m for m, _ in field.groups]))
+    assert members.tolist() == [0, 1, 2] and len(field.groups) == 2
+    force, _ = field.forces(np.array([[28.0, 32.0, 32.0], [36.0, 32.0, 32.0], [70.0, 32.0, 70.0]]))
+    assert force[0, 0] < force[1, 0]  # the small two push apart
+
+
+def test_net_cost_matches_hpwl():
+    comp = _setup()
+    gates = [c for c in comp.components if c.type not in _IO]
+    io = [c for c in comp.components if c.type in _IO]
+    netlist = poisson._Netlist(gates, io, comp.nets)
+    pos = np.random.default_rng(3).integers(0, 40, (len(netlist.comps), 3)).astype(float)
+    cost = poisson._NetCost(netlist, pos)
+    p = pos[netlist.pin_comp] + netlist.pin_offset
+    for i in range(len(netlist.comps)):
+        want = 0.0
+        for ni in set(netlist.pin_net[netlist.pin_comp == i].tolist()):
+            q = p[netlist.pin_net == ni]
+            want += float(((q.max(axis=0) - q.min(axis=0)) * poisson._WEIGHTS).sum())
+        assert abs(cost.of(i) - want) < 1e-9
