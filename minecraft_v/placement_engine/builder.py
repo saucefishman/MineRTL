@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bisect
 import gc
+import os
 import time
 import zlib
 from collections import deque
@@ -2322,14 +2323,19 @@ def build_litematic_from_component_list(
         placed = resume.load_placed(place_seed)
         log(f"[resume] placement from {resume.dir}")
     else:
+        place_kwargs = dict(
+            base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
+            routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
+            seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
+            macro_channel=macro_channel, macro_east_room=macro_east_room, io_lane_pins=io_lane_pins,
+        )
+        if os.environ.get("MINECRAFT_V_PLACE_DUMP") and capture is None:
+            # Testing: the placer's input, for scripts/dev/bench_place.py to rerun placement alone.
+            import pickle
+            with open(os.environ["MINECRAFT_V_PLACE_DUMP"], "wb") as f:
+                pickle.dump((comp.components, comp.nets, place_kwargs), f)
         with phase("[place]"):
-            placed = _poisson_placement(
-                comp.components, comp.nets,
-                base_y=base_y, gutter=gutter, io_margin=component_width_spacing,
-                routing_gutter=component_depth_spacing, y_spacing=additional_component_height_spacing,
-                seed=place_seed, flat=flat, output_x_order=output_x_order, io_column_pins=io_columns,
-                macro_channel=macro_channel, macro_east_room=macro_east_room, io_lane_pins=io_lane_pins,
-            )
+            placed = _poisson_placement(comp.components, comp.nets, **place_kwargs)
     if resume is not None:
         resume.save_placed(place_seed, placed)
     if output_pin_targets:
