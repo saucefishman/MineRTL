@@ -1197,9 +1197,13 @@ cdef class World:
         if self.eprot_at(x, y, z) or self.efp(x, y, z):
             return False
         cdef unsigned long long key = cell_key(x, y, z) << 7
+        cdef char* hit
         if has_exempt:
+            hit = self.walk_cache.find(key)
+            if hit != NULL and hit[0] == 2:  # an exempt cell only skips one neighbour's checks
+                return True
             key |= exempt_code(ex - x, ey - y, ez - z)
-        cdef char* hit = self.walk_cache.find(key)
+        hit = self.walk_cache.find(key)
         if hit != NULL:
             return hit[0] == 2
         cdef bint v = self.wire_walkable(x, y, z, ex, ey, ez, has_exempt, True)
@@ -1389,9 +1393,10 @@ cdef class World:
                     and not (self.base(mx, y + 2, mz) & F_SOLID)
                     and not (self.base(mx, my, mz) & F_SOLID)
                     and not (self.base(mx, my, mz) & F_NONAIR)
+                    and self.walkable(nx2, y + 2, nz2)  # cached and shared: before the mid cell's own check
                     and self.mid_walkable(mx, my, mz, nx2, y, nz2)
                 )
-                if mid_ok and self.walkable(nx2, y + 2, nz2):
+                if mid_ok:
                     if self.can_support(mx, y, mz) and not self.torch_below(mx, y, mz):
                         self.emit(moves, x, y, z, nx2, y + 2, nz2, 7, b_hi | b_mid, 1, True, mx, my, mz)
 
@@ -1413,9 +1418,10 @@ cdef class World:
                     and self.inb(mx, my, mz)
                     and not (self.base(mx, my, mz) & F_SOLID)
                     and not (self.base(mx, my, mz) & F_NONAIR)
+                    and self.walkable(nx2, y - 2, nz2)
                     and self.mid_walkable(mx, my, mz, x, y - 2, z)
                 )
-                if mid_dn_ok and self.walkable(nx2, y - 2, nz2):
+                if mid_dn_ok:
                     if y - 2 <= min_y or (self.can_support(nx2, y - 3, nz2) and not self.torch_below(nx2, y - 3, nz2)):
                         self.emit(moves, x, y, z, nx2, y - 2, nz2, 7, b_lo | b_mid | b_hi, 0, True, mx, my, mz)
 
