@@ -27,6 +27,7 @@ from pathlib import Path
 import nbtlib
 import numpy as np
 from litemapy import BlockState, Region
+from minecraft_v.placement_engine.ram import rom_contents
 from minecraft_v.placement_engine.verify import find_live_pin_wire
 from settle_schematic import headless_binary
 
@@ -91,6 +92,7 @@ class Netlist:
         for cell in self.cells.values():
             if cell["type"] == "ram_stack":
                 self.rams.append(self._ram(cell))
+        self.roms = [self._rom(c) for c in self.cells.values() if c["type"] == "ram_rom"]
         self.comb = self._levelize()
         self.clk = module["ports"]["clk"]["bits"][0]
         self.turns = 1  # t0..t3 high
@@ -106,6 +108,12 @@ class Netlist:
             word = init[i * width:(i + 1) * width]
             mem[i] = sum(1 << b for b, ch in enumerate(word) if ch == "1")
         return dict(conn=cell["connections"], width=width, row_bits=row_bits, banks=banks, base=base, mem=mem)
+
+    @staticmethod
+    def _rom(cell: dict) -> dict:
+        """A ram_rom (techmap/ram_rom.v): one asynchronous read of its INIT words, rows past INIT read 0."""
+        depth, width, words = rom_contents(cell["parameters"])
+        return dict(conn=cell["connections"], words=words)
 
     def _levelize(self) -> list:
         kinds = {"$_AND_": ("A", "B"), "$_OR_": ("A", "B"), "$_XOR_": ("A", "B"), "$_NOT_": ("A",), "$_MUX_": ("A", "B", "S"),
@@ -123,6 +131,8 @@ class Netlist:
             conn = ram["conn"]
             for port in "abcd":  # one port's address can come from another's data
                 nodes.append(("ram", (ram, port), conn["a" + port], conn["r" + port]))
+        for rom in self.roms:
+            nodes.append(("rom", (rom,), rom["conn"]["aa"], rom["conn"]["ra"]))
         for i, node in enumerate(nodes):
             for bit in node[3]:
                 driver[bit] = i
@@ -162,6 +172,12 @@ class Netlist:
             elif kind == "fulladder":
                 total = v[inputs[0]] + v[inputs[1]] + v[inputs[2]]
                 v[conn["S"][0]], v[conn["Cout"][0]] = total & 1, total >> 1
+            elif kind == "rom":
+                rom = conn[0]
+                address = sum(v[b] << i for i, b in enumerate(rom["conn"]["aa"]))
+                word = rom["words"][address] if address < len(rom["words"]) else 0
+                for i, bit in enumerate(rom["conn"]["ra"]):
+                    v[bit] = word >> i & 1
             else:
                 self._read(*conn)
 
