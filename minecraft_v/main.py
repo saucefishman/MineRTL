@@ -206,6 +206,8 @@ _MACRO_FANOUT = 2  # nets above this fanout are shared between instances, not gr
 _MACRO_MIN_CELLS = 8  # smallest repeated subcircuit worth a macro
 _MACRO_ROW_TILES = 0  # instances per array, sharing lanes; 0 = all instances of a pattern in one array
 _MACRO_BANK_COLUMNS = 4  # tiles per row in fixed two-row banks facing one lane plane
+_MACRO_MIN_COVERAGE = 0.5  # share of gates in repeats below which none become macros (floweypu: 22%, all layouts routed
+                           # worse than flat; the CPU these were built for: 90%, 2.6x faster)
 _MACRO_CHANNEL = 24  # Z kept clear past a long macro's input face
 _MACRO_EAST_ROOM = 20  # X past a bank stack's pin end where gates may go; the rest go on top
 _MACRO_HEADROOM = 32  # layers kept above the tallest macro
@@ -345,7 +347,7 @@ def main():
                                                            bank_columns,
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
-                                                           on_class=report)
+                                                           on_class=report, min_coverage=_MACRO_MIN_COVERAGE)
         macros = {**macros, **rams}
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")
