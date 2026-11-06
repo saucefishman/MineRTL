@@ -301,7 +301,7 @@ def main():
         probes = extract_probes(module) if args.debug_prints else None
 
     with phase("[load] saving component list"):
-        save_build_artifacts(component_list)
+        component_json = save_build_artifacts(component_list)
 
     allow_routing_failures = args.allow_routing_failures or args.route_deadline is not None
     output_pin_targets = (
@@ -353,7 +353,8 @@ def main():
                                                            (args.macro_min_instances if args.macro_min_instances is not None
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
                                                            on_class=report, min_coverage=_MACRO_MIN_COVERAGE,
-                                                           repeats_cache=Path(args.macro_cache) / "repeats")
+                                                           repeats_cache=Path(args.macro_cache) / "repeats",
+                                                           comp_json=component_json)
         macros = {**macros, **rams}
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")

@@ -50,7 +50,8 @@ from .hold import _HOLD_MARGIN, HoldShort, fix_hold, flat_terminals, hold_violat
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
 from .forks import Forked
-from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .block_utils import _signals  # None when the kernels aren't built
+from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, VerifyMemo, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -598,6 +599,21 @@ class CellMask:
             out = ~((cells >= 0) & (cells < shape)).all(axis=1)
             self.extra.update(map(tuple, cells[out].tolist()))
 
+    def add_boxes(self, boxes: list[Box]) -> None:
+        """add_box for each; the ones inside the grid in one go."""
+        if not boxes:
+            return
+        lo = np.array([b[0] for b in boxes], dtype=np.int64).reshape(-1, 3)
+        hi = np.array([b[1] for b in boxes], dtype=np.int64).reshape(-1, 3)
+        inside = (lo >= 0).all(axis=1) & (hi <= self.mask.shape).all(axis=1) & (lo < hi).all(axis=1)
+        if _signals is not None and self.mask.flags.c_contiguous:
+            _signals.paint_boxes(self.mask, np.ascontiguousarray(lo[inside]), np.ascontiguousarray(hi[inside]))
+        else:
+            for a, b in zip(lo[inside].tolist(), hi[inside].tolist()):
+                self.mask[a[0]:b[0], a[1]:b[1], a[2]:b[2]] = True
+        for i in np.flatnonzero(~inside).tolist():
+            self.add_box(boxes[i][0], boxes[i][1])
+
     def __or__(self, cells: Collection[Pos]) -> CellMask:
         union = CellMask(self.mask.shape, self.mask.copy(), self.extra)
         for p in cells:
@@ -644,8 +660,7 @@ def _build_footprint_blocked(
     if shape is None:  # just big enough
         shape = tuple(int(n) for n in np.max([hi for _, hi in boxes] or [(0, 0, 0)], axis=0))
     blocked = CellMask(shape)
-    for lo, hi in boxes:
-        blocked.add_box(lo, hi)
+    blocked.add_boxes(boxes)
     for rx, ry, rz in io_repeater_cells:
         blocked.add((rx, ry + 1, rz))
     for (rx, ry, rz), (nx, nz), is_input in io_fixtures:
@@ -1913,12 +1928,13 @@ def _repair_faulty_nets(
     order = {job.key: i for i, job in enumerate(jobs)}
     by_key = {job.key: job for job in jobs}
     failures: list[tuple[str, Exception]] = []
+    memo = VerifyMemo()  # a round searches again only the nets near what the last one re-routed
     for _ in range(_REPAIR_ROUNDS):
         spec = {job.key: (job.src, job.sinks) for job in jobs if job.key not in failed}
         faults: dict[str, set[Pos]] = {}
         with ProgressBar("[repair] verify", len(spec)) as bar:
             violations = verify_signals(router.region, spec, router.dust_owner, component_cells,
-                                        on_net=lambda net_id: bar.update(info=net_id))
+                                        on_net=lambda net_id: bar.update(info=net_id), memo=memo)
         for v in violations:
             # Of a short's two nets, moving the later one disturbs the least.
             key = max((n for n in v.nets if n in by_key), key=order.__getitem__, default=None)
@@ -1974,8 +1990,9 @@ def _hold_with_detours(workspace: Region, flat: ComponentList, ends: dict, faile
         if not shorts or routed is None or attempt == _DETOUR_ROUNDS:
             break
         # Padding is outside the router's books, and a net laid again starts clean: undo it all, and pad again.
+        write = palette_writer(workspace)
         for pos, block in reversed(edits):
-            workspace[pos] = block
+            write(pos, block)
         if not _detour_hold_shorts(*routed, shorts, attempt):
             shorts.clear()
             requirement.clear()

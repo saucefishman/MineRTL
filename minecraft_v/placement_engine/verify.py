@@ -156,6 +156,12 @@ def cell_byte(block: BlockState | None) -> int:
 def signal_grid(region: Region, blocked: Collection[Pos], terminals: Collection[Pos]):
     """The kernel's view of region as _World(region, blocked, terminals) has it, terminals marked as stops. None without
     the kernel, or for what it can't hold: a region not backed by an array, a blocked it can't list, a cell outside."""
+    grid = signal_bytes(region, blocked, terminals)
+    return None if grid is None else _signals.Grid(grid)
+
+
+def signal_bytes(region: Region, blocked: Collection[Pos], terminals: Collection[Pos]) -> np.ndarray | None:
+    """signal_grid's cell bytes, before they go in a Grid."""
     palette, blocks = getattr(region, "_Region__palette", None), getattr(region, "_Region__blocks", None)
     if _signals is None or blocks is None or not isinstance(blocked, (HiddenBoxes, set, frozenset)):
         return None
@@ -177,7 +183,7 @@ def signal_grid(region: Region, blocked: Collection[Pos], terminals: Collection[
     if len(ends):
         at = ends[:, 0], ends[:, 1], ends[:, 2]
         grid[at] = table[blocks[at]] | 128
-    return _signals.Grid(grid)
+    return grid
 
 
 class _World:
@@ -489,24 +495,42 @@ def _inverted_contacts(world: _World, source: Pos, sinks: frozenset[Pos], stop: 
     return sorted(contacts)
 
 
+class VerifyMemo:
+    """What a verify_signals found net by net, for the next one over the same nets to search again only the nets near
+    cells that changed in between (a repair round re-routes a few nets). Results are the same as searching them all."""
+
+    def __init__(self):
+        self.cells: np.ndarray | None = None  # the cell bytes searched
+        self.terminals: frozenset[Pos] | None = None
+        self.blocked: object = None
+        self.found: dict[str, tuple[tuple[Pos, list[Pos]], list[Violation], np.ndarray]] = {}  # net -> spec, faults, keys
+
+
+_MEMO_REACH = 3  # cells a search reads around those it reaches: a dust's shape reads its neighbours' links, 2 away
+_MEMO_MAX_CHANGED = 20_000  # changed cells past which searching everything again is quicker
+
+
 def verify_signals(
         region: Region,
         nets: dict[str, tuple[Pos, list[Pos]]],
         owner: dict[Pos, str],
         blocked: Collection[Pos] = frozenset(),
         on_net: Callable[[str], None] | None = None,
+        memo: VerifyMemo | None = None,
 ) -> list[Violation]:
     """Opens (unreached sinks) and shorts (cross-net reach) for the given nets.
 
     nets: net_id -> (source cell, sink cells). owner: cell -> owning net (e.g. dust_owner).
     blocked: component-internal cells, treated as air unless they are a terminal.
     on_net: called with each net id once it has been checked.
+    memo: kept between calls over much the same wire (see VerifyMemo).
     """
     terminals = frozenset(p for src, sinks in nets.values() for p in (src, *sinks))
     world = _World(region, blocked, terminals)
-    grid = signal_grid(region, blocked, terminals)
+    cells = signal_bytes(region, blocked, terminals) if _signals is not None else None
+    grid = None if cells is None else _signals.Grid(cells)
     if grid is not None and hasattr(grid, "check_net_keys"):
-        return _verify_on_grid(region, nets, owner, blocked, on_net, terminals, world, grid)
+        return _verify_on_grid(region, nets, owner, blocked, on_net, terminals, world, grid, memo, cells)
     violations: list[Violation] = []
     reached_by: dict[Pos, str] = {}
     short_pairs: set[frozenset[str]] = set()
@@ -555,9 +579,39 @@ def verify_signals(
     return violations
 
 
+def _unchanged_nets(memo: VerifyMemo, nets: dict[str, tuple[Pos, list[Pos]]], cells: np.ndarray, blocked,
+                    terminals: frozenset[Pos]) -> set[str]:
+    """Nets whose last search memo has and that no changed cell comes near: the same search would find the same."""
+    if (memo.cells is None or memo.cells.shape != cells.shape or memo.blocked is not blocked
+            or memo.terminals != terminals):
+        return set()
+    changed = np.flatnonzero(memo.cells.reshape(-1) != cells.reshape(-1))
+    if len(changed) > _MEMO_MAX_CHANGED:
+        return set()
+    names = [n for n, spec in nets.items() if n in memo.found and memo.found[n][0] == spec]
+    if not len(changed):
+        return set(names)
+    _, h, l = cells.shape
+    r = np.arange(-_MEMO_REACH, _MEMO_REACH + 1, dtype=np.int64)
+    offsets = (r[:, None, None] * (h * l) + r[None, :, None] * l + r[None, None, :]).reshape(-1)
+    near = np.unique((changed[:, None] + offsets[None, :]).reshape(-1))  # wrapping at an edge only adds cells
+    watched: list[np.ndarray] = []
+    for n in names:
+        (source, sinks), _, keys = memo.found[n]
+        ends = np.array([source, *sinks], dtype=np.int64).reshape(-1, 3)
+        watched.append(np.concatenate((keys, (ends[:, 0] * h + ends[:, 1]) * l + ends[:, 2])))
+    if not names:
+        return set()
+    owner_of = np.repeat(np.arange(len(names)), [len(w) for w in watched])
+    hit = np.isin(np.concatenate(watched), near)
+    dirty = set(owner_of[hit].tolist())
+    return {n for i, n in enumerate(names) if i not in dirty}
+
+
 def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owner: dict[Pos, str],
                     blocked: Collection[Pos], on_net: Callable[[str], None] | None, terminals: frozenset[Pos],
-                    world: _World, grid) -> list[Violation]:
+                    world: _World, grid, memo: VerifyMemo | None = None,
+                    cells: np.ndarray | None = None) -> list[Violation]:
     """verify_signals on the kernel, the same violations in the same order. Every net is searched first; then the
     cells reached are checked for shorts in bulk, and only nets with a suspect cell go through them one by one."""
     _, h, l = region._Region__blocks.shape
@@ -583,9 +637,14 @@ def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owne
         return net, keys
 
     # Nets are searched one by one, each on its own: forked processes take a share each.
-    checked = fork_map(check, list(nets.items()))
+    same = _unchanged_nets(memo, nets, cells, blocked, terminals) if memo is not None and cells is not None else set()
+    searched = iter(fork_map(check, [item for item in nets.items() if item[0] not in same]))
+    checked = [memo.found[n][1:] if n in same else next(searched) for n in nets]
     found: list[list[Violation]] = [net for net, _ in checked]
     reached: list[np.ndarray] = [keys for _, keys in checked]
+    if memo is not None and cells is not None:
+        memo.cells, memo.terminals, memo.blocked = cells, terminals, blocked
+        memo.found = {n: (spec, net, keys) for (n, spec), (net, keys) in zip(nets.items(), checked)}
     del checked
     if on_net is not None:
         for net_id in nets:
@@ -598,7 +657,11 @@ def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owne
     net_of = np.repeat(np.arange(len(reached)), np.diff(offsets))
     suspect = np.zeros(len(reached), dtype=bool)
     first_net = np.empty(len(all_keys), dtype=np.int64)
-    if len(all_keys):
+    if len(all_keys) and _signals is not None and hasattr(_signals, "short_suspects"):
+        suspect, first_net = _signals.short_suspects(np.ascontiguousarray(all_keys, dtype=np.int64),
+                                                     np.ascontiguousarray(offsets, dtype=np.int64), owner, ids,
+                                                     *region._Region__blocks.shape)
+    elif len(all_keys):
         by_key = np.argsort(all_keys, kind="stable")
         sorted_keys = all_keys[by_key]
         sorted_nets = net_of[by_key]

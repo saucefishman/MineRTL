@@ -20,7 +20,7 @@ import numpy as np
 from litemapy import BlockState, Region
 
 from minecraft_v.cell_library import SCHEMATIC_MAP
-from .block_utils import Box
+from .block_utils import Box, palette_writer
 from .ir import ComponentList, ComponentType
 from .verify import (Excluding, HiddenBoxes, Violation, _DELTA_TO_FACING, _DUST, _HORIZ_DIRS, _OPAQUE, _REPEATER, _STRONG, _TORCH, _WEAK,
                      _World, _signals, cell_byte, signal_grid)
@@ -673,6 +673,7 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
     """Add up to need ticks on a net, nearest the sink first; returns what was added. edits gets each cell's old block."""
     world = timing.world
     region = world.region
+    write = getattr(world, "write", None) or region.__setitem__
     cells = [p for p in timing.cells_back(net_id, sink) if p not in terminals]
     added = 0
     for p in cells:  # no new blocks until these run out
@@ -682,7 +683,7 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
             ticks = min(_MAX_DELAY - repeater_delay(world.block(p)), need - added)
             if edits is not None:
                 edits.append((p, world.block(p)))
-            region[p] = world.block(p).with_properties(delay=str(repeater_delay(world.block(p)) + ticks))
+            write(p, world.block(p).with_properties(delay=str(repeater_delay(world.block(p)) + ticks)))
             world.changed(p)
             added += ticks
             counts["raised"] += 1
@@ -699,7 +700,7 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
         ticks = min(_MAX_DELAY, need - added)
         if edits is not None:
             edits.append((p, world.block(p)))
-        region[p] = BlockState("minecraft:repeater", facing=_DELTA_TO_FACING[delta], delay=str(ticks))
+        write(p, BlockState("minecraft:repeater", facing=_DELTA_TO_FACING[delta], delay=str(ticks)))
         world.changed(p)
         added += ticks
         counts["new"] += 1
@@ -726,6 +727,8 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
         timing = _HoldTiming(world, comp, terminals, failed)
     else:
         world = _GridWorld(workspace, blocked, protected)
+        if (workspace.x, workspace.y, workspace.z) == (0, 0, 0) and min(workspace.width, workspace.height, workspace.length) > 0:
+            world.write = palette_writer(workspace)  # Region's own setter searches its palette per block
         world.grid = grid
         timing = _KernelTiming(world, comp, terminals, failed)
     counts = {"raised": 0, "new": 0}
