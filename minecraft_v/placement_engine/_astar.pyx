@@ -7,7 +7,7 @@ from libc.stdint cimport int64_t, uint16_t, uint32_t
 from libc.stdlib cimport calloc, free
 from libcpp.vector cimport vector
 from cython.operator cimport dereference
-from cpython.set cimport PySet_Contains
+from cpython.set cimport PyAnySet_Check, PySet_Contains
 from posix.time cimport clock_gettime, timespec, CLOCK_MONOTONIC
 cimport cython
 import time
@@ -601,6 +601,13 @@ cdef enum:
     S_PENDING = 1 << 5
 
 
+cdef inline bint fp_has(object fp, object key) except -1:
+    """footprint_blocked membership: a set, or a builder.CellMask (a grid of cells, with `in`)."""
+    if PyAnySet_Check(fp):
+        return PySet_Contains(fp, key)
+    return key in fp
+
+
 @cython.final
 cdef class CellGrid:
     """One word per cell of what the searches read, mirrored from the router's containers.
@@ -649,6 +656,14 @@ cdef class CellGrid:
             kinds[xs, ys, zs].astype(np.uint16) << 1)  # kind bits are F_NONAIR.. >> 1
         for cells_set, bit in ((solid, F_SOLID), (inverted, F_INV), (terminal, F_TERM)):
             self.put_all(cells_set, bit)
+        mask = getattr(fp, "mask", None)
+        if mask is not None:  # a CellMask: every cell's F_FP at once, none left to ask the set for
+            grid3 = flat.reshape(self.nx, self.ny, self.nz)
+            grid3 |= G_FP_READ
+            mx, my, mz = mask.shape
+            inner = grid3[GRID_MARGIN:GRID_MARGIN + mx, GRID_MARGIN:GRID_MARGIN + my, GRID_MARGIN:GRID_MARGIN + mz]
+            inner |= (mask[:inner.shape[0], :inner.shape[1], :inner.shape[2]].astype(np.uint16) * F_FP)
+            self.put_all(fp.extra, F_FP)
         for pos, value in dust_owner.items():
             self.put_owner(pos, value)
         index.grid = self
@@ -673,7 +688,7 @@ cdef class CellGrid:
         return self.terminal
 
     cdef int read_fp(self, uint16_t* w, int x, int y, int z) except -1:
-        w[0] |= G_FP_READ | (F_FP if PySet_Contains(self.fp, (x, y, z)) else 0)
+        w[0] |= G_FP_READ | (F_FP if fp_has(self.fp, (x, y, z)) else 0)
         return 0
 
     cdef inline uint16_t* word(self, int x, int y, int z) noexcept:
@@ -820,9 +835,11 @@ cdef class World:
                  int max_bridge_y, goal, int x_h_factor, eprot, prot, fp_relief, fp, inverted, terminal,
                  workspace, glass, facing, dict pos_ids, list pos_list, list h_list, list move_cache,
                  pending=frozenset(), CellGrid grid=None, bint grid_check=False):
-        for s in (non_air, wire, torch, repeater, solid, fp_relief, fp, inverted, terminal, pending):
+        for s in (non_air, wire, torch, repeater, solid, fp_relief, inverted, terminal, pending):
             if not isinstance(s, (set, frozenset)):
                 raise TypeError(f"World needs sets, got {type(s).__name__}")
+        if not (isinstance(fp, (set, frozenset)) or hasattr(fp, "mask")):
+            raise TypeError(f"World needs a set or CellMask footprint, got {type(fp).__name__}")
         self.non_air, self.wire, self.torch, self.repeater = non_air, wire, torch, repeater
         self.solid, self.inverted, self.terminal, self.fp_relief, self.fp = solid, inverted, terminal, fp_relief, fp
         self.pending = pending
@@ -1006,9 +1023,9 @@ cdef class World:
         elif bit == F_PROT:
             v = self.keepout_has(self.prot, key)
         elif bit == F_EFP:
-            v = PySet_Contains(self.fp, key) and not PySet_Contains(self.fp_relief, key)
+            v = fp_has(self.fp, key) and not PySet_Contains(self.fp_relief, key)
         elif bit == F_FP:
-            v = PySet_Contains(self.fp, key)
+            v = fp_has(self.fp, key)
         elif bit == F_INV:
             v = PySet_Contains(self.inverted, key)
         elif bit == F_TERM:
@@ -1054,7 +1071,7 @@ cdef class World:
             if PySet_Contains(self.repeater, key): v |= F_REP
         if self.keepout_has(self.eprot, key): v |= F_EPROT
         if self.keepout_has(self.prot, key): v |= F_PROT
-        if PySet_Contains(self.fp, key):
+        if fp_has(self.fp, key):
             v |= F_FP
             if not PySet_Contains(self.fp_relief, key): v |= F_EFP
         if PySet_Contains(self.inverted, key): v |= F_INV
