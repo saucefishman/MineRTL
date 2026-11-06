@@ -171,7 +171,7 @@ def signal_grid(region: Region, blocked: Collection[Pos], terminals: Collection[
             grid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 0
         cells = blocked.cells
     if cells:
-        hidden = np.array(list(cells), dtype=np.int64).reshape(-1, 3)
+        hidden = np.fromiter(itertools.chain.from_iterable(cells), dtype=np.int64, count=3 * len(cells)).reshape(-1, 3)
         hidden = hidden[((hidden >= 0) & (hidden < size)).all(axis=1)]
         grid[hidden[:, 0], hidden[:, 1], hidden[:, 2]] = 0
     if len(ends):

@@ -71,3 +71,56 @@ def fork_map(fn: Callable[[T], R], items: Sequence[T], processes: int | None = N
         for pid, read in children:  # only if something failed part way
             os.close(read)
             os.waitpid(pid, 0)
+
+
+class Forked:
+    """fn() run in a forked process from now until result(), which returns what it returned, or raises what it raised.
+    What it prints is held and printed by result(), so it doesn't land in the middle of this process's lines. Without
+    fork, fn runs when asked for its result."""
+
+    def __init__(self, fn: Callable[[], R]):
+        self._fn: Callable[[], R] | None = fn
+        self._pid = 0
+        self._read = -1
+        if not hasattr(os, "fork") or workers() <= 1:
+            return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        read, write = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - the child's coverage isn't collected
+            os.close(read)
+            gc.disable()
+            import io
+            out = io.StringIO()
+            sys.stdout = sys.stderr = out
+            status = 0
+            try:
+                result = fn()
+            except BaseException as e:  # noqa: BLE001 - goes back to the parent
+                status, result = 1, e
+            try:
+                data = pickle.dumps((result, out.getvalue()), protocol=5)
+            except Exception as e:  # noqa: BLE001
+                status, data = 1, pickle.dumps((RuntimeError(repr(e)), out.getvalue()), protocol=5)
+            with os.fdopen(write, "wb") as f:
+                f.write(bytes([status]))
+                f.write(data)
+            os._exit(0)
+        os.close(write)
+        self._fn, self._pid, self._read = None, pid, read
+
+    def result(self) -> R:
+        if self._fn is not None:
+            return self._fn()
+        with os.fdopen(self._read, "rb") as f:
+            data = f.read()
+        os.waitpid(self._pid, 0)
+        if not data:
+            raise RuntimeError(f"forked process {self._pid} died without a result")
+        result, printed = pickle.loads(data[1:])
+        sys.stdout.write(printed)
+        sys.stdout.flush()
+        if data[0]:
+            raise result
+        return result

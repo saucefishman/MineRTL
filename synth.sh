@@ -252,7 +252,20 @@ if [[ "$use_synth_cache" == true ]] && ! grep -qE '`include[[:space:]]|\$readmem
     if command -v sha256sum >/dev/null; then sha=(sha256sum); else sha=(shasum -a 256); fi
     yosys_bin="$(command -v yosys)"
     datdir="$(yosys-config --datdir 2>/dev/null || echo "$(dirname "$yosys_bin")/../share/yosys")"  # its own techmap.v
-    key="$( { yosys -V; cat "$yosys_bin"; cat "$(dirname "$yosys_bin")/yosys-abc" 2>/dev/null; cat "$datdir"/*.v 2>/dev/null;
+    # The binaries' hash, kept by their size and modification time: reading 40 MB of them took longer than the rest.
+    bins=("$yosys_bin" "$(dirname "$yosys_bin")/yosys-abc")
+    stamp="$(stat -L -c '%n %s %Y' "${bins[@]}" 2>/dev/null || stat -L -f '%N %z %Fm' "${bins[@]}" 2>/dev/null || true)"  # GNU, BSD
+    stamp_file="${synth_cache_dir%/}/binaries/$(printf '%s\n' "$stamp" | "${sha[@]}" | cut -c1-24)"
+    if [[ -n "$stamp" && -s "$stamp_file" ]]; then
+        bin_hash="$(cat "$stamp_file")"
+    else
+        bin_hash="$(cat "${bins[@]}" 2>/dev/null | "${sha[@]}" | cut -c1-64)"
+        if [[ -n "$stamp" ]]; then
+            mkdir -p "${stamp_file%/*}"
+            printf '%s\n' "$bin_hash" > "$stamp_file.tmp$$" && mv "$stamp_file.tmp$$" "$stamp_file"
+        fi
+    fi
+    key="$( { yosys -V; printf '%s\n' "$bin_hash"; cat "$datdir"/*.v 2>/dev/null;
               cat "${BASH_SOURCE[0]}";
               printf '%s\n' "$yosys_script" | unplace; for f in "${dir%/}"/*.v "${here}"/techmap/*.v; do
                   printf '%s\n' "${f##*/}"; cat "$f"; done; } | "${sha[@]}" | cut -c1-24)"

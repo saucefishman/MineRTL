@@ -388,6 +388,7 @@ def main():
                                         macro_channel=_MACRO_CHANNEL,
                                         macro_east_room=_MACRO_EAST_ROOM,
                                         macro_headroom=_MACRO_HEADROOM,
+                                        retain=True,
                                         **spacing)
 
     log(f"Wrote litematic: {out_litematic.resolve()}")

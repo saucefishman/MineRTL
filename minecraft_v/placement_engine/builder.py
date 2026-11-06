@@ -49,6 +49,7 @@ from .template import (
 from .hold import _HOLD_MARGIN, HoldShort, fix_hold, flat_terminals, hold_violations, repeater_delay
 from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_capture, save_macro
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
+from .forks import Forked
 from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
@@ -449,8 +450,19 @@ def _opaque_boxes(placed: list[_Placed], macros: dict[str, Macro] | None) -> lis
             for fp in [p.component.footprint]]
 
 
+_interior_memo: list = []  # [placed, its cells]: routing, repair and verify all ask for the same layout's
+
+
 def _component_interior(placed: list[_Placed]) -> set[tuple[int, int, int]]:
     """Cells inside non-IO component footprints."""
+    if _interior_memo and _interior_memo[0] is placed and _interior_memo[1] == len(placed):
+        return set(_interior_memo[2])
+    cells = frozenset(_interior_cells(placed))
+    _interior_memo[:] = [placed, len(placed), cells]
+    return set(cells)
+
+
+def _interior_cells(placed: list[_Placed]) -> set[tuple[int, int, int]]:
     return {
         (ox + dx, oy + dy, oz + dz)
         for item in placed
@@ -2307,11 +2319,15 @@ def build_litematic_from_component_list(
         resume: ResumeStore | None = None,
         probes: list[dict] | None = None,
         server_clock: int | None = None,
+        retain: bool = False,
 ) -> Path:
     """capture: fill this dict with the routed layout and stop before cosmetics and the clock (see build_macro).
 
     server_clock: instead of generating `clock_pin`'s clock, give it a lever for MCHPRS to toggle every this many
     ticks (0: the generated clock's period for this critical path).
+
+    retain: keep the build's working state alive after returning, for a process about to exit: freeing its millions of
+    cells one by one takes longer than the exit.
     """
     if macros:  # an array is a wall across the layout: wires get past it overhead
         routing_headroom = max(routing_headroom, macro_headroom)
@@ -2469,18 +2485,31 @@ def build_litematic_from_component_list(
         with phase("[hold] fixing hold"):
             flat_period = _hold_with_detours(workspace, flat, flat_ends, failed_nets, probed, opaque, macros, clock_requirement,
                                              hold_shorts, kept_router[0] if kept_router else None)
-    if macros:
-        signal_violations = _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros,
-                                                    failed_nets)
-    else:
-        signal_violations = _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
-                                                      frozenset(_component_interior(placed)), failed_nets)
+
+    def check_signals() -> list:
+        if macros:
+            return _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros, failed_nets)
+        return _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
+                                         frozenset(_component_interior(placed)), failed_nets)
+
+    # Only a check of the wire as it is now: it runs in a forked process beside what follows, up to writing the build.
+    signal_check = Forked(check_signals) if capture is None else None
+    signal_violations = check_signals() if signal_check is None else []
+
+    def checked_signals() -> list:
+        """signal_violations with the forked check's in front, once it's done."""
+        nonlocal signal_check, signal_violations
+        if signal_check is not None:
+            signal_violations = signal_check.result() + signal_violations
+            signal_check = None
+        return signal_violations
 
     if routing_failures:
         failed = ", ".join(nid for nid, _ in routing_failures)
         if allow_routing_failures:
             log(f"IGNORING - Routing failed for {len(routing_failures)} net(s): {failed}")
         else:
+            checked_signals()
             raise RuntimeError(f"Routing failed for {len(routing_failures)} net(s): {failed}")
     with phase("[verify] live pins"):
         unused = _unused_output_terminals(placed, _build_terminal_map(work_nets, pin_terminal), pin_terminal)
@@ -2489,14 +2518,16 @@ def build_litematic_from_component_list(
         log(f"[verify] live_pin {sorted(violation.nets)} has wire on its cell {violation.pos}")
     signal_violations = signal_violations + live_pins
     if live_pins and not allow_routing_failures:
+        checked_signals()
         raise RuntimeError(f"{len(live_pins)} pin(s) with no net drive wire, first: {live_pins[0]}")
     short_pins = hold_violations(hold_shorts)
     for violation in short_pins:
         log(f"[verify] hold {sorted(violation.nets)} can take new data on its own edge, at {violation.pos}")
     signal_violations = signal_violations + short_pins
     if short_pins and not allow_routing_failures:
+        checked_signals()
         raise RuntimeError(f"{len(short_pins)} flip-flop pin(s) short of hold time, first: {short_pins[0]}")
-    if signal_violations and not macros and not allow_routing_failures:
+    if signal_check is None and signal_violations and not macros and not allow_routing_failures:
         raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
 
     if output_pin_targets:
@@ -2618,14 +2649,18 @@ def build_litematic_from_component_list(
             if workspace[lever].id == "minecraft:lever":
                 levers.append({"name": p.component.id if len(p.component.pins) == 1 else f"{p.component.id}.{pin.name}",
                                "pos": [c - lo for c, lo in zip(lever, low)]})
+    if settled:
+        with phase("[settle] propagating"):
+            settle_blocks(workspace, opaque)
+
+    with phase("[verify] waiting for the signal check"):
+        signal_violations = checked_signals()
+    if signal_violations and not macros and not allow_routing_failures:
+        raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
     if resolved_probes or clock_entry:
         server_path = out_path.with_suffix(SERVER_FILE_SUFFIX)
         write_server_file(server_path, size, resolved_probes, clock_entry, levers)
         log(f"[server] {server_path}")
-
-    if settled:
-        with phase("[settle] propagating"):
-            settle_blocks(workspace, opaque)
 
     schematic = Schematic(
         name=schematic_name,
@@ -2642,7 +2677,12 @@ def build_litematic_from_component_list(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with phase("[write] saving litematic"):
         save_schematic(schematic, str(out_path))
+    if retain:
+        _retained.append(locals())
     return out_path
+
+
+_retained: list = []  # see build_litematic_from_component_list's retain
 
 
 def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int, schematics_dir: Path,
