@@ -39,7 +39,7 @@ _MU_MIN, _MU_MAX = 0.75, 1.1  # per-iteration lambda growth (ePlace)
 _MU_REF = 0.002              # wirelength rise, as a share of total, that costs one step of growth
 _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
-_REFINE_PASSES = 3
+_REFINE_PASSES = 2  # a fixed amount of work, so a build is the same every run (on floweypu: 4s each, a third gains 0.1%)
 _REFINE_POPS = 60
 _FFT_WORKERS = 4             # threads for the Poisson solve's transforms
 _STATUS_EVERY = 50           # gates between progress line updates
@@ -642,7 +642,7 @@ class _NetCost:
         return out[0], out[1], out[2]
 
 
-def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: bool, deadline: float,
+def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: bool,
             fixed_box: tuple[np.ndarray, np.ndarray] | None = None) -> None:
     """Greedy detailed placement: move each gate towards its optimal region if that lowers HPWL.
 
@@ -661,8 +661,6 @@ def _refine(netlist: _Netlist, pos_all: np.ndarray, sizes: np.ndarray, flat: boo
     for refine_pass in range(_REFINE_PASSES):
         moved = 0
         for i in range(n):
-            if time.monotonic() >= deadline:
-                return
             if i % _STATUS_EVERY == 0:
                 status(f"refining, pass {refine_pass + 1}/{_REFINE_PASSES}, gate {i}/{n}, {moved} moved")
             if i in pinned or (fixed_box is not None and netlist.comps[i].type == ComponentType.CUSTOM):
@@ -1107,7 +1105,7 @@ def _poisson_placement(
         return np.array([coords[c.id] for c in netlist.comps[netlist.n_gates:]], dtype=float).reshape(-1, 3)
 
     pos_all = np.vstack([pos, io_rows()])
-    _refine(netlist, pos_all, sizes, flat, time.monotonic() + 10.0, fixed_box)
+    _refine(netlist, pos_all, sizes, flat, fixed_box)
     pos = pos_all[:len(gates)]
     pos_all[len(gates):] = io_rows()
     gates_final = _mirror_pass(netlist, pos_all, gates)
