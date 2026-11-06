@@ -20,6 +20,7 @@ _lock = threading.RLock()
 _ticker: threading.Thread | None = None
 _forked = False  # worker processes stay off the line; the parent draws it
 _debug = False
+_phase_times = os.environ.get("MINECRAFT_V_PHASE_TIMES") == "1"  # log each phase's seconds when it ends
 
 
 def _tick() -> None:
@@ -67,6 +68,8 @@ class ProgressBar:
         with _lock:
             _stack.remove(self)
             self._clear()
+            if _phase_times and not _forked:
+                print(f"[phase] {self.label}: {time.monotonic() - self._t0:.1f}s", flush=True)
             if _stack:
                 _stack[-1]._draw()
 
