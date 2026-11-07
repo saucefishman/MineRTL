@@ -140,7 +140,8 @@ def _kind_of(block_id: str) -> int:
     if kind is None:
         block = BlockState(block_id)
         kind = _KINDS[block_id] = ((0 if _is_air(block) else 1) | (2 if _is_redstone_wire(block) else 0)
-                                   | (4 if _is_torch(block) else 0) | (8 if _is_repeater(block) else 0))
+                                   | (4 if _is_torch(block) else 0) | (8 if _is_repeater(block) else 0)
+                                   | (16 if block == GLASS else 0))
     return kind
 
 
@@ -177,10 +178,10 @@ class _BlockIndex:
 
     @staticmethod
     def kinds(region: Region) -> np.ndarray:
-        """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater."""
+        """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater | 16 GLASS (the grid's alone)."""
         kinds = np.array([
             (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
-            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
+            | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0) | (16 if b == GLASS else 0)
             for b in region._Region__palette
         ], dtype=np.uint8)
         return kinds[region._Region__blocks]
@@ -382,8 +383,15 @@ def _find_wire_path(
         pending_sinks: frozenset[tuple[int, int, int]] = frozenset(),
         stagnation: int = -1,
         budget: int = 1,
+        start_depth: int = 0,
+        goal_depth: int = 15,
+        mark_failure: bool = True,
 ) -> list[tuple[int, int, int]]:
     """A* wire route from start to goal.
+
+    start_depth: signal depth (_signal_step) at start; the path is good from any cell reached at this depth or less.
+    goal_depth: the path reaches goal at this signal depth or less.
+    mark_failure: a failed search marks its way with lamps in workspace.
 
     stagnation: this search's stagnation limit (negative: _ROUTE_STAGNATION). Kernel only.
 
@@ -497,6 +505,8 @@ def _find_wire_path(
     seed_ids, seed_nodes, seed_groups, group_best_h, best = _astar.prepare_seeds(
         seeds, tree_seeds, solid, tuple(bounds), pos_ids, pos_list, h_list, move_cache, gx, gy, gz, x_h_factor,
         seed_depths or {})
+    if start_depth:
+        seed_nodes = [n | (start_depth << _SIG_SHIFT) if g == 0 else n for n, g in zip(seed_nodes, seed_groups)]
     if not seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
@@ -518,7 +528,7 @@ def _find_wire_path(
     group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR * budget for gh in group_best_h]
     initial_group_best_h = list(group_best_h)
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
-                   weight, time_limit, pos_list, h_list, None, congestion_cost)
+                   weight, time_limit, pos_list, h_list, None, congestion_cost, goal_depth)
 
     def make_world():
         """The kernel's move generation over this search's world."""
@@ -556,7 +566,7 @@ def _find_wire_path(
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
-        cur = best_node
+        cur = best_node if mark_failure else _NO_PARENT
         # Seeds only enter came_from once expanded; an early stop (f-cap) can precede that.
         while cur is not None and cur != _NO_PARENT:
             cx, cy, cz = pos_list[cur >> _NODE_SHIFT]
@@ -570,7 +580,7 @@ def _find_wire_path(
         raise error(f"No route for net {net_id} from {start} to {goal} (closest reached: {node_str(best_node)}{reason}; h_radius_pruned={h_radius_pruned})")
     def pos_of(cid: int) -> tuple[int, int, int]:
         """A successful kernel search leaves the cells it made in its own vectors, not pos_list."""
-        return pos_list[cid] if cid < len(pos_list) else _astar.cell_pos(cid)
+        return pos_list[cid] if cid < len(pos_list) else came_from.pos(cid)
 
     if walkable(goal) and pos_of(reached >> _NODE_SHIFT) != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {pos_of(reached >> _NODE_SHIFT)}")
@@ -586,6 +596,7 @@ def _find_wire_path(
         back_visited.add(cur)
         cur = came_from[cur]
     path.reverse()
+    came_from.release()
     if not tree_seeds and path[0] != start:
         raise ValueError(f"Path for net {net_id} does not begin at start {start}; begins at {path[0]}")
     _check_tower_self_overlap(path, net_id)
@@ -651,8 +662,9 @@ def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,
                 budget: int = 1, cell_cap: int = 0):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
+    *args, goal_depth = args
     # A tight first try (stagnation set) gives up sooner on positions too: past a few thousand it almost never succeeds,
     # and a failure there only means ripping what's around the sink and trying again.
     return _astar.search(*args, make_world(), h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget,
                          position_cap=_TIGHT_POSITIONS if stagnation >= 0 else 0,
-                         cell_cap=cell_cap)
+                         cell_cap=cell_cap, goal_depth=goal_depth)
