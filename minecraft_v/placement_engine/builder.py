@@ -1011,23 +1011,31 @@ class _TreeCells:
     """A net's wire cells, for picking those nearest a sink without walking them all."""
 
     def __init__(self) -> None:
-        self.cells = np.empty((1024, 3), dtype=np.int32)
+        self.cols = np.empty((3, 1024), dtype=np.int32)  # x, y, z rows: each a contiguous array to scan
+        self.tmp = np.empty(1024, dtype=np.int32)
         self.n = 0
 
     def add(self, cells: list[Pos]) -> None:
         if not cells:
             return
-        while self.n + len(cells) > len(self.cells):
-            self.cells = np.concatenate((self.cells, np.empty_like(self.cells)))
-        self.cells[self.n:self.n + len(cells)] = cells
+        while self.n + len(cells) > self.cols.shape[1]:
+            self.cols = np.concatenate((self.cols, np.empty_like(self.cols)), axis=1)
+            self.tmp = np.empty(self.cols.shape[1], dtype=np.int32)
+        self.cols[:, self.n:self.n + len(cells)] = np.array(cells, dtype=np.int32).T
         self.n += len(cells)
 
     def nearest(self, goal: Pos, k: int) -> list[Pos]:
         """The k cells with the lowest search heuristic for goal."""
-        cells = self.cells[:self.n]
-        d = np.abs(cells - np.array(goal, dtype=np.int32)) * np.array((1, 4, 1), dtype=np.int32)
-        h = d.sum(axis=1)
-        return [tuple(c) for c in cells[np.argpartition(h, k)[:k]].tolist()]
+        n = self.n
+        xs, ys, zs = self.cols[0, :n], self.cols[1, :n], self.cols[2, :n]
+        h, tmp = np.abs(xs - goal[0]), self.tmp[:n]
+        np.abs(ys - goal[1], out=tmp)
+        tmp *= 4
+        h += tmp
+        np.abs(zs - goal[2], out=tmp)
+        h += tmp
+        pick = np.argpartition(h, k)[:k]
+        return list(zip(xs[pick].tolist(), ys[pick].tolist(), zs[pick].tolist()))
 
 
 _first_fanout = [64]
