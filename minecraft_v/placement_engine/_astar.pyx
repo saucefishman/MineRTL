@@ -875,6 +875,7 @@ cdef class World:
     cdef long long gsx, gsy
     cdef bint keep_fast, have_small, has_pending
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
+    cdef FlatMap[char] pend_near     # cells with a pending sink at one of next_to_terminal's offsets, with a grid
     cdef _OwnCells own              # the keepout's _own cells (shared, read only)
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint pids_seeded
@@ -953,6 +954,21 @@ cdef class World:
                 self.add_small(spec[3], S_EXCL << shift)
         self.add_small(self.fp_relief, S_RELIEF)
         self.add_small(self.pending, S_PENDING)
+        if self.has_pending:
+            self.add_pend_near()
+        return 0
+
+    cdef int add_pend_near(self) except -1:
+        """Every cell next_to_terminal's pending check would answer yes for: the pending cells minus its offsets."""
+        cdef int x, y, z, k, ddy, ins
+        for pos in self.pending:
+            x, y, z = pos
+            for ddy in range(-2, 3):
+                self.pend_near.get(cell_key(x, y - ddy, z), &ins)[0] = 1
+                for k in range(4):
+                    self.pend_near.get(cell_key(x - 2 * HORIZ[k][0], y - ddy, z - 2 * HORIZ[k][1]), &ins)[0] = 1
+                    self.pend_near.get(cell_key(x - HORIZ[k][0] - HORIZ[k][1], y - ddy,
+                                                z - HORIZ[k][1] + HORIZ[k][0]), &ins)[0] = 1
         return 0
 
     cdef int add_small(self, cells, int bit) except -1:
@@ -1711,15 +1727,7 @@ cdef class World:
         if not self.has_pending:
             return False
         if self.gp != NULL:
-            for ddy in range(-2, 3):
-                if self.small_at(x, y + ddy, z) & S_PENDING:
-                    return True
-                for k in range(4):
-                    if (self.small_at(x + 2 * HORIZ[k][0], y + ddy, z + 2 * HORIZ[k][1]) & S_PENDING
-                            or self.small_at(x + HORIZ[k][0] + HORIZ[k][1], y + ddy,
-                                             z + HORIZ[k][1] - HORIZ[k][0]) & S_PENDING):
-                        return True
-            return False
+            return self.pend_near.find(cell_key(x, y, z)) != NULL
         with gil:
             for ddy in range(-2, 3):
                 if PySet_Contains(self.pending, (x, y + ddy, z)):
