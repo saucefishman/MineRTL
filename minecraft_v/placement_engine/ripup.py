@@ -14,13 +14,21 @@ from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+import numpy as np
 from litemapy import BlockState, Region
 
-from .block_utils import _is_redstone_wire, _is_repeater, _is_torch, _block_str
-from .constants import _HORIZ_DIRS
-from .pathfinding import _BlockIndex
+from .block_utils import _TORCH_IDS, _is_redstone_wire, _is_repeater, _is_torch, _block_str
+from .constants import _HORIZ_DIRS, REDSTONE
+from .pathfinding import IndexedWorkspace, _BlockIndex, _astar, _kind_of
+from .wire import LayConflict, _place_support
 
 _MISSING = object()
+
+
+def _dust_class(block_id: str) -> int:
+    """_astar.DustLayer's table entry for a block id: its _BlockIndex kind bits, 32 if it's wire or a torch, 64 if air."""
+    return _kind_of(block_id) | (32 if "redstone_wire" in block_id or block_id in _TORCH_IDS else 0) | (
+        64 if block_id == "minecraft:air" else 0)
 
 # Journal entry: (kind, target, key, prev, prev_writer)
 #   kind 'block': target=Region, prev=BlockState, prev_writer=net that wrote prev (or None)
@@ -118,6 +126,7 @@ class JournalingWorkspace:
         self.region = region
         self._rec = recorder
         self._put = getattr(region, "put", None)  # an IndexedWorkspace's write that returns the old block
+        self._lay_cache: tuple = (None, {}, [])  # dust_layer's palette indexes
 
     def __getitem__(self, pos) -> BlockState:
         return self.region[pos]
@@ -126,6 +135,33 @@ class JournalingWorkspace:
         # Stacked on an IndexedWorkspace: reuse its live index instead of rescanning.
         inner = getattr(self.region, "block_index", None)
         return inner() if inner is not None else _BlockIndex(self.region)
+
+    def dust_layer(self, solid, dust_owner, net_id: str, support: BlockState):
+        """An _astar.DustLayer for laying net_id's wire through this workspace, or None when this isn't the stack it
+        knows: an IndexedWorkspace over a CellGrid with journaling containers, recording a net. It writes, journals
+        (same entries and order) and raises as wire._lay_dust_cell and the other writes of the tower and drop
+        moves would; the rare cases it hands back to the originals."""
+        rec = self._rec
+        inner = self.region
+        active = rec.active
+        if (active is None or type(inner) is not IndexedWorkspace or type(solid) is not JournaledSet
+                or type(dust_owner) is not JournaledDict or solid._rec is not rec or dust_owner._rec is not rec):
+            return None
+        grid = inner._index.grid
+        if grid is None or solid._grid is not grid or dust_owner._grid is not grid:
+            return None
+        palette, blocks = inner.region._Region__palette, inner.region._Region__blocks
+        writer = rec.writer
+        if not (type(palette) is list and blocks.dtype == np.uint32 and blocks.ndim == 3 and type(writer) is dict):
+            return None
+        cache = self._lay_cache
+        if cache[0] is not palette:  # saving a schematic replaces the palette
+            cache = self._lay_cache = (palette, {}, [])
+        # cache: palette, id(block) -> (block, its palette index) found when first written, per index _dust_class
+        return _astar.DustLayer(
+            grid, blocks, palette, cache[2], cache[1], rec.journals[active], writer, inner, solid, dust_owner, active,
+            net_id, inner._write, LayConflict, lambda pos: _place_support(self, solid, dust_owner, net_id, pos, support),
+            _dust_class, REDSTONE, support, _MISSING, _kind_of(REDSTONE.id), _kind_of(support.id), solid._grid_bit)
 
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
