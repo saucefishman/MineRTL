@@ -76,13 +76,21 @@ def fork_map(fn: Callable[[T], R], items: Sequence[T], processes: int | None = N
 class Forked:
     """fn() run in a forked process from now until result(), which returns what it returned, or raises what it raised.
     What it prints is held and printed by result(), so it doesn't land in the middle of this process's lines. Without
-    fork, fn runs when asked for its result."""
+    fork (or with one worker) fn runs right away, here, and result() hands back what it returned or raises what it
+    raised: what fn sees is the state at construction either way, so the outcome doesn't depend on worker count."""
 
     def __init__(self, fn: Callable[[], R]):
-        self._fn: Callable[[], R] | None = fn
+        self._done = False
+        self._value: R | None = None
+        self._error: BaseException | None = None
         self._pid = 0
         self._read = -1
         if not hasattr(os, "fork") or workers() <= 1:
+            self._done = True
+            try:
+                self._value = fn()
+            except BaseException as e:  # noqa: BLE001 - raised again from result()
+                self._error = e
             return
         sys.stdout.flush()
         sys.stderr.flush()
@@ -108,11 +116,13 @@ class Forked:
                 f.write(data)
             os._exit(0)
         os.close(write)
-        self._fn, self._pid, self._read = None, pid, read
+        self._pid, self._read = pid, read
 
     def result(self) -> R:
-        if self._fn is not None:
-            return self._fn()
+        if self._done:
+            if self._error is not None:
+                raise self._error
+            return self._value  # type: ignore[return-value]
         with os.fdopen(self._read, "rb") as f:
             data = f.read()
         os.waitpid(self._pid, 0)
