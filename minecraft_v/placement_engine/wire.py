@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Iterable
 from litemapy import BlockState, Region
+from . import _astar
 from .constants import (
     GLASS, STONE, REDSTONE, REDSTONE_TORCH,
     _HORIZ_DIRS, _DELTA_TO_FACING, _OPPOSITE_SIDE, _REPEATER_INTERVAL, _TOWER_2BLOCK,
@@ -40,6 +41,14 @@ class _PlainOps:
 
     def lay(self, pos) -> None:
         _lay_dust_cell(self.workspace, self.solid, self.dust_owner, self.net_id, pos, self.support)
+
+    def lay_run(self, cells, lo: int, hi: int) -> None:
+        """Each of cells[lo:hi]: the slope notch check from the cell before it, then the cell."""
+        for i in range(lo, hi):
+            cell = cells[i]
+            if i > 0 and cells[i - 1][1] != cell[1]:  # level steps are never cut
+                _check_slope_notch(self.workspace, self.solid, cells[i - 1], cell)
+            self.lay(cell)
 
     def place_support(self, pos) -> bool:
         return _place_support(self.workspace, self.solid, self.dust_owner, self.net_id, pos, self.support)
@@ -337,53 +346,20 @@ def _lay_redstone_path(
 ) -> None:
     cells = list(path)
     n = len(cells)
-    tower_bottom: set[int] = set()
-    tower_top: set[int] = set()
-    slope2_bottom: set[int] = set()
-    p4_bottom: set[int] = set()
-    p4_top: set[int] = set()
-    horiz = _HORIZ_SET
-    prev_cell = cells[0] if n else None
-    for i in range(1, n):
-        cell = cells[i]
-        ax, ay, az = prev_cell
-        bx, by, bz = cell
-        delta = (bx - ax, bz - az)
-        dy = by - ay
-        i -= 1
-        prev_cell = cell
-        if delta in horiz and -1 <= dy <= 1:  # a plain step, which none of the moves below is
-            continue
-        if by == ay + 4 and delta in _TOWER_2BLOCK:
-            tower_bottom.add(i)
-            tower_top.add(i + 1)
-        elif abs(by - ay) == 2 and delta in _TOWER_2BLOCK:
-            slope2_bottom.add(i)
-        elif by == ay - 4 and bx == ax and bz == az:
-            p4_bottom.add(i)
-            p4_top.add(i + 1)
-        else:
-            if not (
-                    (delta in _HORIZ_DIRS and dy in (-1, 0, 1))
-                or (i in tower_top and delta == (0, 0) and dy == 1)
-            ):
-                raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]} (move {i + 1} of {n - 1})")
-
+    moves = _astar.classify_moves(cells)  # None: every step plain
     ops = _lay_ops(workspace, solid, dust_owner, net_id, opaque_support_block)
-    lay_dust = ops.lay
-
-    special = bool(tower_bottom or tower_top or slope2_bottom or p4_bottom or p4_top)
-    if not special:  # plain steps only: no move handlers to ask about
-        prev_cell = None
-        for cell in cells:
-            if prev_cell is not None and cell[1] != prev_cell[1]:  # a slope may be cut by the block above its low end
-                _check_slope_notch(workspace, solid, prev_cell, cell)
-            prev_cell = cell
-            lay_dust(cell)
+    if moves is None:
+        ops.lay_run(cells, 0, n)
         return
 
+    tower_bottom, tower_top, slope2_bottom, p4_bottom, p4_top = moves
     path_cells = frozenset(cells)
-    for i, cell in enumerate(cells):
+    pos = 0  # cells before it are laid; those between the moves' cells go through lay_run
+    for i in sorted(tower_bottom | tower_top | slope2_bottom | p4_bottom | p4_top):
+        if i > pos:
+            ops.lay_run(cells, pos, i)
+        pos = i + 1
+        cell = cells[i]
         if i > 0 and cells[i - 1][1] != cell[1]:  # before the move handlers: this cell may also start a 2x slope, tower
             _check_slope_notch(workspace, solid, cells[i - 1], cell)  # or powered drop; level steps are never cut
         if i in slope2_bottom:
@@ -407,7 +383,9 @@ def _lay_redstone_path(
                                      inverted_cells, goal, terminal_positions, path_cells, ops)
 
         else:
-            lay_dust(cell)
+            ops.lay(cell)
+    if pos < n:
+        ops.lay_run(cells, pos, n)
 
 
 def _check_slope_notch(

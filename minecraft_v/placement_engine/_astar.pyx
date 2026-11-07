@@ -2944,6 +2944,7 @@ cdef class DustLayer:
     cdef int red_kind, support_kind
     cdef Py_ssize_t red_slot, sup_slot
     cdef unsigned int solid_bit
+    cdef object notch_fallback
 
     def __init__(self, CellGrid grid, blocks, list palette, list cls, dict slots, list journal, dict writer,
                  inner, solid, dust_owner, active, net_id, write, conflict, fallback, classify, red, support,
@@ -2967,9 +2968,12 @@ cdef class DustLayer:
                 self.cls.append(self.classify(block.id))
         return <int>self.cls[idx]
 
+    def lay(self, tuple pos):
+        self.lay_cell(pos)
+
     @cython.boundscheck(True)
     @cython.wraparound(False)
-    def lay(self, tuple pos):
+    cdef int lay_cell(self, tuple pos) except -1:
         cdef int x = pos[0], y = pos[1], z = pos[2], c, was
         cdef Py_ssize_t idx = self.blocks[x, y, z]
         cdef PyObject* p
@@ -2980,7 +2984,7 @@ cdef class DustLayer:
             p = PyDict_GetItem(self.dust_owner, pos)
             if p != NULL and <object>p != self.net_id:
                 raise self.conflict(f"Dust collision at {pos} for nets {<object>p} vs {self.net_id}", (pos,))
-            return
+            return 0
         elif not c & DL_AIR:
             raise self.conflict(f"Tried to redstone over an existing block ({existing}) at {pos}", (pos, (x, y + 1, z)))
         # workspace[pos] = REDSTONE
@@ -3002,6 +3006,7 @@ cdef class DustLayer:
         PyDict_SetItem(self.dust_owner, pos, self.net_id)
         self.grid.put_owner(pos, self.net_id)
         self.support_below(pos, x, y, z)
+        return 0
 
     cdef int support_below(self, tuple pos, int x, int y, int z) except -1:
         """wire._place_support for the cell at pos."""
@@ -3082,3 +3087,73 @@ cdef class DustLayer:
             self.journal.append(("set", self.solid, pos, False, None))
         PySet_Add(self.solid, pos)
         self.grid.put(pos, self.solid_bit, True)
+
+    def set_notch_fallback(self, fn):
+        """fn(prev, cell): wire._check_slope_notch, for the steps lay_run doesn't do itself."""
+        self.notch_fallback = fn
+
+    @cython.boundscheck(True)
+    @cython.wraparound(False)
+    def lay_run(self, list cells, Py_ssize_t lo, Py_ssize_t hi):
+        """For each cell of cells[lo:hi]: wire._check_slope_notch from the cell before it, then lay it."""
+        cdef Py_ssize_t i
+        cdef int ax, ay, az, bx, by, bz, dx, dz, dy, idx
+        cdef tuple prev, cell, notch
+        for i in range(lo, hi):
+            cell = cells[i]
+            if i > 0:
+                prev = cells[i - 1]
+                ay = prev[1]
+                by = cell[1]
+                if ay != by:  # level steps are never cut
+                    ax = prev[0]
+                    az = prev[2]
+                    bx = cell[0]
+                    bz = cell[2]
+                    dx = bx - ax
+                    dz = bz - az
+                    dy = by - ay
+                    if abs(dx) + abs(dz) == 1 and (dy == 1 or dy == -1):
+                        notch = (bx, by + 1, bz) if by < ay else (ax, ay + 1, az)
+                        if PySet_Contains(self.solid, notch):
+                            idx = self.blocks[notch[0], notch[1], notch[2]]
+                            if str(self.palette[idx]) != "minecraft:glass":
+                                raise self.conflict(f"Slope {prev} -> {cell} would be cut by the block at {notch}", (cell, prev))
+                    else:
+                        self.notch_fallback(prev, cell)
+            self.lay_cell(cell)
+
+
+def classify_moves(list cells):
+    """wire._lay_redstone_path's first pass: None if every step is a plain one (level or a 1 slope), else the sets of
+    indices (tower_bottom, tower_top, slope2_bottom, p4_bottom, p4_top). ValueError for a step that is none of them."""
+    cdef Py_ssize_t i, n = len(cells)
+    cdef int ax, ay, az, bx, by, bz, dx, dz, dy
+    cdef tuple a, b
+    cdef bint tower2, special = False
+    tower_bottom, tower_top, slope2_bottom, p4_bottom, p4_top = set(), set(), set(), set(), set()
+    for i in range(n - 1):
+        a = cells[i]
+        b = cells[i + 1]
+        ax, ay, az = a
+        bx, by, bz = b
+        dx = bx - ax
+        dz = bz - az
+        dy = by - ay
+        if abs(dx) + abs(dz) == 1 and -1 <= dy <= 1:
+            continue
+        special = True
+        tower2 = (dx == 0 and abs(dz) == 2) or (dz == 0 and abs(dx) == 2)
+        if dy == 4 and tower2:
+            tower_bottom.add(i)
+            tower_top.add(i + 1)
+        elif abs(dy) == 2 and tower2:
+            slope2_bottom.add(i)
+        elif dy == -4 and dx == 0 and dz == 0:
+            p4_bottom.add(i)
+            p4_top.add(i + 1)
+        elif not (i in tower_top and dx == 0 and dz == 0 and dy == 1):
+            raise ValueError(f"Unrecognized move type at {a} -> {b} (move {i + 1} of {n - 1})")
+    if not special:
+        return None
+    return tower_bottom, tower_top, slope2_bottom, p4_bottom, p4_top
