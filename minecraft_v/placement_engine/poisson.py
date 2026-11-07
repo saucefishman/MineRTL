@@ -17,6 +17,7 @@ import heapq
 import math
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from scipy import fft, sparse
@@ -236,13 +237,22 @@ class _Field:
 
     def _forces_kernel(self, pos: np.ndarray) -> tuple[np.ndarray, float]:
         """forces() with the deposit, field and weights from the C++ kernel; every float comes out the same."""
-        lo = pos[self.order]
-        held = self.kernel.deposit(lo)
-        capacity, inverse, fixed = self._solver()
+        held, overflow = self.deposit(pos)
+        return self.solve(pos, held), overflow
+
+    def deposit(self, pos: np.ndarray) -> tuple[np.ndarray, float]:
+        """The kernel's first half: charge per bin and the overflow, for boxes given by their lower corners."""
+        held = self.kernel.deposit(pos[self.order])
+        capacity, _, fixed = self._solver()
         if self._fused is None:
             self._fused = (np.array(np.broadcast_to(capacity, self.shape), dtype=np.float64),
                            np.array(np.broadcast_to(fixed, self.shape), dtype=np.float64))
-        overflow = float(self.kernel.excess(held, self._fused[0]).sum() / self.charge.sum())
+        return held, float(self.kernel.excess(held, self._fused[0]).sum() / self.charge.sum())
+
+    def solve(self, pos: np.ndarray, held: np.ndarray) -> np.ndarray:
+        """The kernel's second half: the force on each box from deposit's charge, which it overwrites."""
+        lo = pos[self.order]
+        inverse = self._solver()[1]
         coeff = fft.dctn(held, type=2, norm="ortho", workers=_FFT_WORKERS, overwrite_x=True)
         self.kernel.scale_shift(coeff, 1.0 / float(np.prod(self.h)), self._fused[1], inverse)  # as _potential
         phi = fft.idctn(coeff, type=2, norm="ortho", workers=_FFT_WORKERS, overwrite_x=True)
@@ -256,7 +266,7 @@ class _Field:
             for a in range(3):
                 force[members, a] = np.einsum("nk,nk->n", w, fields[a][start:end].reshape(len(members), k))
             start = end
-        return force, overflow
+        return force
 
 
 def _bit_index(comp_id: str) -> int:
@@ -458,12 +468,29 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
     max_move = _MAX_STEP_BINS * field.h
     t0 = time.monotonic()
     lo_free, hi_free, degree_free = lo[free], hi[free], netlist.degree[free, None]
+    beside = ThreadPoolExecutor(1)  # one thread: jobs run in the order given
+    hpwl_job = None
     for it in range(_MAX_ITERS):
         status(f"global placement, iteration {it + 1}, overflow {overflow:.2f}")
         v_free = v[free]
-        force, overflow = field.forces(v_free)
-        gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
-        wire = wa_gradient(origins(v), gamma)[free]
+        if field.kernel is not None:
+            # The wire gradient needs only the overflow: it runs on a thread beside the Poisson solve.
+            corners = v_free - field.eff / 2
+            held, overflow = field.deposit(corners)
+            gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
+            wire_job = beside.submit(wa_gradient, origins(v), gamma)
+            force = field.solve(corners, held)
+            wire = wire_job.result()[free]
+        else:
+            force, overflow = field.forces(v_free)
+            gamma = 8 * field.h * 10 ** (np.clip(overflow, 0.1, 1.0) * 20 / 9 - 11 / 9)
+            wire = wa_gradient(origins(v), gamma)[free]
+        if hpwl_job is not None:  # last iteration's, for this one's lambda
+            hpwl = hpwl_job.result()
+            if prev_hpwl is not None:
+                ratio = (hpwl - prev_hpwl) / (_MU_REF * max(prev_hpwl, 1.0))
+                lam *= _MU_MAX if ratio < 0 else max(_MU_MIN, _MU_MAX ** (1 - ratio))
+            prev_hpwl = hpwl
         if lam is None:
             lam = np.abs(wire).sum() / max(np.abs(force).sum(), 1e-9)
         g = (wire - lam * force) / np.maximum(1.0, degree_free + lam * field.charge[:, None])
@@ -481,11 +508,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
         u[free] = new
         a = a_next
 
-        hpwl = hpwl_of(origins(u))
-        if prev_hpwl is not None:
-            ratio = (hpwl - prev_hpwl) / (_MU_REF * max(prev_hpwl, 1.0))
-            lam *= _MU_MAX if ratio < 0 else max(_MU_MIN, _MU_MAX ** (1 - ratio))
-        prev_hpwl = hpwl
+        hpwl_job = beside.submit(hpwl_of, origins(u))  # only the next lambda needs it
         if it % _IO_REFRESH == _IO_REFRESH - 1:
             refresh_io(u)
             v[n:] = u[n:]
@@ -493,6 +516,7 @@ def _global_place(netlist: _Netlist, sizes: np.ndarray, dims: np.ndarray, io: _I
             best_overflow, best_at = overflow, it
         if it >= _MIN_ITERS and (overflow < _STOP_OVERFLOW or it - best_at > _STALL_ITERS):
             break
+    beside.shutdown()
     log(f"[place] poisson: grid {field.shape}, {it + 1} iterations, overflow {overflow:.2f}, "
           f"hpwl {netlist.hpwl(origins(u)):.0f} ({time.monotonic() - t0:.1f}s)")
     return np.maximum(u[:n] - pad, 0.0)
