@@ -606,3 +606,31 @@ def test_memo_rounds_match_full_verify():
     assert "open" in _kinds(second)
     third = verify_signals(region, nets, owner, memo=memo)  # nothing changed: all reused
     assert third == second
+
+
+@pytest.mark.parametrize("axis", ["z", "y"])
+@pytest.mark.parametrize("block", [STONE, REDSTONE, REDSTONE_TORCH])
+@pytest.mark.parametrize("distance", [3, 4])
+def test_memo_reach_covers_what_a_search_reads(axis, block, distance):
+    """A change 3 cells from a reached cell is seen by the memo (the net is searched again) and 4 is not, and either
+    way the memo'd result is a full search's: no search reads past _MEMO_REACH."""
+    from minecraft_v.placement_engine.verify import VerifyMemo, _MEMO_REACH, _unchanged_nets
+    region = Region(0, 0, 0, 24, 12, 24)
+    owner: dict = {}
+    cells = _wire(region, owner, "a", _line_x(4, 14, 3, 10))
+    nets = {"a": (cells[0], [cells[-1]])}
+    memo = VerifyMemo()
+    assert verify_signals(region, nets, owner, memo=memo) == []
+    at = (9, 3, 10 + distance) if axis == "z" else (9, 3 + distance, 10)
+    region[at] = block  # neither the dust nor the torch is any net's
+    assert verify_signals(region, nets, owner, memo=memo) == verify_signals(region, nets, owner)
+    # what the memo kept from the first round against the changed region
+    from minecraft_v.placement_engine.verify import signal_bytes
+    memo2 = VerifyMemo()
+    region[at] = BlockState("minecraft:air")
+    verify_signals(region, nets, owner, memo=memo2)
+    region[at] = block
+    terminals = frozenset({cells[0], cells[-1]})
+    cells_now = signal_bytes(region, frozenset(), terminals)
+    reused = _unchanged_nets(memo2, nets, cells_now, memo2.blocked, terminals)
+    assert (reused == {"a"}) == (distance > _MEMO_REACH)
