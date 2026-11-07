@@ -165,7 +165,7 @@ cdef extern from * nogil:
         std::vector<Slot> slots;
         size_t mask = 0, count = 0;
         // A search makes several of these: storage goes round a pool rather than through malloc, which
-        // hands big blocks back to the system. Single-threaded, like the rest of this module.
+        // hands big blocks back to the system. One pool per thread.
         static std::vector<std::vector<Slot>>& pool() {
             static thread_local std::vector<std::vector<Slot>> p;
             return p;
@@ -644,8 +644,7 @@ cdef class CellGrid:
     cdef long long sx, sy
     cdef FlatMap[int] owner_map     # cell_key -> interned owner, 0 for none (no erase in FlatMap)
     cdef dict owner_ids
-    cdef FlatMap[char] own_map      # the cells of own_obj, last net's _own set
-    cdef object own_obj, keep_count
+    cdef object keep_count
     cdef object non_air, wire, torch, repeater, solid, dust_owner, inverted, fp, terminal
 
     def __cinit__(self):
@@ -775,15 +774,6 @@ cdef class CellGrid:
                 w[0] |= G_KEEP1 | (G_KEEP2 if n >= 2 else 0)
         return 0
 
-    cdef int load_own(self, own) except -1:
-        cdef int ins
-        if own is self.own_obj:
-            return 0
-        self.own_obj = own
-        self.own_map.reset(1 << 12)
-        for pos in own:
-            self.own_map.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
-        return 0
 
 
 cdef inline void set3(int* c, int x, int y, int z) noexcept nogil:
@@ -848,6 +838,7 @@ cdef class World:
     cdef long long gsx, gsy
     cdef bint keep_fast, have_small, has_pending
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
+    cdef FlatMap[char] own_cells     # the keepout's _own cells
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint pids_seeded
     cdef bint grid_check
@@ -911,7 +902,8 @@ cdef class World:
                           and self.eprot[5] is self.prot[5] and self.eprot[6] is self.prot[6])
         if self.keep_fast:
             grid.load_keepout(self.eprot[1])
-            grid.load_own(self.eprot[2])
+            for pos in self.eprot[2]:  # the World's own, not the grid's: searches for other nets run alongside
+                self.own_cells.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
             for spec, shift in ((self.eprot, 0), (self.prot, 1)):
                 self.add_small(spec[4], S_EXTRA << shift)
                 if spec[4]:
@@ -987,7 +979,7 @@ cdef class World:
             return True
         if not g & G_KEEP1:
             return False
-        if not g & G_KEEP2 and self.grid.own_map.find(cell_key(x, y, z)) != NULL:
+        if not g & G_KEEP2 and self.own_cells.find(cell_key(x, y, z)) != NULL:
             return False
         if not s & (S_EXCL << shift):
             return True
