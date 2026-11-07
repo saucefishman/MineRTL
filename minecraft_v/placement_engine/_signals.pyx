@@ -1321,54 +1321,131 @@ def paint_boxes(mask, int64_t[:, ::1] lo, int64_t[:, ::1] hi):
                     m[x, y, z] = 1
 
 
+cdef extern from *:
+    """
+    #include <thread>
+    // Whole-array passes over a region's palette ids, split across threads: they're memory bound, and the array has
+    // a cell per block of the build. Each writes what the single loop it replaces would, in the same order.
+    template <class F> static void bulk_parallel(int64_t n, int64_t min_per, F f) {
+        int t = (int)std::min<int64_t>(std::min(64u, std::max(1u, std::thread::hardware_concurrency())), std::max<int64_t>(1, n / min_per));
+        if (t <= 1) { f(0, n, 0); return; }
+        std::vector<std::thread> pool;
+        for (int k = 0; k < t; ++k) pool.emplace_back([=, &f]() { f(n * k / t, n * (k + 1) / t, k); });
+        for (auto& th : pool) th.join();
+    }
+    static void bulk_gather(const uint32_t* p, const uint8_t* table, uint8_t* q, int64_t n) {
+        bulk_parallel(n, 1 << 20, [&](int64_t a, int64_t b, int) { for (int64_t i = a; i < b; ++i) q[i] = table[p[i]]; });
+    }
+    static void bulk_remap(uint32_t* p, const uint32_t* table, int64_t n) {
+        bulk_parallel(n, 1 << 20, [&](int64_t a, int64_t b, int) { for (int64_t i = a; i < b; ++i) p[i] = table[p[i]]; });
+    }
+    static void bulk_used(const uint32_t* p, int64_t n, uint8_t* used, int n_ids) {
+        std::vector<std::vector<uint8_t>> seen(64);
+        bulk_parallel(n, 1 << 20, [&](int64_t a, int64_t b, int k) {
+            std::vector<uint8_t> u(n_ids, 0);
+            for (int64_t i = a; i < b; ++i) u[p[i]] = 1;
+            seen[k].swap(u);
+        });
+        for (auto& u : seen) for (size_t i = 0; i < u.size(); ++i) used[i] |= u[i];
+    }
+    // table_where: rows x in [a, b) per thread, their finds joined in x order. boxes: 6 ints each, lo then hi.
+    static std::vector<int64_t> bulk_where(const uint32_t* blocks, int nx, int ny, int nz, const uint8_t* table,
+                                           const std::vector<int>& box) {
+        std::vector<std::vector<int64_t>> found(64);
+        const int nb = (int)box.size() / 6;
+        bulk_parallel(nx, 8, [&](int64_t a, int64_t b, int k) {
+            std::vector<int64_t> out;  // not found[k] itself: neighbours' vectors share cache lines
+            std::vector<int> cut;  // per row, the z ranges boxes cover there
+            for (int x = (int)a; x < (int)b; ++x) for (int y = 0; y < ny; ++y) {
+                const uint32_t* row = blocks + ((int64_t)x * ny + y) * nz;
+                cut.clear();
+                for (int j = 0; j < nb; ++j)
+                    if (box[6 * j] <= x && x < box[6 * j + 3] && box[6 * j + 1] <= y && y < box[6 * j + 4]) {
+                        int z0 = std::max(box[6 * j + 2], 0), z1 = std::min(box[6 * j + 5], nz);
+                        if (z0 < z1) { cut.push_back(z0); cut.push_back(z1); }
+                    }
+                for (int z = 0; z < nz; ++z) {
+                    if (!table[row[z]]) continue;
+                    bool in = false;
+                    for (size_t j = 0; j < cut.size(); j += 2) if (cut[j] <= z && z < cut[j + 1]) { in = true; break; }
+                    if (!in) out.push_back(((int64_t)x * ny + y) * nz + z);
+                }
+            }
+            found[k].swap(out);
+        });
+        std::vector<int64_t> all;
+        size_t total = 0;
+        for (auto& f : found) total += f.size();
+        all.reserve(total);
+        for (auto& f : found) all.insert(all.end(), f.begin(), f.end());
+        return all;
+    }
+    // pack_states: layers y in [a, b) per thread. A thread's first and last words can hold its neighbours' bits too:
+    // it keeps those apart, and they're merged after.
+    static void bulk_pack(const uint32_t* p, int n_x, int n_y, int n_z, int nbits, uint64_t* o) {
+        const uint64_t mask = nbits >= 64 ? ~0ULL : ((1ULL << nbits) - 1);
+        const int64_t layer = (int64_t)n_z * n_x * nbits;  // bits per y
+        struct Edge { int64_t word; uint64_t bits; };
+        std::vector<std::vector<Edge>> edges(64);
+        bulk_parallel(n_y, 1, [&](int64_t a, int64_t b, int k) {
+            const int64_t b0 = a * layer, b1 = b * layer;
+            const int64_t first = b0 / 64, last = (b1 - 1) / 64;
+            const bool shared_first = b0 % 64 != 0, shared_last = b1 % 64 != 0;
+            auto put = [&](int64_t w, uint64_t v) {
+                if ((w == first && shared_first) || (w == last && shared_last)) edges[k].push_back({w, v});
+                else o[w] = v;
+            };
+            int64_t done = first, step = (int64_t)n_y * n_z;
+            int pos = (int)(b0 % 64);
+            uint64_t held = 0;
+            for (int64_t y = a; y < b; ++y) for (int z = 0; z < n_z; ++z) {
+                int64_t at = y * n_z + z;
+                for (int x = 0; x < n_x; ++x, at += step) {
+                    uint64_t v = p[at] & mask;
+                    held |= v << pos;
+                    pos += nbits;
+                    if (pos >= 64) {
+                        put(done++, held);
+                        pos -= 64;
+                        held = pos ? v >> (nbits - pos) : 0;
+                    }
+                }
+            }
+            if (pos) put(done, held);
+        });
+        for (auto& e : edges) for (auto& x : e) o[x.word] |= x.bits;
+    }
+    """
+    void bulk_gather(const uint32_t*, const uint8_t*, uint8_t*, int64_t) nogil
+    void bulk_remap(uint32_t*, const uint32_t*, int64_t) nogil
+    void bulk_used(const uint32_t*, int64_t, uint8_t*, int) nogil
+    vector[int64_t] bulk_where(const uint32_t*, int, int, int, const uint8_t*, const vector[int]&) nogil
+    void bulk_pack(const uint32_t*, int, int, int, int, uint64_t*) nogil
+
+
 def table_gather(uint32_t[:, :, ::1] blocks, uint8_t[::1] table):
     """table[blocks], a uint8 array the shape of blocks: numpy's fancy indexing takes several times as long."""
     out = np.empty((blocks.shape[0], blocks.shape[1], blocks.shape[2]), dtype=np.uint8)
     if out.size == 0:
         return out
     cdef uint8_t[:, :, ::1] o = out
-    cdef uint32_t* p = &blocks[0, 0, 0]
-    cdef uint8_t* q = &o[0, 0, 0]
-    cdef Py_ssize_t i, size = blocks.shape[0] * blocks.shape[1] * blocks.shape[2]
-    for i in range(size):
-        q[i] = table[p[i]]
+    with nogil:
+        bulk_gather(&blocks[0, 0, 0], &table[0], &o[0, 0, 0], blocks.shape[0] * blocks.shape[1] * blocks.shape[2])
     return out
 
 
 def table_where(uint32_t[:, :, ::1] blocks, uint8_t[::1] table, boxes=()):
     """np.argwhere(table[blocks]) with the cells in boxes (lowest cell, one past the highest) left out: an n x 3 int64
     array in the same order, without a mask the size of blocks."""
-    cdef int nx = blocks.shape[0], ny = blocks.shape[1], nz = blocks.shape[2], x, y, z, z0, z1, j, nb
+    cdef int nx = blocks.shape[0], ny = blocks.shape[1], nz = blocks.shape[2]
     cdef vector[int] box
-    cdef vector[int] cut  # per row, the z ranges boxes cover there
     cdef vector[int64_t] found
     for lo, hi in boxes:
         for v in (*lo, *hi):
             box.push_back(v)
-    nb = box.size() // 6
-    cdef uint32_t* row
-    for x in range(nx):
-        for y in range(ny):
-            row = &blocks[x, y, 0]
-            cut.clear()
-            for j in range(nb):
-                if box[6 * j] <= x < box[6 * j + 3] and box[6 * j + 1] <= y < box[6 * j + 4]:
-                    z0, z1 = max(box[6 * j + 2], 0), min(box[6 * j + 5], nz)
-                    if z0 < z1:
-                        cut.push_back(z0)
-                        cut.push_back(z1)
-            if cut.empty():
-                for z in range(nz):
-                    if table[row[z]]:
-                        found.push_back((<int64_t>x * ny + y) * nz + z)
-            else:
-                for z in range(nz):
-                    if table[row[z]]:
-                        for j in range(0, cut.size(), 2):
-                            if cut[j] <= z < cut[j + 1]:
-                                break
-                        else:
-                            found.push_back((<int64_t>x * ny + y) * nz + z)
+    if blocks.size:
+        with nogil:
+            found = bulk_where(&blocks[0, 0, 0], nx, ny, nz, &table[0], box)
     out = np.empty((found.size(), 3), dtype=np.int64)
     cdef int64_t[:, ::1] o = out
     cdef int64_t k
@@ -1386,40 +1463,19 @@ def used_ids(uint32_t[:, :, :] blocks, int n):
     """Which of n palette entries blocks use, as a bool array."""
     used = np.zeros(n, dtype=np.uint8)
     cdef uint8_t[:] u = used
-    cdef uint32_t* p = &blocks[0, 0, 0]
-    cdef Py_ssize_t i, size = blocks.shape[0] * blocks.shape[1] * blocks.shape[2]
-    for i in range(size):
-        u[p[i]] = 1
+    with nogil:
+        bulk_used(&blocks[0, 0, 0], blocks.shape[0] * blocks.shape[1] * blocks.shape[2], &u[0], n)
     return used.astype(bool)
 
 
 def remap_ids(uint32_t[:, :, :] blocks, uint32_t[:] table):
     """blocks[...] = table[blocks], without the copy."""
-    cdef uint32_t* p = &blocks[0, 0, 0]
-    cdef Py_ssize_t i, size = blocks.shape[0] * blocks.shape[1] * blocks.shape[2]
-    for i in range(size):
-        p[i] = table[p[i]]
+    with nogil:
+        bulk_remap(&blocks[0, 0, 0], &table[0], blocks.shape[0] * blocks.shape[1] * blocks.shape[2])
 
 
 def pack_states(uint32_t[:, :, :] blocks, int nbits, out):
-    """block_utils._pack_states' bits, written to out, a uint64 array: y, then z, then x, lowest bits first."""
+    """block_utils._pack_states' bits, written to out, a zeroed uint64 array: y, then z, then x, lowest bits first."""
     cdef uint64_t[:] o = out
-    cdef int n_x = blocks.shape[0], n_y = blocks.shape[1], n_z = blocks.shape[2], x, y, z, pos = 0
-    cdef uint64_t held = 0, v, mask = (<uint64_t>1 << nbits) - 1
-    cdef Py_ssize_t done = 0, step = n_y * n_z, at
-    cdef uint32_t* p = &blocks[0, 0, 0]
-    for y in range(n_y):
-        for z in range(n_z):
-            at = y * n_z + z
-            for x in range(n_x):
-                v = p[at] & mask
-                at += step
-                held |= v << pos
-                pos += nbits
-                if pos >= 64:
-                    o[done] = held
-                    done += 1
-                    pos -= 64
-                    held = v >> (nbits - pos) if pos else 0
-    if pos:
-        o[done] = held
+    with nogil:
+        bulk_pack(&blocks[0, 0, 0], blocks.shape[0], blocks.shape[1], blocks.shape[2], nbits, &o[0])

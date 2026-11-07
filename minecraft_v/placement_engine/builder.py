@@ -1577,9 +1577,15 @@ class _GreedyRouter:
             return False
         if via in job.protected:
             return False
-        cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
-        return all(c not in self.footprint_blocked and self.dust_owner.get(c) in (None, job.net_id)
-                   and _is_air(self.region[c]) for c in cells)
+        # The index's non-air cells rather than decoding each block: routing asks this of thousands of candidates.
+        fp, non_air, owner, net_id = self.footprint_blocked, self.indexed.block_index().non_air, self.dust_owner.get, job.net_id
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    c = (x + dx, y + dy, z + dz)
+                    if c in fp or c in non_air or owner(c) not in (None, net_id):
+                        return False
+        return True
 
     def _open_via(self, via: Pos, job: _RouteJob) -> Pos | None:
         """The free cell nearest a wanted waypoint, trying along X and Z and then a layer up. None if there's none."""
@@ -2153,7 +2159,8 @@ def _hold_with_detours(workspace: Region, flat: ComponentList, ends: dict, faile
         shorts.clear()
         requirement.clear()
         edits: list = []
-        period = fix_hold(workspace, flat, ends, failed, probed, opaque, macros, requirement, shorts, edits)
+        period = fix_hold(workspace, flat, ends, failed, probed, opaque, macros, requirement, shorts, edits,
+                          retry=routed is not None and attempt < _DETOUR_ROUNDS)
         if not shorts or routed is None or attempt == _DETOUR_ROUNDS:
             break
         # Padding is outside the router's books, and a net laid again starts clean: undo it all, and pad again.
@@ -2678,6 +2685,10 @@ def build_litematic_from_component_list(
 
     # Only a check of the wire as it is now: it runs in a forked process beside what follows, up to writing the build.
     signal_check = Forked(check_signals) if capture is None else None
+    # Logs only, so a fork of its own too, unless pin extensions are still to be laid.
+    support_check = Forked(lambda: _report_unsupported_blocks(
+        workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)) \
+        if capture is None and not output_pin_targets else None
     signal_violations = check_signals() if signal_check is None else []
 
     def checked_signals() -> list:
@@ -2743,8 +2754,9 @@ def build_litematic_from_component_list(
         elif snapshot_dir is not None:
             save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
 
-    with phase("[verify] unsupported blocks"):
-        _report_unsupported_blocks(workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)
+    if support_check is None:
+        with phase("[verify] unsupported blocks"):
+            _report_unsupported_blocks(workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)
 
     if capture is not None:
         capture.update(
@@ -2839,6 +2851,8 @@ def build_litematic_from_component_list(
 
     with phase("[verify] waiting for the signal check"):
         signal_violations = checked_signals()
+        if support_check is not None:
+            support_check.result()
     if signal_violations and not macros and not allow_routing_failures:
         raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
     if resolved_probes or clock_entry:

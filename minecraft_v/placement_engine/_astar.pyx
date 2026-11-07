@@ -891,6 +891,9 @@ cdef class World:
     cdef dict owner_ids
     cdef FlatMap[CellInfo] info
     cdef FlatMap[char] walk_cache, mid_cache  # 0 unknown, 1 false, 2 true
+    # Likewise for m4_cell_clear and next_to_terminal: a cell is asked about from many neighbours' moves.
+    cdef FlatMap[char] m4_clear_cache, terminal_cache
+    cdef FlatMap[char] column_cache  # tower_column_clear, by its foot: four cells' towers land on each column
     cdef object no_exempt
     # With a grid: reads go through it (see base(), owner(), eprot_at(), prot_at(), efp()).
     cdef CellGrid grid
@@ -1249,6 +1252,8 @@ cdef class World:
         cdef int d, dy, nx, ny, nz, vdy, vy
         cdef int o
         cdef unsigned int v
+        cdef uint16_t* w
+        cdef uint16_t g
         if not self.inb(x, y, z):
             return False
         v = self.base(x, y, z)
@@ -1263,6 +1268,22 @@ cdef class World:
         for d in range(4):
             for dy in range(-1, 2):
                 nx, ny, nz = x + HORIZ[d][0], y + dy, z + HORIZ[d][1]
+                w = self.gw(nx, ny, nz)
+                if w != NULL:  # the checks below off one grid word, as base(), owner() and efp() read it
+                    g = w[0]
+                    if g & F_INV:
+                        return False
+                    if has_exempt and nx == ex and ny == ey and nz == ez:
+                        continue
+                    if not g & (G_OWNED | F_TORCH | F_WIRE) or not self.inb(nx, ny, nz):
+                        continue  # no owner and no signal: nothing below can reject it
+                    o = self.owner_code(g, nx, ny, nz)
+                    if o >= 2:
+                        return False
+                    if (o == 0 and g & (F_TORCH | F_WIRE)
+                            and not (with_inv_fp and g & F_FP and not self.small_at(nx, ny, nz) & S_RELIEF)):
+                        return False
+                    continue
                 v = self.base(nx, ny, nz)
                 if v & F_INV:
                     return False
@@ -1297,12 +1318,22 @@ cdef class World:
         return self.walkable(pos[0], pos[1], pos[2])
 
     cdef bint walkable_ex(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt) except -1 nogil:
-        if self.eprot_at(x, y, z) or self.efp(x, y, z):
+        cdef uint16_t* w = self.gw(x, y, z)
+        cdef uint16_t g
+        if w != NULL and self.keep_fast:  # eprot_at and efp off one grid word
+            g = w[0]
+            if self.keep_at(g, x, y, z, 0) or (g & F_FP and not self.small_at(x, y, z) & S_RELIEF):
+                return False
+        elif self.eprot_at(x, y, z) or self.efp(x, y, z):
             return False
         cdef unsigned long long key = cell_key(x, y, z) << 7
+        cdef char* hit
         if has_exempt:
+            hit = self.walk_cache.find(key)
+            if hit != NULL and hit[0] == 2:  # an exempt cell only skips one neighbour's checks
+                return True
             key |= exempt_code(ex - x, ey - y, ez - z)
-        cdef char* hit = self.walk_cache.find(key)
+        hit = self.walk_cache.find(key)
         if hit != NULL:
             return hit[0] == 2
         cdef bint v = self.wire_walkable(x, y, z, ex, ey, ez, has_exempt, True)
@@ -1491,11 +1522,17 @@ cdef class World:
         self.gp = NULL
         self.walk_cache.reset(1 << 12)
         self.mid_cache.reset(1 << 12)
+        self.m4_clear_cache.reset(1 << 12)
+        self.terminal_cache.reset(1 << 12)
+        self.column_cache.reset(1 << 12)
         self.info.reset(1 << 12)
         want = self._static_moves(x, y, z)
         self.gp = gp
         self.walk_cache.reset(1 << 12)
         self.mid_cache.reset(1 << 12)
+        self.m4_clear_cache.reset(1 << 12)
+        self.terminal_cache.reset(1 << 12)
+        self.column_cache.reset(1 << 12)
         self.info.reset(1 << 12)
         if got != want:
             raise AssertionError(f"CellGrid moves differ at {(x, y, z)} for net {self.net_id}:\n"
@@ -1573,9 +1610,10 @@ cdef class World:
                     and not (self.base(mx, y + 2, mz) & F_SOLID)
                     and not (self.base(mx, my, mz) & F_SOLID)
                     and not (self.base(mx, my, mz) & F_NONAIR)
+                    and self.walkable(nx2, y + 2, nz2)  # cached and shared: before the mid cell's own check
                     and self.mid_walkable(mx, my, mz, nx2, y, nz2)
                 )
-                if mid_ok and self.walkable(nx2, y + 2, nz2):
+                if mid_ok:
                     if self.can_support(mx, y, mz) and not self.torch_below(mx, y, mz):
                         self.emit(moves, x, y, z, nx2, y + 2, nz2, 7, b_hi | b_mid, 1, True, mx, my, mz)
 
@@ -1597,9 +1635,10 @@ cdef class World:
                     and self.inb(mx, my, mz)
                     and not (self.base(mx, my, mz) & F_SOLID)
                     and not (self.base(mx, my, mz) & F_NONAIR)
+                    and self.walkable(nx2, y - 2, nz2)
                     and self.mid_walkable(mx, my, mz, x, y - 2, z)
                 )
-                if mid_dn_ok and self.walkable(nx2, y - 2, nz2):
+                if mid_dn_ok:
                     if y - 2 <= min_y or (self.can_support(nx2, y - 3, nz2) and not self.torch_below(nx2, y - 3, nz2)):
                         self.emit(moves, x, y, z, nx2, y - 2, nz2, 7, b_lo | b_mid | b_hi, 0, True, mx, my, mz)
 
@@ -1638,23 +1677,7 @@ cdef class World:
                         break
             if cuts:
                 continue
-            col_clear = True
-            for cdy in range(5):
-                cy = y + cdy
-                if not self.inb(cx, cy, cz) or (self.base(cx, cy, cz) & F_FP) or self.prot_at(cx, cy, cz):
-                    col_clear = False
-                    break
-                if (self.base(cx, cy, cz) & F_NONAIR):
-                    col_clear = False
-                    break
-                for k in range(4):
-                    if (self.inb(cx + HORIZ[k][0], cy, cz + HORIZ[k][1])
-                            and (self.base(cx + HORIZ[k][0], cy, cz + HORIZ[k][1]) & F_WIRE)):
-                        col_clear = False
-                        break
-                if not col_clear:
-                    break
-            if not col_clear:
+            if not self.tower_column_clear(cx, y, cz):
                 continue
             if self.next_to_terminal(cx, y + 1, cz) or self.next_to_terminal(cx, y + 2, cz):
                 continue
@@ -1667,11 +1690,48 @@ cdef class World:
                       0, False, 0, 0, 0)
         return 0
 
+    cdef bint tower_column_clear(self, int cx, int y, int cz) except -1 nogil:
+        """Whether the five cells from (cx, y, cz) up are free for a tower, with no wire beside them. Remembered."""
+        cdef unsigned long long key = cell_key(cx, y, cz)
+        cdef char* hit = self.column_cache.find(key)
+        if hit != NULL:
+            return hit[0] == 2
+        cdef bint col_clear = True
+        cdef int cdy, cy, k
+        for cdy in range(5):
+            cy = y + cdy
+            if not self.inb(cx, cy, cz) or (self.base(cx, cy, cz) & F_FP) or self.prot_at(cx, cy, cz):
+                col_clear = False
+                break
+            if (self.base(cx, cy, cz) & F_NONAIR):
+                col_clear = False
+                break
+            for k in range(4):
+                if (self.inb(cx + HORIZ[k][0], cy, cz + HORIZ[k][1])
+                        and (self.base(cx + HORIZ[k][0], cy, cz + HORIZ[k][1]) & F_WIRE)):
+                    col_clear = False
+                    break
+            if not col_clear:
+                break
+        cdef int ins
+        self.column_cache.get(key, &ins)[0] = 2 if col_clear else 1
+        return col_clear
+
     cdef bint next_to_terminal(self, int x, int y, int z) except -1 nogil:
         """Whether an inverted cell here would make a pin terminal unwalkable (wire_walkable
         rejects cells beside inverted ones); own-net terminals of later sinks aren't keepout.
         Sinks this net has yet to reach also need their approach cells walkable, and those are
         one step further out, so an inverted cell can wall a pin off from a diagonal."""
+        cdef unsigned long long key = cell_key(x, y, z)
+        cdef char* hit = self.terminal_cache.find(key)
+        if hit != NULL:
+            return hit[0] == 2
+        cdef bint v = self.next_to_terminal_uncached(x, y, z)
+        cdef int ins
+        self.terminal_cache.get(key, &ins)[0] = 2 if v else 1
+        return v
+
+    cdef bint next_to_terminal_uncached(self, int x, int y, int z) except -1 nogil:
         cdef int k, ddy
         for k in range(4):
             for ddy in range(-1, 2):
@@ -1701,6 +1761,16 @@ cdef class World:
         return False
 
     cdef bint m4_cell_clear(self, int x, int y, int z) except -1 nogil:
+        cdef unsigned long long key = cell_key(x, y, z)
+        cdef char* hit = self.m4_clear_cache.find(key)
+        if hit != NULL:
+            return hit[0] == 2
+        cdef bint v = self.m4_cell_clear_uncached(x, y, z)
+        cdef int ins
+        self.m4_clear_cache.get(key, &ins)[0] = 2 if v else 1
+        return v
+
+    cdef bint m4_cell_clear_uncached(self, int x, int y, int z) except -1 nogil:
         cdef int k, ddy, sx, sy, sz
         for k in range(4):
             for ddy in range(-1, 2):
