@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# The build's start, for the summary line at the end (bash 3.2 has no EPOCHREALTIME).
+MINECRAFT_V_START="$(perl -MTime::HiRes=time -e 'printf "%.3f", time' 2>/dev/null || date +%s)"
+export MINECRAFT_V_START
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # techmap/ and the Python project, wherever this runs from
 

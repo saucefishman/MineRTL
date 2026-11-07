@@ -14,7 +14,7 @@ import time
 import numpy as np
 from minecraft_v.progress import pulse
 
-cdef extern from *:
+cdef extern from * nogil:
     """
     #include <algorithm>
     #include <functional>
@@ -165,9 +165,9 @@ cdef extern from *:
         std::vector<Slot> slots;
         size_t mask = 0, count = 0;
         // A search makes several of these: storage goes round a pool rather than through malloc, which
-        // hands big blocks back to the system. Single-threaded, like the rest of this module.
+        // hands big blocks back to the system. One pool per thread.
         static std::vector<std::vector<Slot>>& pool() {
-            static std::vector<std::vector<Slot>> p;
+            static thread_local std::vector<std::vector<Slot>> p;
             return p;
         }
         FlatMap() {
@@ -234,7 +234,7 @@ cdef extern from *:
         unsigned long long depth_mask = 0;
         bool side_g = false;
         static std::vector<std::vector<NodeSlot>>& pool() {
-            static std::vector<std::vector<NodeSlot>> p;
+            static thread_local std::vector<std::vector<NodeSlot>> p;
             return p;
         }
         NodeTable() {
@@ -478,6 +478,8 @@ def init(snap_offsets, tower_flag, node_shift, stagnation, max_nodes, max_expans
         SNAP_OFF[i][2] = oz
     for i in range(N_SHIFTS):
         SHIFT_READY[i] = False
+    for i in range(N_SHIFTS):  # all of them now: searches run in threads
+        shift_index(i // 45 - 2, (i // 5) % 9 - 4, i % 5 - 2)
     TOWER_FLAG = tower_flag
     NODE_SHIFT = node_shift
     SIG_SHIFT = sig_shift
@@ -498,9 +500,10 @@ cdef inline uint32_t snap_bit(int ox, int oy, int oz) noexcept nogil:
     return 0 if i < 0 else (<uint32_t>1) << i
 
 
-cdef int shift_index(int dx, int dy, int dz) except -1:
+cdef int shift_index(int dx, int dy, int dz) except -1 nogil:
     if dx < -2 or dx > 2 or dy < -4 or dy > 4 or dz < -2 or dz > 2:
-        raise ValueError(f"A* move delta {(dx, dy, dz)} outside the kernel's shift table range")
+        with gil:
+            raise ValueError(f"A* move delta {(dx, dy, dz)} outside the kernel's shift table range")
     cdef int idx = (dx + 2) * 45 + (dy + 4) * 5 + (dz + 2)
     cdef int k, b, i
     cdef uint32_t moved[32]
@@ -520,10 +523,25 @@ cdef int shift_index(int dx, int dy, int dz) except -1:
     return idx
 
 
+cdef class _Cells
+
+
 @cython.final
 cdef class CameFrom:
     """came_from as a read-only mapping (node -> parent node), like the Python loop's dict."""
     cdef NodeTable nodes
+    cdef _Cells cells  # the search's cells, until release()
+
+    def pos(self, int cid):
+        """A cell of the search, which may be past pos_list."""
+        cdef int x = self.cells.x[cid], y = self.cells.y[cid], z = self.cells.z[cid]
+        return (x, y, z)
+
+    def release(self):
+        """Done with pos(): the cells' storage goes to the next search."""
+        if self.cells is not None:
+            _CELLS_POOL.append(self.cells)
+            self.cells = None
 
     def get(self, long long node, default=None):
         cdef NodeSlot* ni = self.nodes.find(node)
@@ -590,6 +608,7 @@ cdef enum:
     G_KEEP1 = 1 << 6     # keepout count >= 1
     G_KEEP2 = 1 << 7     # keepout count >= 2
     G_FP_READ = 1 << 11  # F_FP has been read from the footprint set
+    G_GLASS = 1 << 12    # holds GLASS (_BlockIndex kind bit 16)
     G_DIRECT = F_SOLID | F_NONAIR | F_WIRE | F_TORCH | F_REP | F_FP | F_INV | F_TERM
     GRID_MARGIN = 8      # cells either side of the region; queries beyond read the containers
 
@@ -625,8 +644,7 @@ cdef class CellGrid:
     cdef long long sx, sy
     cdef FlatMap[int] owner_map     # cell_key -> interned owner, 0 for none (no erase in FlatMap)
     cdef dict owner_ids
-    cdef FlatMap[char] own_map      # the cells of own_obj, last net's _own set
-    cdef object own_obj, keep_count
+    cdef object keep_count
     cdef object non_air, wire, torch, repeater, solid, dust_owner, inverted, fp, terminal
 
     def __cinit__(self):
@@ -653,7 +671,8 @@ cdef class CellGrid:
         flat = np.asarray(<uint16_t[:cells]>self.g)
         xs, ys, zs = np.nonzero(kinds)
         flat[(xs + GRID_MARGIN) * self.sx + (ys + GRID_MARGIN) * self.sy + (zs + GRID_MARGIN)] = (
-            kinds[xs, ys, zs].astype(np.uint16) << 1)  # kind bits are F_NONAIR.. >> 1
+            ((kinds[xs, ys, zs] & 15).astype(np.uint16) << 1)  # kind bits are F_NONAIR.. >> 1
+            | ((kinds[xs, ys, zs] & 16).astype(np.uint16) << 8))  # and G_GLASS >> 8
         for cells_set, bit in ((solid, F_SOLID), (inverted, F_INV), (terminal, F_TERM)):
             self.put_all(cells_set, bit)
         mask = getattr(fp, "mask", None)
@@ -701,8 +720,11 @@ cdef class CellGrid:
     cpdef put_kind(self, tuple pos, unsigned int changed, unsigned int now):
         """_BlockIndex.update: the kind bits (_BlockIndex.kinds) in changed take their values from now."""
         cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
+        cdef unsigned int low = changed & 15
         if w != NULL:
-            w[0] = (w[0] & ~(changed << 1)) | ((now & changed) << 1)  # kind bits are F_NONAIR.. >> 1
+            w[0] = (w[0] & ~(low << 1)) | ((now & low) << 1)  # kind bits are F_NONAIR.. >> 1
+            if changed & 16:  # and G_GLASS >> 8
+                w[0] = (w[0] | G_GLASS) if now & 16 else (w[0] & ~G_GLASS)
 
     cpdef put(self, tuple pos, unsigned int bit, bint on):
         cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
@@ -752,15 +774,6 @@ cdef class CellGrid:
                 w[0] |= G_KEEP1 | (G_KEEP2 if n >= 2 else 0)
         return 0
 
-    cdef int load_own(self, own) except -1:
-        cdef int ins
-        if own is self.own_obj:
-            return 0
-        self.own_obj = own
-        self.own_map.reset(1 << 12)
-        for pos in own:
-            self.own_map.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
-        return 0
 
 
 cdef inline void set3(int* c, int x, int y, int z) noexcept nogil:
@@ -826,8 +839,9 @@ cdef class World:
     cdef uint16_t* gp
     cdef int gnx, gny, gnz, own_id
     cdef long long gsx, gsy
-    cdef bint keep_fast, have_small
+    cdef bint keep_fast, have_small, has_pending
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
+    cdef FlatMap[char] own_cells     # the keepout's _own cells
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint pids_seeded
     cdef bint grid_check
@@ -852,6 +866,7 @@ cdef class World:
         self.non_air, self.wire, self.torch, self.repeater = non_air, wire, torch, repeater
         self.solid, self.inverted, self.terminal, self.fp_relief, self.fp = solid, inverted, terminal, fp_relief, fp
         self.pending = pending
+        self.has_pending = bool(pending)
         if not isinstance(dust_owner, dict):
             raise TypeError(f"World needs a dict dust_owner, got {type(dust_owner).__name__}")
         self.dust_owner = <dict>dust_owner  # subclasses (JournaledDict, OverlayDict) keep dict.get
@@ -890,7 +905,8 @@ cdef class World:
                           and self.eprot[5] is self.prot[5] and self.eprot[6] is self.prot[6])
         if self.keep_fast:
             grid.load_keepout(self.eprot[1])
-            grid.load_own(self.eprot[2])
+            for pos in self.eprot[2]:  # the World's own, not the grid's: searches for other nets run alongside
+                self.own_cells.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
             for spec, shift in ((self.eprot, 0), (self.prot, 1)):
                 self.add_small(spec[4], S_EXTRA << shift)
                 if spec[4]:
@@ -919,31 +935,32 @@ cdef class World:
 
     # Reads. With a grid, a cell inside it needs no Python; everything else takes cell()'s path.
 
-    cdef inline uint16_t* gw(self, int x, int y, int z) except? NULL:
+    cdef inline uint16_t* gw(self, int x, int y, int z) except? NULL nogil:
         cdef unsigned int ux = <unsigned int>(x + GRID_MARGIN), uy = <unsigned int>(y + GRID_MARGIN)
         cdef unsigned int uz = <unsigned int>(z + GRID_MARGIN)
         if self.gp == NULL or ux >= <unsigned int>self.gnx or uy >= <unsigned int>self.gny or uz >= <unsigned int>self.gnz:
             return NULL
         cdef uint16_t* w = &self.gp[ux * self.gsx + uy * self.gsy + uz]
         if not w[0] & G_FP_READ:
-            self.grid.read_fp(w, x, y, z)
+            with gil:
+                self.grid.read_fp(w, x, y, z)
         return w
 
-    cdef inline unsigned int base(self, int x, int y, int z) except? 0xFFFFFFFF:
+    cdef inline unsigned int base(self, int x, int y, int z) except? 0xFFFFFFFF nogil:
         """Flags of G_DIRECT only are meaningful."""
         cdef uint16_t* w = self.gw(x, y, z)
         if w != NULL:
             return w[0] & G_DIRECT
         return self.cell(x, y, z).val
 
-    cdef inline int small_at(self, int x, int y, int z) noexcept:
+    cdef inline int small_at(self, int x, int y, int z) noexcept nogil:
         if (not self.have_small or x < self.small_lo[0] or x > self.small_hi[0] or y < self.small_lo[1]
                 or y > self.small_hi[1] or z < self.small_lo[2] or z > self.small_hi[2]):
             return 0
         cdef char* b = self.small.find(cell_key(x, y, z))
         return 0 if b == NULL else b[0]
 
-    cdef inline bint efp(self, int x, int y, int z) except -1:
+    cdef inline bint efp(self, int x, int y, int z) except -1 nogil:
         cdef uint16_t* w = self.gw(x, y, z)
         if w == NULL:
             return (self.cell(x, y, z).val & F_EFP) != 0
@@ -956,7 +973,7 @@ cdef class World:
         cdef object n = (<dict>spec[5]).get(key, 0)
         return n > 1 or (n == 1 and not PySet_Contains(spec[6], key))
 
-    cdef inline bint keep_at(self, uint16_t g, int x, int y, int z, int shift) except -1:
+    cdef inline bint keep_at(self, uint16_t g, int x, int y, int z, int shift) except -1 nogil:
         """_ForeignKeepout.__contains__, for a cell in the grid."""
         if not self.have_extra and not g & G_KEEP1:
             return False
@@ -965,25 +982,26 @@ cdef class World:
             return True
         if not g & G_KEEP1:
             return False
-        if not g & G_KEEP2 and self.grid.own_map.find(cell_key(x, y, z)) != NULL:
+        if not g & G_KEEP2 and self.own_cells.find(cell_key(x, y, z)) != NULL:
             return False
         if not s & (S_EXCL << shift):
             return True
-        return self.keep_slow(x, y, z, shift)
+        with gil:
+            return self.keep_slow(x, y, z, shift)
 
-    cdef inline bint eprot_at(self, int x, int y, int z) except -1:
+    cdef inline bint eprot_at(self, int x, int y, int z) except -1 nogil:
         cdef uint16_t* w = self.gw(x, y, z)
         if w != NULL and self.keep_fast:
             return self.keep_at(w[0], x, y, z, 0)
         return (self.cell(x, y, z).val & F_EPROT) != 0
 
-    cdef inline bint prot_at(self, int x, int y, int z) except -1:
+    cdef inline bint prot_at(self, int x, int y, int z) except -1 nogil:
         cdef uint16_t* w = self.gw(x, y, z)
         if w != NULL and self.keep_fast:
             return self.keep_at(w[0], x, y, z, 1)
         return (self.cell(x, y, z).val & F_PROT) != 0
 
-    cdef inline int owner_code(self, uint16_t g, int x, int y, int z) noexcept:
+    cdef inline int owner_code(self, uint16_t g, int x, int y, int z) noexcept nogil:
         if not g & G_OWNED:
             return 0
         cdef int o = self.grid.owner_map.find(cell_key(x, y, z))[0]
@@ -991,7 +1009,7 @@ cdef class World:
 
     # --- per-cell facts -----------------------------------------------------------------------
 
-    cdef inline bint inb(self, int x, int y, int z) noexcept:
+    cdef inline bint inb(self, int x, int y, int z) noexcept nogil:
         return (self.min_x <= x <= self.max_x and self.min_y <= y <= self.max_y
                 and self.min_z <= z <= self.max_z)
 
@@ -1047,7 +1065,7 @@ cdef class World:
             raise ValueError(bit)
         return bit if v else 0
 
-    cdef CellInfo* cell(self, int x, int y, int z) except NULL:
+    cdef CellInfo* cell(self, int x, int y, int z) except NULL nogil:
         """The cell's cache entry; a new one gets every set membership and its owner at once
         (one key tuple), leaving only GLASS / POWERED to probe lazily."""
         cdef int ins
@@ -1056,7 +1074,7 @@ cdef class World:
             self.fill(c, x, y, z)
         return c
 
-    cdef int fill(self, CellInfo* c, int x, int y, int z) except -1:
+    cdef int fill(self, CellInfo* c, int x, int y, int z) except -1 nogil:
         cdef uint16_t* w = self.gw(x, y, z)
         cdef unsigned int v = 0
         if w != NULL and self.keep_fast:
@@ -1069,6 +1087,11 @@ cdef class World:
             c.val = v
             c.known = BASE_FLAGS
             return 0
+        with gil:
+            return self.fill_slow(c, w, x, y, z)
+
+    cdef int fill_slow(self, CellInfo* c, uint16_t* w, int x, int y, int z) except -1:
+        cdef unsigned int v = 0
         key = (x, y, z)
         if PySet_Contains(self.solid, key): v |= F_SOLID
         if w != NULL:
@@ -1099,28 +1122,37 @@ cdef class World:
         c.known = BASE_FLAGS
         return 0
 
-    cdef inline unsigned int flag(self, int x, int y, int z, unsigned int bit) except? 0xFFFFFFFF:
+    cdef inline unsigned int flag(self, int x, int y, int z, unsigned int bit) except? 0xFFFFFFFF nogil:
         cdef CellInfo* c
         cdef unsigned int v
         if bit == F_TERM:
             return self.base(x, y, z) & F_TERM
         if bit == F_POWERED and not self.base(x, y, z) & F_SOLID:  # what powered() checks first
             return 0
+        cdef uint16_t* w
+        if bit == F_GLASS:
+            w = self.gw(x, y, z)
+            if w != NULL:
+                return F_GLASS if w[0] & G_GLASS else 0
         c = self.cell(x, y, z)
         if not c.known & bit:
-            v = self.probe(x, y, z, bit)
+            if bit == F_POWERED:  # without the GIL unless a repeater is beside it
+                v = F_POWERED if self.powered(x, y, z) else 0
+            else:
+                with gil:
+                    v = self.probe(x, y, z, bit)
             c = self.cell(x, y, z)  # probing POWERED touches other cells (may move entries)
             c.val |= v
             c.known |= bit
         return c.val & bit
 
-    cdef inline int owner(self, int x, int y, int z) except -1:
+    cdef inline int owner(self, int x, int y, int z) except -1 nogil:
         cdef uint16_t* w = self.gw(x, y, z)
         if w != NULL:
             return self.owner_code(w[0], x, y, z)
         return self.cell(x, y, z).owner
 
-    cdef bint powered(self, int x, int y, int z) except -1:
+    cdef bint powered(self, int x, int y, int z) except -1 nogil:
         """_is_powered_block: a solid cell with a repeater facing into it."""
         cdef int d, bx, bz
         if not self.inb(x, y, z) or not (self.base(x, y, z) & F_SOLID):
@@ -1131,20 +1163,21 @@ cdef class World:
                 continue
             if not (self.base(bx, y, bz) & F_REP):
                 continue
-            if self.workspace[bx, y, bz]['facing'] == self.facing[d]:
-                return True
+            with gil:
+                if self.workspace[bx, y, bz]['facing'] == self.facing[d]:
+                    return True
         return False
 
-    cdef inline bint can_support(self, int x, int y, int z) except -1:
+    cdef inline bint can_support(self, int x, int y, int z) except -1 nogil:
         return self.inb(x, y, z) and ((self.base(x, y, z) & F_SOLID) != 0 or not (self.base(x, y, z) & F_NONAIR))
 
-    cdef inline bint torch_below(self, int x, int y, int z) except -1:
+    cdef inline bint torch_below(self, int x, int y, int z) except -1 nogil:
         if not self.inb(x, y - 1, z):
             return False
         return (self.base(x, y - 1, z) & F_TORCH) != 0
 
     cdef bint wire_walkable(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt,
-                            bint with_inv_fp) except -1:
+                            bint with_inv_fp) except -1 nogil:
         """_wire_walkable; with_inv_fp False = no footprint checks (mid_walkable).
         Only the boolean matters, so each neighbour cell is fetched once and all its checks run
         together (the Python version's check order differs; its result doesn't)."""
@@ -1209,10 +1242,10 @@ cdef class World:
                 return False
         return True
 
-    cdef inline bint walkable(self, int x, int y, int z) except -1:
+    cdef inline bint walkable(self, int x, int y, int z) except -1 nogil:
         return self.walkable_ex(x, y, z, 0, 0, 0, False)
 
-    cdef bint walkable_ex(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt) except -1:
+    cdef bint walkable_ex(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt) except -1 nogil:
         cdef uint16_t* w = self.gw(x, y, z)
         cdef uint16_t g
         if w != NULL and self.keep_fast:  # eprot_at and efp off one grid word
@@ -1236,7 +1269,7 @@ cdef class World:
         self.walk_cache.get(key, &ins)[0] = 2 if v else 1
         return v
 
-    cdef bint mid_walkable(self, int x, int y, int z, int ex, int ey, int ez) except -1:
+    cdef bint mid_walkable(self, int x, int y, int z, int ex, int ey, int ez) except -1 nogil:
         cdef unsigned long long key = cell_key(x, y, z) << 7 | exempt_code(ex - x, ey - y, ez - z)
         cdef char* hit = self.mid_cache.find(key)
         if hit != NULL:
@@ -1248,13 +1281,14 @@ cdef class World:
 
     # --- move entries -------------------------------------------------------------------------
 
-    cdef int pid(self, int x, int y, int z) except -1:
+    cdef int pid(self, int x, int y, int z) except -1 nogil:
         cdef int ins
         cdef int* slot = self.pid_map.get(cell_key(x, y, z), &ins)
         if not ins:
             return slot[0]
         if self.out_cells == NULL:
-            slot[0] = self.pid_slow(x, y, z)
+            with gil:
+                slot[0] = self.pid_slow(x, y, z)
             return slot[0]
         # Filling the search's vectors: the cell stays out of the Python containers unless flush_cells asks.
         slot[0] = <int>self.out_cells.x.size()
@@ -1287,18 +1321,13 @@ cdef class World:
         return 0
 
     cdef int emit(self, list moves, int x, int y, int z, int tx, int ty, int tz, int cost, unsigned int forbid,
-                  int gate, bint has_extra, int ex, int ey, int ez) except -1:
+                  int gate, bint has_extra, int ex, int ey, int ez) except -1 nogil:
         """_find_wire_path's _entry. Into the vector being filled, or moves as a tuple with its snapshot tables slot None."""
         cdef int dx = tx - x, dy = ty - y, dz = tz - z
         cdef Move m
         if self.out == NULL:
-            flat_dir = (dx, dz) if dy == 0 and abs(dx) <= 1 and abs(dz) <= 1 else None
-            dest = self.pid(tx, ty, tz)
-            near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
-                    and abs(self.gy - ty) < Y_RADIUS_MIN)
-            arrive = TOWER_FLAG if dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2)) else 0
-            moves.append((dest, cost, forbid, gate, (ex, ey, ez) if has_extra else None, None, flat_dir, self.h_list[dest],
-                          near, arrive))
+            with gil:
+                self.emit_tuple(moves, dx, dy, dz, tx, ty, tz, cost, forbid, gate, has_extra, ex, ey, ez)
             return 0
         m.dest = self.pid(tx, ty, tz)
         m.cost = cost
@@ -1320,6 +1349,18 @@ cdef class World:
         m.arrive = dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2))
         m.cong = 0.0
         self.out.push_back(m)
+        return 0
+
+    cdef int emit_tuple(self, list moves, int dx, int dy, int dz, int tx, int ty, int tz, int cost, unsigned int forbid,
+                        int gate, bint has_extra, int ex, int ey, int ez) except -1:
+        """emit's entry as a tuple. Apart, as Python locals in emit would take the GIL on every return."""
+        flat_dir = (dx, dz) if dy == 0 and abs(dx) <= 1 and abs(dz) <= 1 else None
+        dest = self.pid(tx, ty, tz)
+        near = ((abs(self.gx - tx) + abs(self.gz - tz)) < HORIZ_RADIUS_MIN
+                and abs(self.gy - ty) < Y_RADIUS_MIN)
+        arrive = TOWER_FLAG if dy == 4 and ((abs(dx) == 2 and dz == 0) or (dx == 0 and abs(dz) == 2)) else 0
+        moves.append((dest, cost, forbid, gate, (ex, ey, ez) if has_extra else None, None, flat_dir,
+                      self.h_list[dest], near, arrive))
         return 0
 
     cpdef tuple static_moves(self, int cid):
@@ -1350,13 +1391,13 @@ cdef class World:
         return got
 
     cdef tuple _static_moves(self, int x, int y, int z):
-        cdef list moves = []
+        cdef list moves = [], m4 = [], sides = []
         if self.base(x, y, z) & F_INV:
             return [], None
         self.plain_moves(x, y, z, moves)
-        return moves, self.powered_minus4(x, y, z)
+        return moves, ((m4[0], sides) if self.powered_minus4(x, y, z, m4, sides) else None)
 
-    cdef int plain_moves(self, int x, int y, int z, list moves) except -1:
+    cdef int plain_moves(self, int x, int y, int z, list moves) except -1 nogil:
         """Every move but powered -4, in moves or the vector being filled. The cell isn't inverted."""
         cdef int d, dx, dz, nx, nz, nx2, nz2, mx, my, mz, k, below_owner
         cdef unsigned int b_lo, b_mid, b_hi
@@ -1460,7 +1501,7 @@ cdef class World:
         self.tower_moves(x, y, z, moves)
         return 0
 
-    cdef int tower_moves(self, int x, int y, int z, list moves) except -1:
+    cdef int tower_moves(self, int x, int y, int z, list moves) except -1 nogil:
         """_tower_candidates, appending entries."""
         cdef int d, tdx, tdz, rx, rz, cx, cz, cy, cdy, k
         cdef bint cuts, col_clear
@@ -1500,7 +1541,7 @@ cdef class World:
                       0, False, 0, 0, 0)
         return 0
 
-    cdef bint tower_column_clear(self, int cx, int y, int cz) except -1:
+    cdef bint tower_column_clear(self, int cx, int y, int cz) except -1 nogil:
         """Whether the five cells from (cx, y, cz) up are free for a tower, with no wire beside them. Remembered."""
         cdef unsigned long long key = cell_key(cx, y, cz)
         cdef char* hit = self.column_cache.find(key)
@@ -1527,7 +1568,7 @@ cdef class World:
         self.column_cache.get(key, &ins)[0] = 2 if col_clear else 1
         return col_clear
 
-    cdef bint next_to_terminal(self, int x, int y, int z) except -1:
+    cdef bint next_to_terminal(self, int x, int y, int z) except -1 nogil:
         """Whether an inverted cell here would make a pin terminal unwalkable (wire_walkable
         rejects cells beside inverted ones); own-net terminals of later sinks aren't keepout.
         Sinks this net has yet to reach also need their approach cells walkable, and those are
@@ -1541,13 +1582,13 @@ cdef class World:
         self.terminal_cache.get(key, &ins)[0] = 2 if v else 1
         return v
 
-    cdef bint next_to_terminal_uncached(self, int x, int y, int z) except -1:
+    cdef bint next_to_terminal_uncached(self, int x, int y, int z) except -1 nogil:
         cdef int k, ddy
         for k in range(4):
             for ddy in range(-1, 2):
                 if self.flag(x + HORIZ[k][0], y + ddy, z + HORIZ[k][1], F_TERM):
                     return True
-        if not self.pending:
+        if not self.has_pending:
             return False
         if self.gp != NULL:
             for ddy in range(-2, 3):
@@ -1559,17 +1600,18 @@ cdef class World:
                                              z + HORIZ[k][1] - HORIZ[k][0]) & S_PENDING):
                         return True
             return False
-        for ddy in range(-2, 3):
-            if PySet_Contains(self.pending, (x, y + ddy, z)):
-                return True
-            for k in range(4):
-                if (PySet_Contains(self.pending, (x + 2 * HORIZ[k][0], y + ddy, z + 2 * HORIZ[k][1]))
-                        or PySet_Contains(self.pending, (x + HORIZ[k][0] + HORIZ[k][1], y + ddy,
-                                                         z + HORIZ[k][1] - HORIZ[k][0]))):
+        with gil:
+            for ddy in range(-2, 3):
+                if PySet_Contains(self.pending, (x, y + ddy, z)):
                     return True
+                for k in range(4):
+                    if (PySet_Contains(self.pending, (x + 2 * HORIZ[k][0], y + ddy, z + 2 * HORIZ[k][1]))
+                            or PySet_Contains(self.pending, (x + HORIZ[k][0] + HORIZ[k][1], y + ddy,
+                                                             z + HORIZ[k][1] - HORIZ[k][0]))):
+                        return True
         return False
 
-    cdef bint m4_cell_clear(self, int x, int y, int z) except -1:
+    cdef bint m4_cell_clear(self, int x, int y, int z) except -1 nogil:
         cdef unsigned long long key = cell_key(x, y, z)
         cdef char* hit = self.m4_clear_cache.find(key)
         if hit != NULL:
@@ -1579,7 +1621,7 @@ cdef class World:
         self.m4_clear_cache.get(key, &ins)[0] = 2 if v else 1
         return v
 
-    cdef bint m4_cell_clear_uncached(self, int x, int y, int z) except -1:
+    cdef bint m4_cell_clear_uncached(self, int x, int y, int z) except -1 nogil:
         cdef int k, ddy, sx, sy, sz
         for k in range(4):
             for ddy in range(-1, 2):
@@ -1588,31 +1630,30 @@ cdef class World:
                     return False
         return self.owner(x, y, z) < 2
 
-    cdef object powered_minus4(self, int x, int y, int z):
-        """_powered_minus4_move: its entry and sides. Filling vectors: the sides, then the entry, returning None."""
+    cdef int powered_minus4(self, int x, int y, int z, list moves, list sides) except -1 nogil:
+        """_powered_minus4_move: its number of sides; its entry into moves and the sides into sides, or the sides
+        then the entry into the vectors being filled."""
         cdef int d, dx, dz, nx, nz, k, ddy, i, bx, by, bz, cx, cy, cz
         cdef int cells[6][3]
         cdef unsigned int b_lo, b_mid, b_hi
         cdef bint ok
         cdef int n_sides = 0
         cdef M4Side m4
-        cdef list moves = None
         if y - 4 < self.min_y:
-            return None
+            return 0
         if not self.walkable(x, y - 4, z):
-            return None
+            return 0
         bx = x
         by = y - 1
         bz = z
         if ((bx == self.gx and by == self.gy and bz == self.gz) or (self.base(bx, by, bz) & F_TERM)
                 or (self.base(bx, by, bz) & F_FP) or self.prot_at(bx, by, bz)):
-            return None
+            return 0
         if (self.base(bx, by, bz) & F_SOLID):
             if self.flag(bx, by, bz, F_GLASS):
-                return None
+                return 0
         elif not (self.inb(bx, by, bz) and not (self.base(bx, by, bz) & F_NONAIR)):
-            return None
-        sides = [] if self.out == NULL else None
+            return 0
         for d in range(4):
             dx, dz = HORIZ[d][0], HORIZ[d][1]
             nx, nz = x + dx, z + dz
@@ -1665,14 +1706,12 @@ cdef class World:
                     self.out_m4_cells.push_back(cells[i][1] - y)
                     self.out_m4_cells.push_back(cells[i][2] - z)
             else:
-                sides.append((b_lo | b_mid | b_hi, ((bx, by, bz),) + tuple(
-                    [(cells[i][0], cells[i][1], cells[i][2]) for i in range(6)])))
-        if not n_sides:
-            return None
-        if self.out == NULL:
-            moves = []
-        self.emit(moves, x, y, z, x, y - 4, z, 8, 0, 0, False, 0, 0, 0)
-        return (moves[0], sides) if self.out == NULL else None
+                with gil:
+                    sides.append((b_lo | b_mid | b_hi, ((bx, by, bz),) + tuple(
+                        [(cells[i][0], cells[i][1], cells[i][2]) for i in range(6)])))
+        if n_sides:
+            self.emit(moves, x, y, z, x, y - 4, z, 8, 0, 0, False, 0, 0, 0)
+        return n_sides
 
 
 def _strip_tables(static):
@@ -1691,6 +1730,7 @@ cdef class _Cells:
     cdef vector[Move] moves
     cdef vector[M4Side] m4_sides
     cdef vector[int] m4_cells  # flattened (ox, oy, oz) triples
+    cdef Heap heap
 
     cdef void clear(self):
         self.x.clear()
@@ -1777,41 +1817,44 @@ cdef class _Cells:
             self.m4_sides.push_back(side)
         return 0
 
-    cdef int load(self, int cid, object expand, World world, bint verify, list pos_list, list h_list,
-                  object congestion_cost) except -1:
+    cdef int load_fast(self, int cid, World world) except -1 nogil:
+        """The kernel's move generation without going through Python tuples. world.seed_pids() has run."""
         cdef CellMoves c
         cdef _CellVectors vectors
         cdef int cx, cy, cz
+        c.start = self.moves.size()
+        c.m4_start = self.m4_sides.size()
+        c.m4_move = -1
+        c.m4_count = 0
+        c.count = 0
+        cx, cy, cz = self.x[cid], self.y[cid], self.z[cid]
+        world.out = &self.moves
+        world.out_sides = &self.m4_sides
+        world.out_m4_cells = &self.m4_cells
+        vectors.x, vectors.y, vectors.z, vectors.h, vectors.cm = &self.x, &self.y, &self.z, &self.h, &self.cm
+        world.out_cells = &vectors
+        try:
+            if not world.base(cx, cy, cz) & F_INV:
+                world.plain_moves(cx, cy, cz, None)
+                c.count = <int>self.moves.size() - c.start
+                world.powered_minus4(cx, cy, cz, None, None)
+                c.m4_count = <int>self.m4_sides.size() - c.m4_start
+                if c.m4_count:
+                    c.m4_move = <int>self.moves.size() - 1
+        finally:
+            world.out = NULL
+            world.out_sides = NULL
+            world.out_m4_cells = NULL
+            world.out_cells = NULL
+        self.cm[cid] = c
+        return 0
+
+    cdef int load(self, int cid, object expand, World world, bint verify, list pos_list, list h_list,
+                  object congestion_cost) except -1:
+        cdef CellMoves c
         if world is not None and not verify and not world.grid_check and congestion_cost is None:
-            # The kernel's move generation without going through Python tuples.
             world.seed_pids()
-            c.start = self.moves.size()
-            c.m4_start = self.m4_sides.size()
-            c.m4_move = -1
-            c.m4_count = 0
-            cx, cy, cz = self.x[cid], self.y[cid], self.z[cid]
-            world.out = &self.moves
-            world.out_sides = &self.m4_sides
-            world.out_m4_cells = &self.m4_cells
-            vectors.x, vectors.y, vectors.z, vectors.h, vectors.cm = &self.x, &self.y, &self.z, &self.h, &self.cm
-            world.out_cells = &vectors
-            try:
-                if not world.base(cx, cy, cz) & F_INV:
-                    world.plain_moves(cx, cy, cz, None)
-                    c.count = <int>self.moves.size() - c.start
-                    world.powered_minus4(cx, cy, cz)
-                    c.m4_count = <int>self.m4_sides.size() - c.m4_start
-                    if c.m4_count:
-                        c.m4_move = <int>self.moves.size() - 1
-                else:
-                    c.count = 0
-            finally:
-                world.out = NULL
-                world.out_sides = NULL
-                world.out_m4_cells = NULL
-                world.out_cells = NULL
-            self.cm[cid] = c
-            return 0
+            return self.load_fast(cid, world)
         if world is None:
             static = expand(cid)
         else:
@@ -1839,8 +1882,11 @@ cdef class _Cells:
         return 0
 
 
-cdef _Cells SEARCH_CELLS = _Cells()  # a search's storage, kept for the next one
-cdef Heap SEARCH_HEAP
+cdef enum:  # why search stopped early
+    STOP_NONE, STOP_TIMEOUT, STOP_F_CAP, STOP_STAGNATED, STOP_EXPANSIONS, STOP_NODES
+
+
+cdef list _CELLS_POOL = []  # searches' storage, kept for the next ones (one per search running at once)
 
 
 cdef extern from *:
@@ -1897,10 +1943,6 @@ def prepare_seeds(list seeds, tree_seeds, solid, tuple bounds, dict pos_ids, lis
     return seed_ids, seed_nodes, seed_groups, group_best_h, best
 
 
-def cell_pos(int cid):
-    """A cell of the last search, which may be past pos_list: good until the next search starts."""
-    cdef int x = SEARCH_CELLS.x[cid], y = SEARCH_CELLS.y[cid], z = SEARCH_CELLS.z[cid]
-    return (x, y, z)
 
 
 def set_subset_dominance(bint on) -> None:
@@ -1929,23 +1971,29 @@ def set_foot_repeaters(bint on) -> None:
 def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list group_max_f,
            long long best_node, long long best_h, double weight, time_limit, list pos_list,
            list h_list, expand, congestion_cost, World world=None, bint verify=False,
-           double h_radius_factor=-1, int stagnation=-1, int budget=1, int cell_cap=0, long long position_cap=0):
+           double h_radius_factor=-1, int stagnation=-1, int budget=1, int cell_cap=0, long long position_cap=0,
+           int goal_depth=15):
     """With world, cells' static moves are generated here instead of
     by expand(); verify additionally checks each against expand(). stagnation: this search's limit
     (negative: _ROUTE_STAGNATION). h_radius_factor: the h-radius
     cull for this search (0: off; negative: _H_RADIUS_FACTOR). budget: multiplies the stagnation,
     position and expansion limits. position_cap: positions to expand before failing, in place of the budgeted
     MAX_NODES (0: that). cell_cap: with subset dominance, a state is dropped once its cell has had this many
-    expanded (0: no cap), counting toward the limits as a dominated one does."""
+    expanded (0: no cap), counting toward the limits as a dominated one does. goal_depth: a goal is reached only at
+    this signal depth or less.
+
+    The loop runs without the GIL: searches in other threads run alongside, over the same containers, which nothing may
+    change meanwhile. Move generation takes the GIL back only for cells beyond the CellGrid and the like."""
     global STAT_SEARCHES, STAT_POPS, STAT_PUSHES, STAT_CELLS, STAT_LOAD_TIME
     if not _init_done:
         raise RuntimeError("_astar.init() was not called")
-    cdef _Cells cells = SEARCH_CELLS
+    cdef _Cells cells = _CELLS_POOL.pop() if _CELLS_POOL else _Cells()
     cells.clear()
-    cdef Heap* heap = &SEARCH_HEAP
+    cdef Heap* heap = &cells.heap
     heap.clear()
     heap.g_can_differ = congestion_cost is not None or (weight * 4) % 1 != 0
     cdef CameFrom came_from = CameFrom()
+    came_from.cells = cells
     cdef NodeTable* nodes = &came_from.nodes
     # Most searches outgrow the default, and growing rehashes.
     nodes.reset(1 << 14, <unsigned long long>15 << SIG_SHIFT, congestion_cost is not None)
@@ -2018,19 +2066,31 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
 
     if has_deadline:
         deadline = time.monotonic() + time_limit
-    while not heap.empty():
+    cdef bint fast = world is not None and not verify and not world.grid_check and congestion_cost is None
+    if fast:
+        world.seed_pids()
+    cdef int stop = STOP_NONE
+    cdef double stop_f = 0
+    cdef bint timed_out
+    # Without the GIL, so that searches in other threads run alongside (see search's docstring).
+    with nogil:
+      while not heap.empty():
         pops += 1
-        if has_deadline and pops & 255 == 0 and time.monotonic() > deadline:
-            early_stop_reason = f"timeout ({time_limit}s)"
-            break
-        if pops & 16383 == 0:
-            pulse(pops)
+        if pops & 16383 == 0 or (has_deadline and pops & 255 == 0):
+            with gil:
+                if pops & 16383 == 0:
+                    pulse(pops)
+                timed_out = has_deadline and time.monotonic() > deadline
+            if timed_out:
+                stop = STOP_TIMEOUT
+                break
         e = heap.pop()
         # f-cap per seed group; stop once past every group's.
         f_wire = e.f - e.g + e.g_wire
         if f_wire > gmax[e.group]:
             if f_wire > max_f:
-                early_stop_reason = f"f-cap exceeded (f={f_wire} > max_f={py_max_f})"
+                stop = STOP_F_CAP
+                stop_f = f_wire
                 break
             continue
         ni = nodes.find(e.node)
@@ -2065,10 +2125,10 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 # not past more cells.
                 n_exp += 1
                 if n_exp - last_new_pos >= stagnation_limit:
-                    early_stop_reason = f"stagnated ({stagnation_limit} expansions without a new position)"
+                    stop = STOP_STAGNATED
                     break
                 if n_exp >= max_expansions:
-                    early_stop_reason = f"expansion cap ({max_expansions})"
+                    stop = STOP_EXPANSIONS
                     break
                 continue
         h = cells.h[cid]
@@ -2096,19 +2156,19 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                     max_gap = n_exp - last_new_pos
                 last_new_pos = n_exp
             if n_explored_xyz >= max_nodes:
-                early_stop_reason = f"node cap ({max_nodes} unique positions)"
+                stop = STOP_NODES
                 break
-        if cid < <int>is_goal.size() and is_goal[cid]:
+        if cid < <int>is_goal.size() and is_goal[cid] and ((e.node >> SIG_SHIFT) & 15) <= goal_depth:
             reached = e.node
             has_reached = True
             break
         # Stagnation: the frontier keeps churning states (snapshots, signal depths, cheaper
         # re-expansions) over cells it has already reached.
         if n_exp - last_new_pos >= stagnation_limit:
-            early_stop_reason = f"stagnated ({stagnation_limit} expansions without a new position)"
+            stop = STOP_STAGNATED
             break
         if n_exp >= max_expansions:
-            early_stop_reason = f"expansion cap ({max_expansions})"
+            stop = STOP_EXPANSIONS
             break
 
         cur_snap = e.node & SNAP_MASK
@@ -2117,7 +2177,11 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
         cur_cand = (e.node >> (SIG_SHIFT + 4)) & 7
         if cells.cm[cid].start < 0:
             t_load = now_seconds()
-            cells.load(cid, expand, world, verify, pos_list, h_list, congestion_cost)
+            if fast:
+                cells.load_fast(cid, world)
+            else:
+                with gil:
+                    cells.load(cid, expand, world, verify, pos_list, h_list, congestion_cost)
             STAT_LOAD_TIME += now_seconds() - t_load
             STAT_CELLS += 1
         cmv = &cells.cm[cid]
@@ -2231,6 +2295,16 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             else:
                 h_radius_pruned += 1
 
+    if stop == STOP_TIMEOUT:
+        early_stop_reason = f"timeout ({time_limit}s)"
+    elif stop == STOP_F_CAP:
+        early_stop_reason = f"f-cap exceeded (f={stop_f} > max_f={py_max_f})"
+    elif stop == STOP_STAGNATED:
+        early_stop_reason = f"stagnated ({stagnation_limit} expansions without a new position)"
+    elif stop == STOP_EXPANSIONS:
+        early_stop_reason = f"expansion cap ({max_expansions})"
+    elif stop == STOP_NODES:
+        early_stop_reason = f"node cap ({max_nodes} unique positions)"
     if not has_reached and world is not None:
         cells.flush_cells(world.pos_ids, pos_list, h_list, world.move_cache)
     STAT_SEARCHES += 1

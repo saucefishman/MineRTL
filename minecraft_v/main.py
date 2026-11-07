@@ -2,14 +2,18 @@ import argparse
 import atexit
 import gc
 import json
+import os
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 
 from minecraft_v.build_utils import save_build_artifacts
 from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, SCHEMATICS_DIR, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
-from minecraft_v.placement_engine import build_litematic_from_component_list, pathfinding
+_PROCESS_START = time.time()
+
+from minecraft_v.placement_engine import build_litematic_from_component_list, builder, pathfinding
 from minecraft_v.placement_engine.builder import build_macro, set_first_fanout, set_long_edge_split
 from minecraft_v.placement_engine.macro import extract_macros
 from minecraft_v.placement_engine.ram import BLOCK_CELLS, RAM4_CELL, block_for_cell, built_block, group_block, set_block_cache, stack_spec
@@ -393,6 +397,20 @@ def main():
                                         **spacing)
 
     log(f"Wrote litematic: {out_litematic.resolve()}")
+    stats = builder.last_build_stats
+    if stats:
+        cells = sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN) for c in flat_comp.components)
+        x, y, z = stats["size"]
+        log(f"[stats] {time.time() - _start_time():.1f}s, {cells} cells, {len(flat_comp.nets)} nets, {x}x{y}x{z}, "
+            f"{stats['failed']} failed, {stats['violations']} verify")
+
+
+def _start_time() -> float:
+    """When the build started: synth.sh's start if it passed one, else this process's."""
+    try:
+        return float(os.environ["MINECRAFT_V_START"])
+    except (KeyError, ValueError):
+        return _PROCESS_START
 
 
 if __name__ == "__main__":
