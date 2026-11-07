@@ -3,6 +3,7 @@ from __future__ import annotations
 import bisect
 import gc
 import os
+import re
 import time
 import zlib
 from collections import deque
@@ -1640,14 +1641,17 @@ class _GreedyRouter:
                     debug(f"{label} {job.key}: failed after {time.monotonic() - job_started:.0f}s, {len(job.sinks)} sinks")
                     if job.key in self.kept:
                         goal = self.failed_goal.get(job.key)
-                        victims = [v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX] \
+                        stuck = _stuck_at_source(e, job.src)
+                        around = [goal] if stuck is None else [goal, stuck]
+                        victims = list(dict.fromkeys(v for p in around for v in [
+                            v for v in self.blockers(p, job.key, keys) if v not in ripped][:_BLOCKER_MAX])) \
                             if rip_blockers else []
                         requeued.add(job.key)
                         if victims:
                             log(f"{label} {job.key}: {e}; keeping its branches, ripping a branch of "
                                 f"{', '.join(victims)} and retrying that sink")
                             for v in victims:
-                                self.rip_branch(by_key[v], [goal])
+                                self.rip_branch(by_key[v], around)
                                 ripped.add(v)
                             queue = deque(entry for entry in queue if entry[1].key not in victims)
                             queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in victims)
@@ -1659,21 +1663,28 @@ class _GreedyRouter:
                     goal = self.failed_goal.get(job.key)
                     cleared = cleared_for.get(job.key, set())
                     # Around the source too: it can be the walled-in end, and nothing around the goal would help.
+                    # A pin's way out is a few cells long, and what walls it in sits at the end of that, past
+                    # _BLOCKER_RADIUS of the pin: around where the search got stuck as well.
+                    stuck = _stuck_at_source(e, job.src)
                     victims = [] if goal is None or goal in cleared or len(cleared) >= _RIP_ROUNDS \
                         or not rip_blockers else list(dict.fromkeys(
                             [v for v in self.blockers(goal, job.key, keys) if v not in ripped][:_BLOCKER_MAX]
-                            + [v for v in self.blockers(job.src, job.key, keys) if v not in ripped][:_BLOCKER_MAX]))
+                            + [v for v in self.blockers(job.src, job.key, keys) if v not in ripped][:_BLOCKER_MAX]
+                            + ([v for v in self.blockers(stuck, job.key, keys) if v not in ripped][:_BLOCKER_MAX]
+                               if stuck is not None else [])))
                     if victims and not isinstance(e, LayConflict):
                         cleared_for.setdefault(job.key, set()).add(goal)
                         requeued.add(job.key)
                         log(f"{label} {job.key}: {e}; ripping a branch of {', '.join(victims)} and retrying")
                         for v in victims:
-                            self.rip_branch(by_key[v], [goal, job.src])
+                            self.rip_branch(by_key[v], [goal, job.src] if stuck is None else [goal, job.src, stuck])
                             ripped.add(v)
                         queue.appendleft((i, job))
                         queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in victims)
                         continue
-                    where = goal if goal is not None else next(iter(getattr(e, "cells", ())), None)
+                    # Walled in at its own pin, nothing around the goal helps: the wider ring goes round the pin.
+                    where = stuck if stuck is not None else goal if goal is not None \
+                        else next(iter(getattr(e, "cells", ())), None)
                     wider = [] if where is None or job.key in escalated or not rip_blockers else \
                         self.blockers(where, job.key, keys, _ESCALATE_RADIUS)[:_ESCALATE_MAX]
                     if where is not None and job.key not in escalated and rip_blockers:
@@ -1712,6 +1723,19 @@ class _GreedyRouter:
             log(f"{label} resume: {self.resume.reused} paths reused, {self.resume.searched} searched "
                 f"({time.monotonic() - started:.0f}s)")
         return failures
+
+
+_STUCK_AT_SOURCE = 8  # a failed search that got no further than this from the source was walled in at it
+_CLOSEST_REACHED = re.compile(r"closest reached: \(\((-?\d+), (-?\d+), (-?\d+)\)")
+
+
+def _stuck_at_source(e: Exception, src: Pos) -> Pos | None:
+    """Where a failed search got closest to its goal, if that's still beside the source: the pin is walled in."""
+    m = _CLOSEST_REACHED.search(str(e))
+    if m is None:
+        return None
+    cell = (int(m[1]), int(m[2]), int(m[3]))
+    return cell if abs(cell[0] - src[0]) + abs(cell[1] - src[1]) + abs(cell[2] - src[2]) <= _STUCK_AT_SOURCE else None
 
 
 _BANK_PIN_LEAD = 6

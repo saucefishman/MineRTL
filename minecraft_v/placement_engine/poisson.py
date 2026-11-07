@@ -124,7 +124,9 @@ class _Field:
         self.dims = dims
         self.fixed: np.ndarray | None = None  # fraction of each bin taken by fixed boxes
         mean = sizes.mean(axis=0)
-        self.shape = tuple(int(max(1, min(128, round(_BINS_PER_BOX * dims[a] / mean[a])))) for a in range(3))
+        # Sizes the DCT is fast at: a factor like 53 makes one axis's transform several times slower.
+        self.shape = tuple(min(128, fft.next_fast_len(int(max(1, round(_BINS_PER_BOX * dims[a] / mean[a]))), real=True))
+                           for a in range(3))
         self.h = dims / np.array(self.shape)
         # Boxes smaller than a bin are smeared over one, keeping their charge (ePlace local smoothing).
         self.eff = np.maximum(sizes, self.h)
@@ -882,6 +884,7 @@ def _cell_count(comps: list[Component]) -> int:
 
 _SOUTH_PINS_WIDTH = 0.35  # share of the block's width
 _SOUTH_PINS_OUTPUT_Z = 10  # output row, past that face
+_STRIP_ASPECT = 4  # a macro at least this many times wider than deep is a strip
 _BANK_TARGET_STRETCH = 1.4  # spot by spot packing only reaches about 0.6, against _TARGET_DENSITY: without room, gates
                             # spill onto later gates' targets and each search walks through all that's piled there
 
@@ -956,7 +959,8 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
     pos = np.rint(_global_place(netlist, sizes, dims, io, gates, seed, held, repel))
     pos[free, 0] += gate_shift
     channel_z = _south_pins_setting(_cell_count([gates[i] for i in free]), None, _SOUTH_PINS_CHANNEL_LARGE)
-    if all(gates[i].metadata.get("south_pins") for i in banks) and channel_z is not None:
+    south_pins = all(gates[i].metadata.get("south_pins") for i in banks)
+    if south_pins and channel_z is not None:
         # The block's charge presses gates to the far end of the domain, leaving a void: close it to the channel wanted.
         # Moved as one, so global placement's density and legalization time don't change, as a shorter domain's would.
         near = float(np.percentile(pos[free, 2], 2))
@@ -967,6 +971,10 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
         pos[i] = fixed[i]
     if len(free) >= _DENSE_GATES:  # few boxes pack fine, and stay nearer their nets
         pos[free, 1] = _stretch_above(pos[free, 1], y, _BANK_TARGET_STRETCH)
+    # Strips (a ROM's write-turn rows: long, flat, pins along one face) go at the gates' front, by the block's pins.
+    # Inside the gates they're a wall that nets crossing the slab search around; on floweypu, seeds that left them deep
+    # took up to 1.8x the routing work.
+    strip_z = int(pos[free, 2].min()) if south_pins else None
     started = time.monotonic()
     wide_searches = 0
     for placed, i in enumerate(sorted(free, key=lambda i: (pos[i, 1], pos[i, 0], pos[i, 2]))):
@@ -978,6 +986,9 @@ def _place_around_banks(netlist: _Netlist, sizes: np.ndarray, gates: list[Compon
         target = tuple(int(v) for v in pos[i])
         # A macro has pins on its faces: not up against the output row.
         low_z = channel if gates[i].type == ComponentType.CUSTOM else 0
+        fp = gates[i].footprint
+        if strip_z is not None and gates[i].type == ComponentType.CUSTOM and fp.width >= _STRIP_ASPECT * fp.depth:
+            target = (target[0], target[1], strip_z)
         wanted = (max(target[0], 0), max(target[1], 0), max(target[2], low_z))
         # Dense areas can use up a small search long before the domain is full.
         spot = None
