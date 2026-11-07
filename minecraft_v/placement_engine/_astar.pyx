@@ -427,7 +427,8 @@ cdef int HORIZ_RADIUS_MIN = 0
 cdef int Y_RADIUS_MIN = 0
 cdef object _init_done = False
 
-# Totals across searches in this process (see stats()).
+# Totals across searches in this process (see stats()). Searches can run in threads without the GIL and these are
+# plain unsynchronized counters, so with several at once they are approximate (for logs and tuning, never for results).
 cdef long long STAT_SEARCHES = 0, STAT_POPS = 0, STAT_PUSHES = 0, STAT_CELLS = 0
 cdef double STAT_LOAD_TIME = 0
 

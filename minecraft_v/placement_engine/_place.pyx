@@ -3,7 +3,8 @@
 
 The Python in poisson.py stays the definition of what these compute (tests run both and compare). Results match it
 exactly: the best-first search pops (cost, x, y, z) in the same order as heapq does with (cost, (x, y, z)) entries, and
-every coordinate and cost is a whole number, so the float comparisons come out the same.
+every coordinate and cost is a whole number, so the float comparisons come out the same. The field math is
+deterministic on a machine, but may differ from the numpy fallback in the last bit where numpy's exp uses SIMD.
 """
 from libc.stdint cimport int64_t
 from libcpp cimport bool as cbool
@@ -130,6 +131,7 @@ cdef extern from *:
         double h[3] = {1, 1, 1};
         int threads = 1;
 
+        // An exception in a worker thread can't reach the caller: a bad_alloc there ends the process (std::terminate).
         template <class F> void parallel(int n, F f) const {
             int t = std::max(1, std::min(threads, n));
             if (t == 1) { f(0, n); return; }
@@ -254,6 +256,7 @@ cdef extern from *:
         std::vector<double> pin_off, weights;      // 3 per pin; 3
         std::vector<double> pin_grad;              // 3 per pin
         int threads = 1;
+        // An exception in a worker thread can't reach the caller: a bad_alloc there ends the process (std::terminate).
         template <class F> void parallel(int n, F f) const {
             int t = std::max(1, std::min(threads, n));
             if (t == 1) { f(0, n); return; }
@@ -266,7 +269,8 @@ cdef extern from *:
         }
         int n_nets() const { return (int)net_start.size() - 1; }
         // As _Netlist.wa_gradient, rounding step for step: per-net sums and per-component sums run in pin order (as
-        // np.bincount), and std::exp is the libm exp numpy uses.
+        // np.bincount), and std::exp is the libm exp. Results are deterministic on a machine, but may differ from the
+        // numpy fallback in the last bit on CPUs where numpy's own exp uses SIMD.
         std::vector<double> pin_g;  // per pin, axis, sign
         std::vector<double> comp_sum;
         void gradient(const double* pos, int m, const double* gamma, double* grad) {

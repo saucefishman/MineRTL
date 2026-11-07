@@ -64,9 +64,15 @@ def _compiled(blocks: np.ndarray, *functions: str) -> bool:
     return _signals is not None and all(hasattr(_signals, f) for f in functions) and blocks.dtype == np.uint32 and blocks.flags.c_contiguous and blocks.size > 0
 
 
+def _check_ids(blocks: np.ndarray, size: int) -> None:
+    """The compiled helpers index their tables unchecked: every id in blocks must be below size."""
+    assert int(blocks.max()) < size, f"block id {int(blocks.max())} outside a table of {size}"
+
+
 def lookup(blocks: np.ndarray, table: np.ndarray) -> np.ndarray:
     """table[blocks], table a uint8 array per palette entry."""
     if _compiled(blocks, "table_gather"):
+        _check_ids(blocks, len(table))
         return _signals.table_gather(blocks, np.ascontiguousarray(table, dtype=np.uint8))
     return table[blocks]
 
@@ -75,6 +81,7 @@ def cells_where(blocks: np.ndarray, table: np.ndarray, skip: Iterable[Box] = ())
     """np.argwhere(table[blocks]) less the cells in skip's boxes, as an n x 3 int64 array in argwhere's order."""
     skip = [(tuple(int(c) for c in lo), tuple(int(c) for c in hi)) for lo, hi in skip]
     if _compiled(blocks, "table_where"):
+        _check_ids(blocks, len(table))
         return _signals.table_where(blocks, np.ascontiguousarray(table, dtype=np.uint8), skip)
     mask = np.asarray(table, dtype=bool)[blocks]
     for lo, hi in skip:
@@ -153,6 +160,7 @@ class BulkRegion(Region):
         palette, blocks = self._Region__palette, self._Region__blocks
         kernel = _compiled(blocks, "used_ids", "remap_ids")
         if kernel:
+            _check_ids(blocks, len(palette))
             used = _signals.used_ids(blocks, len(palette))
         else:
             used = np.zeros(len(palette), dtype=bool)

@@ -728,7 +728,7 @@ def _find_repeated_cached(comp: ComponentList, max_fanout: int, min_cells: int,
     try:
         with open(path, "rb") as f:
             return pickle.load(f)
-    except (OSError, EOFError, pickle.UnpicklingError, AttributeError, ImportError):
+    except Exception:  # a stale or damaged pickle (a moved class, a changed layout) must not break a build: rebuild it
         pass
     t0 = time.monotonic()
     classes = find_repeated(comp, max_fanout, min_cells, _REPEATS_TIME_LIMIT)

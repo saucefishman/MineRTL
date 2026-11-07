@@ -1326,6 +1326,7 @@ cdef extern from *:
     #include <thread>
     // Whole-array passes over a region's palette ids, split across threads: they're memory bound, and the array has
     // a cell per block of the build. Each writes what the single loop it replaces would, in the same order.
+    // An exception in a worker thread can't reach the caller: a bad_alloc there ends the process (std::terminate).
     template <class F> static void bulk_parallel(int64_t n, int64_t min_per, F f) {
         int t = (int)std::min<int64_t>(std::min(64u, std::max(1u, std::thread::hardware_concurrency())), std::max<int64_t>(1, n / min_per));
         if (t <= 1) { f(0, n, 0); return; }
