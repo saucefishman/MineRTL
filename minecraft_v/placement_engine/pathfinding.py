@@ -505,13 +505,21 @@ def _find_wire_path(
             if walk_at(cand):
                 seeds.append(cand)
     # Seeds in order, with their group (0 = start seeds, then one per tree seed): existing own-net wire cells are
-    # valid branch seeds.
-    seed_ids, seed_nodes, seed_groups, group_best_h, best = _astar.prepare_seeds(
-        seeds, tree_seeds, solid, tuple(bounds), pos_ids, pos_list, h_list, move_cache, gx, gy, gz, x_h_factor,
-        seed_depths or {})
+    # valid branch seeds. The World keeps their ids, which the search's cells continue from pos_list's, unless moves
+    # go through Python (a grid check, congestion).
+    in_world = congestion_cost is None and _ASTAR_GRID != "check"
+    if in_world:
+        n_seeds, seed_nodes, seed_groups, group_best_h, best_id, best_h, best_seed = first_world[0].add_seeds(
+            seeds, tree_seeds, seed_depths or {})
+    else:
+        seed_ids, seed_nodes, seed_groups, group_best_h, best = _astar.prepare_seeds(
+            seeds, tree_seeds, solid, tuple(bounds), pos_ids, pos_list, h_list, move_cache, gx, gy, gz, x_h_factor,
+            seed_depths or {})
+        n_seeds, best_id, best_seed = len(seeds), seed_ids[best], seeds[best]
+        best_h = h_list[best_id]
     if start_depth:
         seed_nodes = [n | (start_depth << _SIG_SHIFT) if g == 0 else n for n, g in zip(seed_nodes, seed_groups)]
-    if not seeds:
+    if not n_seeds:
         raise ValueError(f"No walkable cell near start {start} for net {net_id}")
 
     # Goal cells: goal exclusion already removed from effective_protected above,
@@ -523,13 +531,12 @@ def _find_wire_path(
     if not goal_set:
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
 
-    goal_ids = {_pid(gc) for gc in goal_set}
+    goal_ids = {first_world[0].cell_id(gc) if in_world else _pid(gc) for gc in goal_set}
 
     def node_str(node: int) -> str:
         return str((pos_list[node >> _NODE_SHIFT], node & _SNAP_MASK))
 
-    best_node = seed_ids[best] << _NODE_SHIFT
-    best_h: int = h_list[seed_ids[best]]
+    best_node = best_id << _NODE_SHIFT
     group_max_f: list[int] = [max(gh, _ROUTE_BUDGET_FLOOR) * _ROUTE_BUDGET_FACTOR * budget for gh in group_best_h]
     initial_group_best_h = list(group_best_h)
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
@@ -554,7 +561,7 @@ def _find_wire_path(
         reached, best_node, _, early_stop_reason, came_from = _run_search(
             search_args, net_id, next_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
     if _SEARCH_LOG:
-        _log_search(net_id, seeds[best], goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
+        _log_search(net_id, best_seed, goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -577,17 +584,7 @@ def _find_wire_path(
     if goal_walkable and pos_of(reached >> _NODE_SHIFT) != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {pos_of(reached >> _NODE_SHIFT)}")
 
-    path: list[tuple[int, int, int]] = []
-    back_visited = set()
-    cur = reached
-    while cur != _NO_PARENT:
-        if cur in back_visited:
-            raise ValueError("Path tracing resulted in loop")
-        cur_pos = pos_of(cur >> _NODE_SHIFT)
-        path.append(cur_pos)
-        back_visited.add(cur)
-        cur = came_from[cur]
-    path.reverse()
+    path: list[tuple[int, int, int]] = came_from.path(reached, pos_list)
     came_from.release()
     if not tree_seeds and path[0] != start:
         raise ValueError(f"Path for net {net_id} does not begin at start {start}; begins at {path[0]}")

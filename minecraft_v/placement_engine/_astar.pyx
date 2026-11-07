@@ -537,6 +537,27 @@ cdef class CameFrom:
         cdef int x = self.cells.x[cid], y = self.cells.y[cid], z = self.cells.z[cid]
         return (x, y, z)
 
+    def path(self, long long reached, list pos_list):
+        """The cells from a seed to reached, by parent links. Raises ValueError on a loop."""
+        cdef FlatMap[char] seen
+        cdef int ins, cid
+        cdef Py_ssize_t n_list = len(pos_list)
+        cdef long long cur = reached
+        cdef NodeSlot* ni
+        cdef list out = []
+        while cur != -1:
+            seen.get(<unsigned long long>cur, &ins)
+            if not ins:
+                raise ValueError("Path tracing resulted in loop")
+            cid = <int>(cur >> NODE_SHIFT)
+            out.append(pos_list[cid] if cid < n_list else (self.cells.x[cid], self.cells.y[cid], self.cells.z[cid]))
+            ni = self.nodes.find(cur)
+            if ni == NULL or ni.parent < 0:
+                raise KeyError(cur)
+            cur = self.nodes.parent_of(ni)
+        out.reverse()
+        return out
+
     def release(self):
         """Done with pos(): the cells' storage goes to the next search."""
         if self.cells is not None:
@@ -854,6 +875,9 @@ cdef class World:
     cdef _OwnCells own              # the keepout's _own cells (shared, read only)
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint pids_seeded
+    # Cells add_seeds and cell_id gave ids, past pos_list's, until search() moves them into its vectors.
+    cdef vector[int] pre_x, pre_y, pre_z
+    cdef vector[long long] pre_h
     cdef bint grid_check
     # Set while _Cells.load runs: moves, -4 sides and new cells go straight into its vectors.
     cdef vector[Move]* out
@@ -1296,6 +1320,83 @@ cdef class World:
             self.h_list.append(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
             self.move_cache.append(None)
         return i
+
+    cdef int pre_id(self, int x, int y, int z) except -1:
+        cdef int ins
+        cdef int* slot = self.pid_map.get(cell_key(x, y, z), &ins)
+        if ins:
+            slot[0] = <int>(len(self.pos_list) + self.pre_x.size())
+            self.pre_x.push_back(x)
+            self.pre_y.push_back(y)
+            self.pre_z.push_back(z)
+            self.pre_h.push_back(abs(x - self.gx) * self.x_h_factor + abs(y - self.gy) * 4 + abs(z - self.gz))
+        return slot[0]
+
+    def add_seeds(self, list seeds, tree_seeds, dict seed_depths):
+        """prepare_seeds with the ids kept here instead of in pos_ids / pos_list, which have to be empty: seeds (the
+        start's), then tree seeds not among them, solid or out of bounds. Returns (seed count, seed nodes, seed groups,
+        group best h, best seed's id, its h, its cell)."""
+        if self.pos_list or self.pids_seeded:
+            raise ValueError("add_seeds: the World's cells must be new")
+        cdef int n_start = len(seeds), n = 0, x, y, z, cid, depth, group, best = -1
+        cdef long long h, best_h = 1LL << 60
+        cdef tuple ts
+        cdef list nodes = [], groups = [], group_best_h = [10 ** 9]
+        cdef bint fresh
+        cdef int before
+        best_pos = None
+        for i, ts in enumerate(seeds):
+            x, y, z = ts
+            before = <int>self.pre_x.size()
+            cid = self.pre_id(x, y, z)
+            self.add_seed(nodes, groups, group_best_h, cid, 0, 0, &best, &best_h)
+            if best == cid:
+                best_pos = ts
+        if tree_seeds:
+            for ts in tree_seeds:
+                x, y, z = ts
+                if not (self.min_x <= x <= self.max_x and self.min_y <= y <= self.max_y and self.min_z <= z <= self.max_z):
+                    continue
+                if self.pid_map.find(cell_key(x, y, z)) != NULL or self.base(x, y, z) & F_SOLID:
+                    continue
+                cid = self.pre_id(x, y, z)
+                group_best_h.append(10 ** 9)
+                depth = min(<int>seed_depths.get(ts, 0), 15)
+                self.add_seed(nodes, groups, group_best_h, cid, depth, len(group_best_h) - 1, &best, &best_h)
+                if best == cid:
+                    best_pos = ts
+        return len(nodes), nodes, groups, group_best_h, best, best_h, best_pos
+
+    cdef int add_seed(self, list nodes, list groups, list group_best_h, int cid, int depth, int group, int* best,
+                      long long* best_h) except -1:
+        cdef long long h = self.pre_h[cid - len(self.pos_list)]
+        nodes.append((<long long>cid << NODE_SHIFT) | (<long long>depth << SIG_SHIFT))
+        groups.append(group)
+        if h < group_best_h[group]:
+            group_best_h[group] = h
+        if h < best_h[0]:
+            best_h[0] = h
+            best[0] = cid
+        return 0
+
+    def cell_id(self, tuple pos):
+        """A cell's id, as add_seeds gives them."""
+        return self.pre_id(pos[0], pos[1], pos[2])
+
+    cdef int move_pre(self, _Cells cells) except -1:
+        """add_seeds' and cell_id's cells into the search's vectors, after pos_list's."""
+        cdef size_t i
+        for i in range(self.pre_x.size()):
+            cells.x.push_back(self.pre_x[i])
+            cells.y.push_back(self.pre_y[i])
+            cells.z.push_back(self.pre_z[i])
+            cells.h.push_back(self.pre_h[i])
+            cells.cm.push_back(_NO_MOVES)
+        self.pre_x.clear()
+        self.pre_y.clear()
+        self.pre_z.clear()
+        self.pre_h.clear()
+        return 0
 
     cdef int seed_pids(self) except -1:
         """The cells Python has ids for, once, before the first cell's moves go in the vectors."""
@@ -1990,6 +2091,8 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     max_f = py_max_f
 
     cells.sync(pos_list, h_list)
+    if world is not None:
+        world.move_pre(cells)
     for g in goal_ids:
         if <Py_ssize_t>is_goal.size() <= g:
             is_goal.resize(g + 1, 0)
