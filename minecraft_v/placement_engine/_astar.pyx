@@ -1239,6 +1239,10 @@ cdef class World:
     cdef inline bint walkable(self, int x, int y, int z) except -1 nogil:
         return self.walkable_ex(x, y, z, 0, 0, 0, False)
 
+    def walkable_at(self, tuple pos):
+        """_find_wire_path's walkable(pos): no exempt cell."""
+        return self.walkable(pos[0], pos[1], pos[2])
+
     cdef bint walkable_ex(self, int x, int y, int z, int ex, int ey, int ez, bint has_exempt) except -1 nogil:
         if self.eprot_at(x, y, z) or self.efp(x, y, z):
             return False

@@ -14,6 +14,9 @@ from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NO
     _Y_RADIUS_MIN, _REPEATER_INTERVAL
 
 
+_FACING = [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS]
+
+
 class RouteTimeout(ValueError):
     """A* gave up because its time_limit expired (as opposed to exhausting the search)."""
 
@@ -296,8 +299,8 @@ def _wire_walkable(
 
     footprint_blocked minus footprint_relief exempts cells from the neighbour wire/torch check.
 
-    Still used for _find_wire_path's seed/goal checks; during the search the kernel's
-    World.wire_walkable is the maintained version (change both when the rule changes)."""
+    The rule in Python, for reading: searches use the kernel's World.wire_walkable (change both when the rule
+    changes)."""
     if not isinstance(blocks, _BlockIndex):
         blocks = _BlockIndex(blocks)
     wire, torch, repeater = blocks.wire, blocks.torch, blocks.repeater
@@ -445,29 +448,10 @@ def _find_wire_path(
     # Effective footprint blocking = footprint_blocked minus fp_relief. Kept as the two sets
     # (footprint_blocked can be ~200k cells; copying it per search dominated big designs).
 
-    # Workspace is static during a search, so per-cell walkability is cached. A* asks
-    # about the same cell many times (multiple local snapshots, multiple move types).
-    walk_cache: dict[tuple[tuple[int, int, int], frozenset[tuple[int, int, int]]], bool] = {}
-    _no_exempt: frozenset[tuple[int, int, int]] = frozenset()
     block_index = workspace.block_index() if hasattr(workspace, "block_index") else _BlockIndex(workspace)
     grid = getattr(block_index, "grid", None)
     ix_non_air, ix_wire, ix_torch, ix_repeater = grid.kind_sets() if grid is not None else (
         block_index.non_air, block_index.wire, block_index.torch, block_index.repeater)
-
-    def walkable(
-            pos: tuple[int, int, int],
-            exempt: frozenset[tuple[int, int, int]] = _no_exempt,
-    ) -> bool:
-        if pos in effective_protected or (pos in footprint_blocked and pos not in fp_relief):
-            return False
-        key = (pos, exempt)
-        if key not in walk_cache:
-            walk_cache[key] = _wire_walkable(
-                block_index, solid, dust_owner, pos, net_id, bounds, exempt_foreign=exempt,
-                inverted_cells=inverted_cells, footprint_blocked=footprint_blocked,
-                footprint_relief=fp_relief,
-            )
-        return walk_cache[key]
 
     def heuristic(pos: tuple[int, int, int]) -> int:
         dx = abs(pos[0] - goal[0]) * x_h_factor
@@ -491,14 +475,34 @@ def _find_wire_path(
             move_cache.append(None)
         return i
 
+    def make_world():
+        """The kernel's move generation over this search's world."""
+        eprot, prot = _keepout_spec(effective_protected), _keepout_spec(protected)
+        if eprot is None or prot is None or not isinstance(dust_owner, dict):
+            raise TypeError("the A* kernel reads protected cells as a set or a _ForeignKeepout and dust_owner as a dict, "
+                            f"not {type(effective_protected).__name__}, {type(protected).__name__}, {type(dust_owner).__name__}")
+        return _astar.World(
+            ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
+            goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,
+            terminal_positions, workspace, GLASS, _FACING,
+            pos_ids, pos_list, h_list, move_cache, pending_sinks,
+            getattr(block_index, "grid", None), _ASTAR_GRID == "check")
+
+    # The first search's World answers walkable() for the start and goal too: the same rule, compiled.
+    first_world = [make_world()]
+    walk_at = first_world[0].walkable_at
+
+    def next_world():
+        return first_world.pop() if first_world else make_world()
+
 # Seed cells: prefer start itself; fall back to neighbors when blocked
     seeds: list[tuple[int, int, int]] = []
-    if walkable(start):
+    if walk_at(start):
         seeds.append(start)
     else:
         for ddx, ddy, ddz in _DIRS_6:
             cand = (start[0] + ddx, start[1] + ddy, start[2] + ddz)
-            if walkable(cand):
+            if walk_at(cand):
                 seeds.append(cand)
     # Seeds in order, with their group (0 = start seeds, then one per tree seed): existing own-net wire cells are
     # valid branch seeds.
@@ -513,7 +517,8 @@ def _find_wire_path(
     # Goal cells: goal exclusion already removed from effective_protected above,
     # so walkable() correctly admits the goal and its approach cells.
     goal_set: set[tuple[int, int, int]] = set()
-    if walkable(goal):
+    goal_walkable = walk_at(goal)
+    if goal_walkable:
         goal_set.add(goal)
     if not goal_set:
         raise ValueError(f"No walkable cell near goal {goal} for net {net_id}")
@@ -530,37 +535,24 @@ def _find_wire_path(
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
                    weight, time_limit, pos_list, h_list, None, congestion_cost, goal_depth)
 
-    def make_world():
-        """The kernel's move generation over this search's world."""
-        eprot, prot = _keepout_spec(effective_protected), _keepout_spec(protected)
-        if eprot is None or prot is None or not isinstance(dust_owner, dict):
-            raise TypeError("the A* kernel reads protected cells as a set or a _ForeignKeepout and dust_owner as a dict, "
-                            f"not {type(effective_protected).__name__}, {type(protected).__name__}, {type(dust_owner).__name__}")
-        return _astar.World(
-            ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
-            goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,
-            terminal_positions, workspace, GLASS, [_DELTA_TO_FACING[d] for d in _HORIZ_DIRS],
-            pos_ids, pos_list, h_list, move_cache, pending_sinks,
-            getattr(block_index, "grid", None), _ASTAR_GRID == "check")
-
     search_started = time.perf_counter()
     # Most of a long search's expansions are its many states per cell (snapshots, signal depths): the first few of
     # a cell almost always route as well. A search that fails that way searches again with all of them, unless
     # it's a tight first try, whose failure only means ripping what's around the sink and trying again, or it ran
     # out of time, which a second search would only spend again.
     reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(
-        search_args, net_id, make_world, stagnation=stagnation, budget=budget, cell_cap=_ROUTE_CELL_STATES)
+        search_args, net_id, next_world, stagnation=stagnation, budget=budget, cell_cap=_ROUTE_CELL_STATES)
     timed_out = early_stop_reason is not None and early_stop_reason.startswith("timeout")
     if reached is None and _ROUTE_CELL_STATES and stagnation < 0 and not timed_out:
         group_best_h[:] = initial_group_best_h
         reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(
-            search_args, net_id, make_world, stagnation=stagnation, budget=budget)
+            search_args, net_id, next_world, stagnation=stagnation, budget=budget)
     if reached is None and early_stop_reason is None and h_radius_pruned:
         # The open list ran dry only because the h-radius cull discarded detours (typically a
         # blocked approach close to the goal): search again without the cull.
         group_best_h[:] = initial_group_best_h
         reached, best_node, _, early_stop_reason, came_from = _run_search(
-            search_args, net_id, make_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
+            search_args, net_id, next_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
     if _SEARCH_LOG:
         _log_search(net_id, seeds[best], goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
 
@@ -582,7 +574,7 @@ def _find_wire_path(
         """A successful kernel search leaves the cells it made in its own vectors, not pos_list."""
         return pos_list[cid] if cid < len(pos_list) else came_from.pos(cid)
 
-    if walkable(goal) and pos_of(reached >> _NODE_SHIFT) != goal:
+    if goal_walkable and pos_of(reached >> _NODE_SHIFT) != goal:
         raise ValueError(f"No route reached goal {goal} for net {net_id}; stopped at {pos_of(reached >> _NODE_SHIFT)}")
 
     path: list[tuple[int, int, int]] = []
