@@ -20,7 +20,7 @@ from litemapy import BlockState, Region
 from .block_utils import _TORCH_IDS, _is_redstone_wire, _is_repeater, _is_torch, _block_str
 from .constants import _HORIZ_DIRS, REDSTONE
 from .pathfinding import IndexedWorkspace, _BlockIndex, _astar, _kind_of
-from .wire import LayConflict, _place_support
+from .wire import LayConflict, _check_slope_notch, _place_support
 
 _MISSING = object()
 
@@ -158,10 +158,12 @@ class JournalingWorkspace:
         if cache[0] is not palette:  # saving a schematic replaces the palette
             cache = self._lay_cache = (palette, {}, [])
         # cache: palette, id(block) -> (block, its palette index) found when first written, per index _dust_class
-        return _astar.DustLayer(
+        layer = _astar.DustLayer(
             grid, blocks, palette, cache[2], cache[1], rec.journals[active], writer, inner, solid, dust_owner, active,
             net_id, inner._write, LayConflict, lambda pos: _place_support(self, solid, dust_owner, net_id, pos, support),
             _dust_class, REDSTONE, support, _MISSING, _kind_of(REDSTONE.id), _kind_of(support.id), solid._grid_bit)
+        layer.set_notch_fallback(lambda prev, cell: _check_slope_notch(self, solid, prev, cell))
+        return layer
 
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
