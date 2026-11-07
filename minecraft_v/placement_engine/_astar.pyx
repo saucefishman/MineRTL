@@ -12,7 +12,7 @@ from posix.time cimport clock_gettime, timespec, CLOCK_MONOTONIC
 cimport cython
 import time
 import numpy as np
-from minecraft_v.progress import pulse
+from minecraft_v.progress import pulse, phase
 
 cdef extern from * nogil:
     """
@@ -655,7 +655,15 @@ cdef class _OwnCells:
     cdef FlatMap[char] cells
 
     def __init__(self, own):
+        """own: a set of cells, or builder._KeySlice (sorted cell keys, which are cell_key's)."""
         cdef int ins
+        cdef const int64_t[::1] keys
+        cdef Py_ssize_t i
+        if not PyAnySet_Check(own):
+            keys = own.keys
+            for i in range(keys.shape[0]):
+                self.cells.get(<unsigned long long>keys[i], &ins)[0] = 1
+            return
         for pos in own:
             self.cells.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
 
@@ -791,21 +799,40 @@ cdef class CellGrid:
             oid = self.owner_ids[value] = 1 + len(self.owner_ids)
         return oid
 
-    cdef int load_keepout(self, dict count) except -1:
-        """Mirrors a keepout count dict; the bits of a previous one go."""
+    cdef int load_keepout(self, count) except -1:
+        """Mirrors a keepout count (a dict, or builder._KeyCounts); the bits of a previous one go."""
         if count is self.keep_count:
             return 0
-        cdef uint16_t* w
         if self.keep_count is not None:
-            for pos in self.keep_count:
-                w = self.word(pos[0], pos[1], pos[2])
-                if w != NULL:
-                    w[0] &= ~(G_KEEP1 | G_KEEP2)
+            self.mark_keepout(self.keep_count, False)
         self.keep_count = count
-        for pos, n in count.items():
-            w = self.word(pos[0], pos[1], pos[2])
-            if w != NULL and n:
-                w[0] |= G_KEEP1 | (G_KEEP2 if n >= 2 else 0)
+        self.mark_keepout(count, True)
+        return 0
+
+    cdef int mark_keepout(self, count, bint on) except -1:
+        cdef uint16_t* w
+        if isinstance(count, dict):
+            for pos, n in (<dict>count).items():
+                w = self.word(pos[0], pos[1], pos[2])
+                if w != NULL and n:
+                    if on:
+                        w[0] |= G_KEEP1 | (G_KEEP2 if n >= 2 else 0)
+                    else:
+                        w[0] &= ~(G_KEEP1 | G_KEEP2)
+            return 0
+        # Sorted cell keys with counts: the cells' grid indexes in one pass, the bits in another.
+        keys = count.keys
+        x = (keys >> 36) - ((1 << 17) - GRID_MARGIN)
+        y = ((keys >> 18) & 0x3FFFF) - ((1 << 17) - GRID_MARGIN)
+        z = (keys & 0x3FFFF) - ((1 << 17) - GRID_MARGIN)
+        inside = (x >= 0) & (x < self.nx) & (y >= 0) & (y < self.ny) & (z >= 0) & (z < self.nz)
+        at = (x * self.sx + y * self.sy + z)[inside]
+        cdef size_t cells = <size_t>(self.sx * self.nx)
+        flat = np.asarray(<uint16_t[:cells]>self.g)
+        if on:
+            flat[at] |= np.where(count.counts[inside] >= 2, G_KEEP1 | G_KEEP2, G_KEEP1).astype(np.uint16)
+        else:
+            flat[at] &= np.uint16(~(G_KEEP1 | G_KEEP2) & 0xFFFF)
         return 0
 
 
@@ -938,7 +965,9 @@ cdef class World:
                           and self.eprot[1] is self.prot[1] and self.eprot[2] is self.prot[2]
                           and self.eprot[5] is self.prot[5] and self.eprot[6] is self.prot[6])
         if self.keep_fast:
-            grid.load_keepout(self.eprot[1])
+            if self.eprot[1] is not grid.keep_count:
+                with phase("[keepout] load"):
+                    grid.load_keepout(self.eprot[1])
             if grid.own_obj is not self.eprot[2]:  # a net's searches share one; never changed, as other nets' run alongside
                 grid.own_cells = _OwnCells(self.eprot[2])
                 grid.own_obj = self.eprot[2]
@@ -1006,8 +1035,8 @@ cdef class World:
         """A keepout's answer for a cell its count dict has, after excluded: the halo."""
         cdef object spec = self.prot if shift else self.eprot
         key = (x, y, z)
-        cdef object n = (<dict>spec[5]).get(key, 0)
-        return n > 1 or (n == 1 and not PySet_Contains(spec[6], key))
+        cdef object n = spec[5].get(key, 0)
+        return n > 1 or (n == 1 and key not in spec[6])
 
     cdef inline bint keep_at(self, uint16_t g, int x, int y, int z, int shift) except -1 nogil:
         """_ForeignKeepout.__contains__, for a cell in the grid."""
@@ -1055,13 +1084,13 @@ cdef class World:
         # _ForeignKeepout.__contains__
         if PySet_Contains(spec[4], key):
             return True
-        n = (<dict>spec[1]).get(key, 0)
-        if n == 0 or (n == 1 and PySet_Contains(spec[2], key)):
+        n = spec[1].get(key, 0)
+        if n == 0 or (n == 1 and key in spec[2]):
             return False
         if not PySet_Contains(spec[3], key):
             return True
-        n = (<dict>spec[5]).get(key, 0)
-        return n > 1 or (n == 1 and not PySet_Contains(spec[6], key))
+        n = spec[5].get(key, 0)
+        return n > 1 or (n == 1 and key not in spec[6])
 
     cdef unsigned int probe(self, int x, int y, int z, unsigned int bit) except? 0xFFFFFFFF:
         cdef uint16_t* w

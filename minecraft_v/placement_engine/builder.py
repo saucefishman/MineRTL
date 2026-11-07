@@ -865,6 +865,64 @@ def _count_cells(per_net: dict[str, set[tuple[int, int, int]]]) -> dict[tuple[in
     return count
 
 
+# The kernel's cell_key packing (_astar.pyx): each coordinate plus 2**17 in 18 bits. Sorted by it, cells are in
+# (x, y, z) order, and a key fits an int64.
+_KEY_BIAS = 1 << 17
+
+
+def _cell_key(pos) -> int:
+    """pos's cell key, or -1 if it is outside what the packing holds (no cell of a keepout is)."""
+    x, y, z = pos
+    if not (-_KEY_BIAS <= x < _KEY_BIAS and -_KEY_BIAS <= y < _KEY_BIAS and -_KEY_BIAS <= z < _KEY_BIAS):
+        return -1
+    return ((x + _KEY_BIAS) << 36) | ((y + _KEY_BIAS) << 18) | (z + _KEY_BIAS)
+
+
+def _cell_of_key(key: int) -> tuple[int, int, int]:
+    return ((key >> 36) - _KEY_BIAS, ((key >> 18) & 0x3FFFF) - _KEY_BIAS, (key & 0x3FFFF) - _KEY_BIAS)
+
+
+class _KeyCounts:
+    """A per-cell count as sorted cell keys and their counts, read like the dict _count_cells makes.
+    Counts above 2 read as 2: a keepout only tells none, one net's and several nets'."""
+    __slots__ = ("keys", "counts")
+
+    def __init__(self, keys: np.ndarray, counts: np.ndarray):
+        self.keys, self.counts = keys, counts  # int64 sorted, uint8
+
+    def get(self, pos, default=0):
+        key = _cell_key(pos)
+        i = int(np.searchsorted(self.keys, key))
+        if i < len(self.keys) and self.keys[i] == key:
+            return int(self.counts[i])
+        return default
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    def __iter__(self):
+        return (_cell_of_key(int(k)) for k in self.keys)
+
+
+class _KeySlice:
+    """One net's cells as a sorted run of cell keys, read like the set _terminal_keepout makes."""
+    __slots__ = ("keys",)
+
+    def __init__(self, keys: np.ndarray):
+        self.keys = keys  # int64 sorted
+
+    def __contains__(self, pos) -> bool:
+        key = _cell_key(pos)
+        i = int(np.searchsorted(self.keys, key))
+        return i < len(self.keys) and self.keys[i] == key
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    def __iter__(self):
+        return (_cell_of_key(int(k)) for k in self.keys)
+
+
 class _ForeignKeepout:
     """_compute_net_protected(net_id, ...) as a lazy view over a per-cell net count.
 
@@ -872,14 +930,17 @@ class _ForeignKeepout:
     `pos in protected` (and `protected - cells`, as _find_wire_path uses it) without copying.
     Subtraction (goal relief) never frees a cell in another net's terminal halo: wire there
     would make that terminal unreachable, e.g. a slope into a goal two cells from another pin.
+
+    The count and halo are dicts, or _KeyCounts; own and own_halo are sets, or _KeySlice (the kernel reads
+    both forms).
     """
     __slots__ = ("_count", "_own", "_excluded", "_extra", "_halo", "_own_halo")
 
-    def __init__(self, count: dict[tuple[int, int, int], int], own: set[tuple[int, int, int]],
+    def __init__(self, count: dict[tuple[int, int, int], int] | _KeyCounts, own: set[tuple[int, int, int]] | _KeySlice,
                  excluded: frozenset[tuple[int, int, int]] = frozenset(),
                  extra: frozenset[tuple[int, int, int]] = frozenset(),
-                 halo: dict[tuple[int, int, int], int] | None = None,
-                 own_halo: set[tuple[int, int, int]] = frozenset()):
+                 halo: dict[tuple[int, int, int], int] | _KeyCounts | None = None,
+                 own_halo: set[tuple[int, int, int]] | _KeySlice = frozenset()):
         self._count = count
         self._own = own
         self._excluded = excluded
@@ -912,20 +973,101 @@ class _ForeignKeepout:
         return (pos for pos in self._count if pos in self)
 
 
+def _stencil(cells: set[tuple[int, int, int]]) -> np.ndarray:
+    return np.array(sorted(cells), dtype=np.int64).reshape(-1, 3)
+
+
+# The terminal functions' cells as offsets from the terminal (they only translate): the keepout, the halo of
+# a terminal with no approach, and what each step out along an approach corridor adds (the terminal's halo
+# plus its own cell). tests/test_router.py checks these against the functions.
+_KEEPOUT_STENCIL = _stencil(_terminal_keepout({(0, 0, 0)}))
+_HALO_STENCIL = _stencil(_terminal_halo({(0, 0, 0)}, {}))
+_HALO_STEP_STENCIL = _stencil({(0, 0, 0)} | set(map(tuple, _HALO_STENCIL.tolist())))
+
+
 class _KeepoutMap:
-    """Per-net terminal keepouts, counted per cell (see _ForeignKeepout)."""
+    """Per-net terminal keepouts, counted per cell (see _ForeignKeepout).
+
+    Built as arrays: every terminal's stencils as keys of (net, cell), sorted once, so each net's own
+    cells and own halo are runs of sorted cell keys, and the counts are runs of equal cells.
+    """
 
     def __init__(self, all_terminals: dict[str, set[tuple[int, int, int]]],
                  terminal_approach: dict[tuple[int, int, int], tuple[int, int]] | None = None):
         approach = terminal_approach or {}
-        self._own_halo = {net_id: _terminal_halo(t, approach) for net_id, t in all_terminals.items()}
-        self._halo = _count_cells(self._own_halo)
-        self._own = {net_id: _terminal_keepout(t) | self._own_halo[net_id] for net_id, t in all_terminals.items()}
-        self._count = _count_cells(self._own)
+        self._index = {net_id: i for i, net_id in enumerate(all_terminals)}
+        n_nets = len(self._index)
+        cells: list[tuple[int, int, int]] = []
+        net_of: list[int] = []
+        for i, ts in enumerate(all_terminals.values()):
+            cells.extend(ts)
+            net_of.extend([i] * len(ts))
+        t = np.array(cells, dtype=np.int64).reshape(-1, 3)
+        net = np.array(net_of, dtype=np.int64)
+        steered = np.fromiter((c in approach for c in cells), dtype=bool, count=len(cells))
+        ahead = np.array([approach[c] for c, s in zip(cells, steered) if s], dtype=np.int64).reshape(-1, 2)
+        far = t[steered] + _APPROACH_CORRIDOR * np.stack([ahead[:, 0], np.zeros(len(ahead), np.int64), ahead[:, 1]], axis=1)
+        # A cell's index within the terminals' box, so a (net, cell) pair is one int64 and sorts by net, then x, y, z.
+        pad = int(np.abs(np.concatenate([_KEEPOUT_STENCIL, _HALO_STENCIL, _HALO_STEP_STENCIL])).max())
+        lo = np.concatenate([t, far]).min(axis=0) - pad if len(t) else np.zeros(3, np.int64)
+        hi = np.concatenate([t, far]).max(axis=0) + pad if len(t) else np.zeros(3, np.int64)
+        if (lo < -_KEY_BIAS).any() or (hi >= _KEY_BIAS).any():
+            raise ValueError(f"terminals reach {lo.tolist()}..{hi.tolist()}, beyond what a cell key holds")
+        ex, ey, ez = (hi - lo + 1).tolist()
+        vol = ex * ey * ez
+        if (n_nets + 1) * vol * 2 >= 1 << 62:
+            raise ValueError(f"{n_nets} nets over {ex}x{ey}x{ez} cells overflow a (net, cell) key")
+        weights = np.array([ey * ez, ez, 1], dtype=np.int64)
+
+        def anchors(points: np.ndarray, nets: np.ndarray) -> np.ndarray:
+            return (nets * vol + (points - lo) @ weights) * 2
+
+        def around(points: np.ndarray, nets: np.ndarray, stencil: np.ndarray, halo: int) -> np.ndarray:
+            return (anchors(points, nets)[:, None] + (stencil @ weights * 2 + halo)[None, :]).ravel()
+
+        raw = [around(t, net, _KEEPOUT_STENCIL, 0), around(t, net, _HALO_STENCIL, 1)]
+        for k in range(1, _APPROACH_CORRIDOR + 1):
+            step = t[steered] + k * (far - t[steered]) // _APPROACH_CORRIDOR
+            raw.append(around(step, net[steered], _HALO_STEP_STENCIL, 1))
+        keys = np.concatenate(raw)
+        keys.sort()
+        keep = np.ones(len(keys), dtype=bool)
+        keep[1:] = keys[1:] != keys[:-1]
+        keys = keys[keep]
+        pairs = keys >> 1
+        first = np.ones(len(pairs), dtype=bool)
+        first[1:] = pairs[1:] != pairs[:-1]
+        own_pairs, halo_pairs = pairs[first], pairs[(keys & 1) == 1]
+
+        def cell_keys(pairs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            nets, local = np.divmod(pairs, vol)
+            x, rest = np.divmod(local, ey * ez)
+            y, z = np.divmod(rest, ez)
+            return nets, (((x + (lo[0] + _KEY_BIAS)) << 36) | ((y + (lo[1] + _KEY_BIAS)) << 18) | (z + (lo[2] + _KEY_BIAS)))
+
+        own_net, self._own_keys = cell_keys(own_pairs)
+        halo_net, self._halo_keys = cell_keys(halo_pairs)
+        bounds = np.arange(n_nets + 1)
+        self._own_off = np.searchsorted(own_net, bounds).tolist()
+        self._halo_off = np.searchsorted(halo_net, bounds).tolist()
+        # Counts: the own cells (flag 0) and halo cells (flag 1) sorted together, each run of equals one cell.
+        both = np.concatenate([self._own_keys * 2, self._halo_keys * 2 + 1])
+        both.sort()
+        starts = np.flatnonzero(np.concatenate([[True], both[1:] != both[:-1]])) if len(both) else both
+        runs = np.minimum(np.diff(np.append(starts, len(both))), 2).astype(np.uint8)
+        values = both[starts]
+        halo = (values & 1) == 1
+        self._count = _KeyCounts(values[~halo] >> 1, runs[~halo])
+        self._halo = _KeyCounts(values[halo] >> 1, runs[halo])
 
     def for_net(self, net_id: str) -> _ForeignKeepout:
-        return _ForeignKeepout(self._count, self._own.get(net_id, set()),
-                               halo=self._halo, own_halo=self._own_halo.get(net_id, set()))
+        i = self._index.get(net_id)
+        if i is None:
+            return _ForeignKeepout(self._count, _KeySlice(self._own_keys[:0]), halo=self._halo,
+                                   own_halo=_KeySlice(self._halo_keys[:0]))
+        return _ForeignKeepout(self._count, _KeySlice(self._own_keys[self._own_off[i]:self._own_off[i + 1]]),
+                               halo=self._halo,
+                               own_halo=_KeySlice(self._halo_keys[self._halo_off[i]:self._halo_off[i + 1]]))
 
 
 def _net_sort_key(
@@ -1880,7 +2022,8 @@ def _route_all_nets(
     keep_router: gets (router, jobs by key), for hold fixing to re-route.
     """
     inverted_cells = JournaledSet(rec, name="inverted")
-    keepouts = _KeepoutMap(all_terminals, terminal_approach)
+    with phase("[keepout] build"):
+        keepouts = _KeepoutMap(all_terminals, terminal_approach)
     macros = [p for p in placed if p.component.type == ComponentType.CUSTOM]
     walls = [p for p in placed if p.component.type == ComponentType.CUSTOM
              and (p.component.metadata.get("bank")
