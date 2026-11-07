@@ -2130,7 +2130,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef vector[char] explored_xyz
     cdef vector[char] is_goal
     cdef vector[int] taken
-    cdef vector[int] extras  # (ex, ey, ez) triples of this expansion's taken 2x slopes
+    cdef uint32_t ext  # the snapshot bits of this expansion's taken 2x slopes' mid cells, all inside the window
     cdef vector[int] expanded_head  # by cell: its latest Expanded, or -1
     cdef vector[Expanded] expanded
     cdef Expanded* xp
@@ -2316,7 +2316,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             STAT_CELLS += 1
         cmv = &cells.cm[cid]
         taken.clear()
-        extras.clear()
+        ext = 0
         for i in range(cmv.start, cmv.start + cmv.count):
             m = &cells.moves[i]
             if cur_snap & m.forbid:
@@ -2325,9 +2325,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 continue
             taken.push_back(i)
             if m.has_extra:
-                extras.push_back(m.ex)
-                extras.push_back(m.ey)
-                extras.push_back(m.ez)
+                ext |= snap_bit(m.ex, m.ey, m.ez)
         m4_side = -1
         for i in range(cmv.m4_start, cmv.m4_start + cmv.m4_count):
             if not cur_snap & cells.m4_sides[i].forbid:
@@ -2335,9 +2333,9 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 break
         # Re-centre the snapshot (plus current itself and the cells this expansion's moves
         # fill) onto each neighbour's window.
-        cb0 = cur_snap & 255
-        cb1 = (cur_snap >> 8) & 255
-        cb2 = cur_snap >> 16
+        cb0 = (cur_snap | ext) & 255
+        cb1 = ((cur_snap | ext) >> 8) & 255
+        cb2 = (cur_snap | ext) >> 16
         has_in_dir = e.parent != -1
         if has_in_dir:
             k = <int>(e.parent >> NODE_SHIFT)
@@ -2379,8 +2377,6 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             new_g = e.g + cost
             snap = (SHIFT_TABLES[m.shift][0][cb0] | SHIFT_TABLES[m.shift][1][cb1]
                     | SHIFT_TABLES[m.shift][2][cb2] | SHIFT_SELF[m.shift])
-            for i in range(0, <int>extras.size(), 3):
-                snap |= snap_bit(extras[i] - m.dx, extras[i + 1] - m.dy, extras[i + 2] - m.dz)
             if k == last and m4_side >= 0:
                 side = &cells.m4_sides[m4_side]
                 for i in range(side.start, side.start + 3 * side.count, 3):
