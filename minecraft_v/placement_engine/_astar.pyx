@@ -173,7 +173,7 @@ cdef extern from * nogil:
         FlatMap() {
             std::vector<std::vector<Slot>>& p = pool();
             if (!p.empty()) { slots.swap(p.back()); p.pop_back(); }
-            reset(1 << 12);
+            reset(1 << 6);  // a World has several, and most searches are small: they grow as they fill
         }
         ~FlatMap() {
             std::vector<std::vector<Slot>>& p = pool();
@@ -628,6 +628,17 @@ cdef inline bint fp_has(object fp, object key) except -1:
 
 
 @cython.final
+@cython.final
+cdef class _OwnCells:
+    """A keepout's _own cells as a map, read only once made."""
+    cdef FlatMap[char] cells
+
+    def __init__(self, own):
+        cdef int ins
+        for pos in own:
+            self.cells.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
+
+
 cdef class CellGrid:
     """One word per cell of what the searches read, mirrored from the router's containers.
 
@@ -645,6 +656,8 @@ cdef class CellGrid:
     cdef FlatMap[int] owner_map     # cell_key -> interned owner, 0 for none (no erase in FlatMap)
     cdef dict owner_ids
     cdef object keep_count
+    cdef object own_obj              # the last World's keepout _own set, and its cells as a map
+    cdef _OwnCells own_cells
     cdef object non_air, wire, torch, repeater, solid, dust_owner, inverted, fp, terminal
 
     def __cinit__(self):
@@ -838,7 +851,7 @@ cdef class World:
     cdef long long gsx, gsy
     cdef bint keep_fast, have_small, has_pending
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
-    cdef FlatMap[char] own_cells     # the keepout's _own cells
+    cdef _OwnCells own              # the keepout's _own cells (shared, read only)
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint pids_seeded
     cdef bint grid_check
@@ -902,8 +915,10 @@ cdef class World:
                           and self.eprot[5] is self.prot[5] and self.eprot[6] is self.prot[6])
         if self.keep_fast:
             grid.load_keepout(self.eprot[1])
-            for pos in self.eprot[2]:  # the World's own, not the grid's: searches for other nets run alongside
-                self.own_cells.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
+            if grid.own_obj is not self.eprot[2]:  # a net's searches share one; never changed, as other nets' run alongside
+                grid.own_cells = _OwnCells(self.eprot[2])
+                grid.own_obj = self.eprot[2]
+            self.own = grid.own_cells
             for spec, shift in ((self.eprot, 0), (self.prot, 1)):
                 self.add_small(spec[4], S_EXTRA << shift)
                 if spec[4]:
@@ -979,7 +994,7 @@ cdef class World:
             return True
         if not g & G_KEEP1:
             return False
-        if not g & G_KEEP2 and self.own_cells.find(cell_key(x, y, z)) != NULL:
+        if not g & G_KEEP2 and self.own.cells.find(cell_key(x, y, z)) != NULL:
             return False
         if not s & (S_EXCL << shift):
             return True
