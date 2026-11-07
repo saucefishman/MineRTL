@@ -1435,9 +1435,15 @@ class _GreedyRouter:
             return False
         if via in job.protected:
             return False
-        cells = [(x + dx, y + dy, z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
-        return all(c not in self.footprint_blocked and self.dust_owner.get(c) in (None, job.net_id)
-                   and _is_air(self.region[c]) for c in cells)
+        # The index's non-air cells rather than decoding each block: routing asks this of thousands of candidates.
+        fp, non_air, owner, net_id = self.footprint_blocked, self.indexed.block_index().non_air, self.dust_owner.get, job.net_id
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    c = (x + dx, y + dy, z + dz)
+                    if c in fp or c in non_air or owner(c) not in (None, net_id):
+                        return False
+        return True
 
     def _open_via(self, via: Pos, job: _RouteJob) -> Pos | None:
         """The free cell nearest a wanted waypoint, trying along X and Z and then a layer up. None if there's none."""
