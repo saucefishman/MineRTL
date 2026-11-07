@@ -7,6 +7,7 @@ from .constants import (
 )
 from .block_utils import _TORCH_IDS, _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
 
+_HORIZ_SET = frozenset(_HORIZ_DIRS)
 _foot_repeaters = [False]  # see pathfinding.set_foot_repeaters
 
 
@@ -288,11 +289,18 @@ def _lay_redstone_path(
     slope2_bottom: set[int] = set()
     p4_bottom: set[int] = set()
     p4_top: set[int] = set()
-    for i in range(n - 1):
-        ax, ay, az = cells[i]
-        bx, by, bz = cells[i + 1]
+    horiz = _HORIZ_SET
+    prev_cell = cells[0] if n else None
+    for i in range(1, n):
+        cell = cells[i]
+        ax, ay, az = prev_cell
+        bx, by, bz = cell
         delta = (bx - ax, bz - az)
         dy = by - ay
+        i -= 1
+        prev_cell = cell
+        if delta in horiz and -1 <= dy <= 1:  # a plain step, which none of the moves below is
+            continue
         if by == ay + 4 and delta in _TOWER_2BLOCK:
             tower_bottom.add(i)
             tower_top.add(i + 1)
@@ -307,6 +315,21 @@ def _lay_redstone_path(
                 or (i in tower_top and delta == (0, 0) and dy == 1)
             ):
                 raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]} (move {i + 1} of {n - 1})")
+
+    lay_dust = getattr(workspace, "dust_layer", None)
+    lay_dust = lay_dust(solid, dust_owner, net_id, opaque_support_block) if lay_dust is not None else None
+    if lay_dust is None:
+        lay_dust = lambda pos: _lay_dust_cell(workspace, solid, dust_owner, net_id, pos, opaque_support_block)
+
+    special = bool(tower_bottom or tower_top or slope2_bottom or p4_bottom or p4_top)
+    if not special:  # plain steps only: no move handlers to ask about
+        prev_cell = None
+        for cell in cells:
+            if prev_cell is not None and cell[1] != prev_cell[1]:  # a slope may be cut by the block above its low end
+                _check_slope_notch(workspace, solid, prev_cell, cell)
+            prev_cell = cell
+            lay_dust(cell)
+        return
 
     for i, cell in enumerate(cells):
         if i > 0:  # before the move handlers: this cell may also start a 2x slope, tower or powered drop
@@ -332,7 +355,7 @@ def _lay_redstone_path(
                                      inverted_cells, goal, terminal_positions, path_cells)
 
         else:
-            _lay_dust_cell(workspace, solid, dust_owner, net_id, cell, opaque_support_block)
+            lay_dust(cell)
 
 
 def _check_slope_notch(
