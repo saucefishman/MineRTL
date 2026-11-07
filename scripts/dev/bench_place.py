@@ -1,6 +1,10 @@
 """Rerun placement alone from a saved placer input, for timing and profiling the placer.
 
-Save the input with a build run under MINECRAFT_V_PLACE_DUMP=<file>.pkl, then:
+Save the input with a build run under `record`, which takes the same arguments as `python -m minecraft_v`:
+
+    uv run python scripts/dev/bench_place.py record <file>.pkl --netlist build/artifacts/netlist.json --place-seed 2 ...
+
+then rerun placement alone:
 
     uv run python scripts/dev/bench_place.py <file>.pkl [--seed N] [--profile out.prof] [--out placed.pkl] [--no-kernel]
 """
@@ -18,7 +22,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from minecraft_v.placement_engine import poisson  # noqa: E402
 
 
+def record(dump: Path, build_args: list[str]) -> None:
+    """Run a build that saves the placer's input to dump."""
+    import runpy
+
+    from minecraft_v.placement_engine import builder
+
+    place = builder._poisson_placement
+
+    def saving(components, nets, **kwargs):
+        with open(dump, "wb") as f:
+            pickle.dump((components, nets, kwargs), f)
+        return place(components, nets, **kwargs)
+
+    builder._poisson_placement = saving
+    sys.argv = ["minecraft_v", *build_args]
+    runpy.run_module("minecraft_v", run_name="__main__")
+
+
 def main() -> None:
+    if len(sys.argv) > 2 and sys.argv[1] == "record":
+        record(Path(sys.argv[2]), sys.argv[3:])
+        return
     ap = argparse.ArgumentParser()
     ap.add_argument("dump", type=Path)
     ap.add_argument("--seed", type=int, default=None, help="override the saved place seed")

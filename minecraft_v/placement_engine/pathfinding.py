@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import time
 from typing import Callable
 
 import numpy as np
@@ -542,7 +540,6 @@ def _find_wire_path(
     search_args = (seed_nodes, seed_groups, goal_ids, group_best_h, group_max_f, best_node, best_h,
                    weight, time_limit, pos_list, h_list, None, congestion_cost, goal_depth)
 
-    search_started = time.perf_counter()
     # Most of a long search's expansions are its many states per cell (snapshots, signal depths): the first few of
     # a cell almost always route as well. A search that fails that way searches again with all of them, unless
     # it's a tight first try, whose failure only means ripping what's around the sink and trying again, or it ran
@@ -560,8 +557,6 @@ def _find_wire_path(
         group_best_h[:] = initial_group_best_h
         reached, best_node, _, early_stop_reason, came_from = _run_search(
             search_args, net_id, next_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
-    if _SEARCH_LOG:
-        _log_search(net_id, best_seed, goal, reached is not None, early_stop_reason, time.perf_counter() - search_started)
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")
@@ -637,17 +632,6 @@ def _keepout_spec(keepout) -> tuple | None:
     return None
 
 
-_TIGHT_POSITIONS = int(os.environ.get("MINECRAFT_V_TIGHT_POSITIONS", _ROUTE_TIGHT_POSITIONS))  # 0: _ROUTE_MAX_NODES
-_SEARCH_LOG: str | None = os.environ.get("MINECRAFT_V_SEARCH_LOG") or None  # a CSV path: one line per search (net, seed, goal, result, expansions, seconds)
-
-
-def _log_search(net_id, seed, goal, ok, reason, seconds) -> None:
-    last = _astar.LAST
-    with open(_SEARCH_LOG, "a") as f:
-        f.write(f"{net_id},{seed[0]},{seed[1]},{seed[2]},{goal[0]},{goal[1]},{goal[2]},{int(ok)},"
-                f"{(reason or '').split(' ')[0]},{last.get('exp', 0)},{last.get('pos', 0)},{seconds:.4f},{last.get('pops', 0)},{last.get('reexp', 0)},{last.get('pruned', 0)},{last.get('seeds', 0)}\n")
-
-
 def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -1, stagnation: int = -1,
                 budget: int = 1, cell_cap: int = 0):
     """h_radius_factor: the kernel's h-radius cull for this search (0: off; negative: the default)."""
@@ -655,5 +639,5 @@ def _run_search(args: tuple, net_id: str, make_world, h_radius_factor: float = -
     # A tight first try (stagnation set) gives up sooner on positions too: past a few thousand it almost never succeeds,
     # and a failure there only means ripping what's around the sink and trying again.
     return _astar.search(*args, make_world(), h_radius_factor=h_radius_factor, stagnation=stagnation, budget=budget,
-                         position_cap=_TIGHT_POSITIONS if stagnation >= 0 else 0,
+                         position_cap=_ROUTE_TIGHT_POSITIONS if stagnation >= 0 else 0,
                          cell_cap=cell_cap, goal_depth=goal_depth)
