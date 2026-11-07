@@ -173,7 +173,7 @@ cdef extern from * nogil:
         FlatMap() {
             std::vector<std::vector<Slot>>& p = pool();
             if (!p.empty()) { slots.swap(p.back()); p.pop_back(); }
-            reset(1 << 6);  // a World has several, and most searches are small: they grow as they fill
+            reset(1 << 10);  // a World has several: big enough that most searches don't grow them, small enough to clear cheaply
         }
         ~FlatMap() {
             std::vector<std::vector<Slot>>& p = pool();
@@ -902,6 +902,7 @@ cdef class World:
     cdef long long gsx, gsy
     cdef bint keep_fast, have_small, has_pending
     cdef FlatMap[char] small         # S_* of the cells in this search's small sets
+    cdef FlatMap[char] pend_near     # cells with a pending sink at one of next_to_terminal's offsets, with a grid
     cdef _OwnCells own              # the keepout's _own cells (shared, read only)
     cdef FlatMap[int] pid_map        # cell_key -> cell id, ahead of pos_ids
     cdef bint pids_seeded
@@ -982,6 +983,21 @@ cdef class World:
                 self.add_small(spec[3], S_EXCL << shift)
         self.add_small(self.fp_relief, S_RELIEF)
         self.add_small(self.pending, S_PENDING)
+        if self.has_pending:
+            self.add_pend_near()
+        return 0
+
+    cdef int add_pend_near(self) except -1:
+        """Every cell next_to_terminal's pending check would answer yes for: the pending cells minus its offsets."""
+        cdef int x, y, z, k, ddy, ins
+        for pos in self.pending:
+            x, y, z = pos
+            for ddy in range(-2, 3):
+                self.pend_near.get(cell_key(x, y - ddy, z), &ins)[0] = 1
+                for k in range(4):
+                    self.pend_near.get(cell_key(x - 2 * HORIZ[k][0], y - ddy, z - 2 * HORIZ[k][1]), &ins)[0] = 1
+                    self.pend_near.get(cell_key(x - HORIZ[k][0] - HORIZ[k][1], y - ddy,
+                                                z - HORIZ[k][1] + HORIZ[k][0]), &ins)[0] = 1
         return 0
 
     cdef int add_small(self, cells, int bit) except -1:
@@ -1740,15 +1756,7 @@ cdef class World:
         if not self.has_pending:
             return False
         if self.gp != NULL:
-            for ddy in range(-2, 3):
-                if self.small_at(x, y + ddy, z) & S_PENDING:
-                    return True
-                for k in range(4):
-                    if (self.small_at(x + 2 * HORIZ[k][0], y + ddy, z + 2 * HORIZ[k][1]) & S_PENDING
-                            or self.small_at(x + HORIZ[k][0] + HORIZ[k][1], y + ddy,
-                                             z + HORIZ[k][1] - HORIZ[k][0]) & S_PENDING):
-                        return True
-            return False
+            return self.pend_near.find(cell_key(x, y, z)) != NULL
         with gil:
             for ddy in range(-2, 3):
                 if PySet_Contains(self.pending, (x, y + ddy, z)):
@@ -2151,7 +2159,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
     cdef vector[char] explored_xyz
     cdef vector[char] is_goal
     cdef vector[int] taken
-    cdef vector[int] extras  # (ex, ey, ez) triples of this expansion's taken 2x slopes
+    cdef uint32_t ext  # the snapshot bits of this expansion's taken 2x slopes' mid cells, all inside the window
     cdef vector[int] expanded_head  # by cell: its latest Expanded, or -1
     cdef vector[Expanded] expanded
     cdef Expanded* xp
@@ -2337,7 +2345,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             STAT_CELLS += 1
         cmv = &cells.cm[cid]
         taken.clear()
-        extras.clear()
+        ext = 0
         for i in range(cmv.start, cmv.start + cmv.count):
             m = &cells.moves[i]
             if cur_snap & m.forbid:
@@ -2346,9 +2354,7 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 continue
             taken.push_back(i)
             if m.has_extra:
-                extras.push_back(m.ex)
-                extras.push_back(m.ey)
-                extras.push_back(m.ez)
+                ext |= snap_bit(m.ex, m.ey, m.ez)
         m4_side = -1
         for i in range(cmv.m4_start, cmv.m4_start + cmv.m4_count):
             if not cur_snap & cells.m4_sides[i].forbid:
@@ -2356,9 +2362,9 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
                 break
         # Re-centre the snapshot (plus current itself and the cells this expansion's moves
         # fill) onto each neighbour's window.
-        cb0 = cur_snap & 255
-        cb1 = (cur_snap >> 8) & 255
-        cb2 = cur_snap >> 16
+        cb0 = (cur_snap | ext) & 255
+        cb1 = ((cur_snap | ext) >> 8) & 255
+        cb2 = (cur_snap | ext) >> 16
         has_in_dir = e.parent != -1
         if has_in_dir:
             k = <int>(e.parent >> NODE_SHIFT)
@@ -2400,8 +2406,6 @@ def search(list seed_nodes, list seed_groups, goal_ids, list group_best_h, list 
             new_g = e.g + cost
             snap = (SHIFT_TABLES[m.shift][0][cb0] | SHIFT_TABLES[m.shift][1][cb1]
                     | SHIFT_TABLES[m.shift][2][cb2] | SHIFT_SELF[m.shift])
-            for i in range(0, <int>extras.size(), 3):
-                snap |= snap_bit(extras[i] - m.dx, extras[i + 1] - m.dy, extras[i + 2] - m.dz)
             if k == last and m4_side >= 0:
                 side = &cells.m4_sides[m4_side]
                 for i in range(side.start, side.start + 3 * side.count, 3):
