@@ -59,13 +59,14 @@ def palette_table(region: Region, values) -> np.ndarray:
     return np.asarray(values, dtype=np.uint8).reshape(len(region._Region__palette))
 
 
-def _compiled(blocks: np.ndarray) -> bool:
-    return _signals is not None and blocks.dtype == np.uint32 and blocks.flags.c_contiguous and blocks.size > 0
+def _compiled(blocks: np.ndarray, *functions: str) -> bool:
+    """Whether the compiled module has these functions and can take blocks (an older build may lack some)."""
+    return _signals is not None and all(hasattr(_signals, f) for f in functions) and blocks.dtype == np.uint32 and blocks.flags.c_contiguous and blocks.size > 0
 
 
 def lookup(blocks: np.ndarray, table: np.ndarray) -> np.ndarray:
     """table[blocks], table a uint8 array per palette entry."""
-    if _compiled(blocks):
+    if _compiled(blocks, "table_gather"):
         return _signals.table_gather(blocks, np.ascontiguousarray(table, dtype=np.uint8))
     return table[blocks]
 
@@ -73,7 +74,7 @@ def lookup(blocks: np.ndarray, table: np.ndarray) -> np.ndarray:
 def cells_where(blocks: np.ndarray, table: np.ndarray, skip: Iterable[Box] = ()) -> np.ndarray:
     """np.argwhere(table[blocks]) less the cells in skip's boxes, as an n x 3 int64 array in argwhere's order."""
     skip = [(tuple(int(c) for c in lo), tuple(int(c) for c in hi)) for lo, hi in skip]
-    if _compiled(blocks):
+    if _compiled(blocks, "table_where"):
         return _signals.table_where(blocks, np.ascontiguousarray(table, dtype=np.uint8), skip)
     mask = np.asarray(table, dtype=bool)[blocks]
     for lo, hi in skip:
@@ -85,7 +86,7 @@ def _pack_states(blocks: np.ndarray, nbits: int) -> LongArray:
     """Palette ids as Litematica's bit array: y, then z, then x, lowest bits first, values crossing long boundaries."""
     n_x, n_y, n_z = blocks.shape
     out = np.zeros(ceil(n_x * n_y * n_z * nbits / 64), dtype="<u8")
-    if _signals is not None and blocks.dtype == np.uint32 and blocks.size and blocks.flags.c_contiguous:
+    if _compiled(blocks, "pack_states"):
         _signals.pack_states(blocks, nbits, out)
         return LongArray(out.astype("<i8"))
     done = 0  # longs written
@@ -150,7 +151,7 @@ class BulkRegion(Region):
 
     def _optimize_palette(self) -> None:
         palette, blocks = self._Region__palette, self._Region__blocks
-        kernel = _signals is not None and blocks.dtype == np.uint32 and blocks.size and blocks.flags.c_contiguous
+        kernel = _compiled(blocks, "used_ids", "remap_ids")
         if kernel:
             used = _signals.used_ids(blocks, len(palette))
         else:

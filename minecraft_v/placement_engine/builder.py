@@ -2881,6 +2881,8 @@ def build_litematic_from_component_list(
     last_build_stats.update(size=tuple(size), nets=len(comp.nets), failed=len(routing_failures),
                             violations=len(signal_violations))
     if retain:
+        # Keeps every local alive (the workspace and routing state) so that a process about to exit doesn't free them
+        # one by one; only for such a process, since nothing ever releases _retained.
         _retained.append(locals())
     return out_path
 

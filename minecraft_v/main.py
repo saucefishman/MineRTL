@@ -8,11 +8,11 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+_PROCESS_START = time.time()  # before the project imports, which take a second or so themselves
+
 from minecraft_v.build_utils import save_build_artifacts
 from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, SCHEMATICS_DIR, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
-_PROCESS_START = time.time()
-
 from minecraft_v.placement_engine import build_litematic_from_component_list, builder, pathfinding
 from minecraft_v.placement_engine.builder import build_macro, set_first_fanout, set_long_edge_split
 from minecraft_v.placement_engine.macro import extract_macros
