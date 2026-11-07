@@ -24,8 +24,9 @@ _phase_times = os.environ.get("MINECRAFT_V_PHASE_TIMES") == "1"  # log each phas
 
 
 def _load_counters():
-    """This process's instructions retired, all threads (macOS only): a cost that barely moves with machine load,
-    unlike wall or CPU time. Forked workers count in their own process, not here."""
+    """This process's instructions retired and cycles, all threads (macOS only): instructions barely move with
+    machine load, unlike wall or CPU time, and instructions per cycle shows whether a phase waits on memory.
+    Forked workers count in their own process, not here."""
     if sys.platform != "darwin":
         return None
     try:
@@ -33,21 +34,22 @@ def _load_counters():
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
     except OSError:
         return None
-    info = (ctypes.c_uint64 * 64)()  # rusage_info_v4: 16-byte uuid, then uint64 fields; ri_instructions is the 30th
+    info = (ctypes.c_uint64 * 64)()  # rusage_info_v4: 16-byte uuid, then uint64 fields; ri_instructions, ri_cycles are the 30th, 31st
 
-    def instructions() -> int:
+    def counters() -> tuple[int, int]:
         if libproc.proc_pid_rusage(os.getpid(), 4, ctypes.byref(info)) != 0:
-            return 0
-        return info[2 + 29]
-    return instructions
+            return 0, 0
+        return info[2 + 29], info[2 + 30]
+    return counters
 
 
-_instructions = _load_counters() if _phase_times else None
+_counters = _load_counters() if _phase_times else None
 
 
-def _cost() -> tuple[float, float, int]:
+def _cost() -> tuple[float, float, int, int]:
     times = os.times()
-    return time.process_time(), times.children_user + times.children_system, _instructions() if _instructions else 0
+    return (time.process_time(), times.children_user + times.children_system,
+            *(_counters() if _counters else (0, 0)))
 
 
 def _tick() -> None:
@@ -97,10 +99,11 @@ class ProgressBar:
             _stack.remove(self)
             self._clear()
             if self._cost0 is not None and not _forked:
-                cpu, children, instructions = (b - a for a, b in zip(self._cost0, _cost()))
+                cpu, children, instructions, cycles = (b - a for a, b in zip(self._cost0, _cost()))
                 print(f"[phase] {self.label}: {time.monotonic() - self._t0:.1f}s (cpu {cpu:.1f}s"
                       + (f", reaped workers {children:.1f}s" if children >= 0.05 else "")
-                      + (f", {instructions / 1e9:.1f}G instr" if _instructions else "") + ")", flush=True)
+                      + (f", {instructions / 1e9:.1f}G instr" if _counters else "")
+                      + (f", IPC {instructions / cycles:.1f}" if cycles > 0 else "") + ")", flush=True)
             if _stack:
                 _stack[-1]._draw()
 
