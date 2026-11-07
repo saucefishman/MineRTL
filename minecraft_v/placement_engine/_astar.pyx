@@ -173,7 +173,7 @@ cdef extern from * nogil:
         FlatMap() {
             std::vector<std::vector<Slot>>& p = pool();
             if (!p.empty()) { slots.swap(p.back()); p.pop_back(); }
-            reset(1 << 6);  // a World has several, and most searches are small: they grow as they fill
+            reset(1 << 10);  // a World has several: big enough that most searches don't grow them, small enough to clear cheaply
         }
         ~FlatMap() {
             std::vector<std::vector<Slot>>& p = pool();
