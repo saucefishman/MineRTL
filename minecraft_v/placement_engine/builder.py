@@ -2010,7 +2010,8 @@ def _hold_with_detours(workspace: Region, flat: ComponentList, ends: dict, faile
         shorts.clear()
         requirement.clear()
         edits: list = []
-        period = fix_hold(workspace, flat, ends, failed, probed, opaque, macros, requirement, shorts, edits)
+        period = fix_hold(workspace, flat, ends, failed, probed, opaque, macros, requirement, shorts, edits,
+                          retry=routed is not None and attempt < _DETOUR_ROUNDS)
         if not shorts or routed is None or attempt == _DETOUR_ROUNDS:
             break
         # Padding is outside the router's books, and a net laid again starts clean: undo it all, and pad again.

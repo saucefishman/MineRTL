@@ -7,7 +7,7 @@ from typing import Callable
 import numpy as np
 from litemapy import BlockState, Region
 
-from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, palette_writer
+from .block_utils import _is_air, _is_repeater, _is_torch, _is_redstone_wire, lookup, palette_writer
 from .wire import LayConflict, _foot_repeaters
 from .constants import _HORIZ_DIRS, _DIRS_6, _TOWER_2BLOCK, GLASS, _ROUTE_MAX_NODES, _ROUTE_STAGNATION, _ROUTE_CELL_STATES, _ROUTE_TIGHT_POSITIONS, \
     _ROUTE_MAX_EXPANSIONS, _ROUTE_BUDGET_FACTOR, _ROUTE_BUDGET_FLOOR, _DELTA_TO_FACING, _H_RADIUS_FACTOR, _HORIZ_RADIUS_MIN, \
@@ -183,7 +183,7 @@ class _BlockIndex:
             | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0)
             for b in region._Region__palette
         ], dtype=np.uint8)
-        return kinds[region._Region__blocks]
+        return lookup(region._Region__blocks, kinds)
 
     @classmethod
     def layered(cls, base: _BlockIndex, overlay: dict[tuple[int, int, int], BlockState]) -> _BlockIndex:

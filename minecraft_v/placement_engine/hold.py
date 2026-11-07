@@ -712,11 +712,12 @@ def _pad_net(timing: _HoldTiming, net_id: str, sink: Pos, need: int, terminals: 
 def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, str], Pos], failed: set[str],
              probed: Collection[str] = (), opaque: Collection[Box] = (), macros: dict | None = None,
              requirement: list[ClockRequirement] | None = None, shorts: list[HoldShort] | None = None,
-             edits: list[tuple[Pos, BlockState]] | None = None) -> int:
+             edits: list[tuple[Pos, BlockState]] | None = None, retry: bool = False) -> int:
     """Pad every data path that beats its flip-flop's clock; returns the slowest flip-flop to flip-flop time. comp is the
     flat netlist, terminals its gate pins' cells, probed the cells prints read, opaque boxes that net searches stop at.
     `requirement` gets what the clock has to be, from the wire as padded: macros time the blocks in the netlist.
-    `shorts` gets the pins padding couldn't bring to target, `edits` each changed cell's old block, to undo this."""
+    `shorts` gets the pins padding couldn't bring to target, `edits` each changed cell's old block, to undo this.
+    retry: the caller undoes this and tries again if pins are left short, so then the timing (0 returned) isn't worked out."""
     if not any(c.type in _SEQUENTIAL for c in comp.components):
         return 0
     protected = frozenset(terminals.values())
@@ -784,6 +785,8 @@ def fix_hold(workspace: Region, comp: ComponentList, terminals: dict[tuple[str, 
         print(f"[hold] still short: {short.pin} margin {short.margin}, slack {short.slack}")
     if shorts is not None:
         shorts.extend(found)
+    if retry and found:
+        return 0
     period = timing.min_period(clock, probed)
     print(f"[hold] slowest flip-flop to flip-flop or print path {period} ticks")
     if requirement is not None:
