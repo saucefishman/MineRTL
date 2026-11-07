@@ -8,7 +8,56 @@ from .constants import (
 from .block_utils import _TORCH_IDS, _is_air, _is_redstone_wire, _is_torch, _is_repeater, _block_str
 
 _HORIZ_SET = frozenset(_HORIZ_DIRS)
+_ADJACENT = tuple((dx, dy, dz) for dx, dz in _HORIZ_DIRS for dy in (-1, 0, 1))
 _foot_repeaters = [False]  # see pathfinding.set_foot_repeaters
+
+
+_REPEATERS: dict[str, BlockState] = {}
+_WALL_TORCHES: dict[str, BlockState] = {}
+
+
+def _repeater(facing: str) -> BlockState:
+    """The repeater block for a facing, one shared object: palette lookups by object are fast."""
+    block = _REPEATERS.get(facing)
+    if block is None:
+        block = _REPEATERS[facing] = BlockState("minecraft:repeater", facing=facing, delay="1")
+    return block
+
+
+def _wall_torch(facing: str) -> BlockState:
+    block = _WALL_TORCHES.get(facing)
+    if block is None:
+        block = _WALL_TORCHES[facing] = BlockState("minecraft:redstone_wall_torch", facing=facing)
+    return block
+
+
+class _PlainOps:
+    """The writes the lay functions make, straight through the containers. ripup.JournalingWorkspace.dust_layer's
+    _astar.DustLayer is the compiled twin for the journaling stack: same methods."""
+
+    def __init__(self, workspace, solid, dust_owner, net_id, support):
+        self.workspace, self.solid, self.dust_owner, self.net_id, self.support = workspace, solid, dust_owner, net_id, support
+
+    def lay(self, pos) -> None:
+        _lay_dust_cell(self.workspace, self.solid, self.dust_owner, self.net_id, pos, self.support)
+
+    def place_support(self, pos) -> bool:
+        return _place_support(self.workspace, self.solid, self.dust_owner, self.net_id, pos, self.support)
+
+    def put_block(self, pos, block) -> None:
+        self.workspace[pos] = block
+
+    def set_owner(self, pos) -> None:
+        self.dust_owner[pos] = self.net_id
+
+    def add_solid(self, pos) -> None:
+        self.solid.add(pos)
+
+
+def _lay_ops(workspace, solid, dust_owner, net_id, support):
+    layer = getattr(workspace, "dust_layer", None)
+    layer = layer(solid, dust_owner, net_id, support) if layer is not None else None
+    return layer if layer is not None else _PlainOps(workspace, solid, dust_owner, net_id, support)
 
 
 class LayConflict(ValueError):
@@ -104,6 +153,7 @@ def _lay_powered_minus4_move(
         goal: tuple[int, int, int] | None = None,
         terminal_positions: frozenset[tuple[int, int, int]] = frozenset(),
         path_cells: frozenset[tuple[int, int, int]] = frozenset(),
+        ops=None,
 ) -> None:
     """Lay a powered -4 move via two wall torch inversions.
 
@@ -112,7 +162,10 @@ def _lay_powered_minus4_move(
     Cells (nx,y-1,nz) and (nx,y-2,nz) carry opposite-polarity signal and are
     added to inverted_cells so future routing avoids them.
     """
+    if ops is None:
+        ops = _PlainOps(workspace, solid, dust_owner, net_id, opaque_support_block)
     x, y, z = launch  # dest == (x, y-4, z)
+    owner_get = dust_owner.get
 
     # Find the valid side direction (verified clear during A*, should still be free)
     direction: tuple[int, int] | None = None
@@ -154,14 +207,10 @@ def _lay_powered_minus4_move(
         # side cell — matches _powered_minus4_neighbors lines 378-387.
         adj_ok = True
         for cx, cy, cz in side_cells:
-            for adx, adz in _HORIZ_DIRS:
-                for ady in (-1, 0, 1):
-                    sp = (cx + adx, cy + ady, cz + adz)
-                    owner = dust_owner.get(sp)
-                    if owner is not None and owner != net_id:
-                        adj_ok = False
-                        break
-                if not adj_ok:
+            for adx, ady, adz in _ADJACENT:
+                owner = owner_get((cx + adx, cy + ady, cz + adz))
+                if owner is not None and owner != net_id:
+                    adj_ok = False
                     break
             if not adj_ok:
                 break
@@ -177,42 +226,42 @@ def _lay_powered_minus4_move(
     # Ensure opaque support at (x, y-1, z) — glass cannot conduct signal to torch
     below_launch = (x, y - 1, z)
     if below_launch not in solid:
-        workspace[x, y - 1, z] = opaque_support_block
-        solid.add(below_launch)
+        ops.put_block(below_launch, opaque_support_block)
+        ops.add_solid(below_launch)
     elif _block_str(workspace[x, y - 1, z]) == "minecraft:glass":
-        workspace[x, y - 1, z] = opaque_support_block
-    dust_owner[below_launch] = net_id
+        ops.put_block(below_launch, opaque_support_block)
+    ops.set_owner(below_launch)
 
     # Launch wire
     if _is_air(workspace[x, y, z]):
-        workspace[x, y, z] = REDSTONE
-        dust_owner[(x, y, z)] = net_id
+        ops.put_block((x, y, z), REDSTONE)
+        ops.set_owner((x, y, z))
 
     # Wall torch at (nx, y-1, nz) — inverted; attached to block at (x, y-1, z)
     facing1 = _DELTA_TO_FACING[(tdx, tdz)]
-    workspace[nx, y - 1, nz] = BlockState("minecraft:redstone_wall_torch", facing=facing1)
-    dust_owner[(nx, y - 1, nz)] = net_id
+    ops.put_block((nx, y - 1, nz), _wall_torch(facing1))
+    ops.set_owner((nx, y - 1, nz))
     if inverted_cells is not None:
         inverted_cells.add((nx, y - 1, nz))
 
     # Inverted dust at (nx, y-2, nz)
-    workspace[nx, y - 2, nz] = REDSTONE
-    dust_owner[(nx, y - 2, nz)] = net_id
+    ops.put_block((nx, y - 2, nz), REDSTONE)
+    ops.set_owner((nx, y - 2, nz))
     if inverted_cells is not None:
         inverted_cells.add((nx, y - 2, nz))
 
     # Support block at (nx, y-3, nz) — wall anchor for second torch; also supports dust above
-    workspace[nx, y - 3, nz] = opaque_support_block
-    solid.add((nx, y - 3, nz))
-    dust_owner[(nx, y - 3, nz)] = net_id
+    ops.put_block((nx, y - 3, nz), opaque_support_block)
+    ops.add_solid((nx, y - 3, nz))
+    ops.set_owner((nx, y - 3, nz))
 
     # Wall torch at (x, y-3, z) — active output; attached to block at (nx, y-3, nz)
     facing2 = _DELTA_TO_FACING[(-tdx, -tdz)]
-    workspace[x, y - 3, z] = BlockState("minecraft:redstone_wall_torch", facing=facing2)
-    dust_owner[(x, y - 3, z)] = net_id
+    ops.put_block((x, y - 3, z), _wall_torch(facing2))
+    ops.set_owner((x, y - 3, z))
 
     # Output dust at dest = (x, y-4, z)
-    _lay_dust_cell(workspace, solid, dust_owner, net_id, dest, opaque_support_block)
+    ops.lay(dest)
 
 
 def _lay_tower_move(
@@ -224,46 +273,52 @@ def _lay_tower_move(
         tower_top: tuple[int, int, int],
         opaque_support_block: BlockState,
         inverted_cells: set[tuple[int, int, int]] | None = None,
+        ops=None,
 ) -> None:
     """Lay launch wire, repeater, and stone/torch column for a tower move."""
+    if ops is None:
+        ops = _PlainOps(workspace, solid, dust_owner, net_id, opaque_support_block)
     x, y, z = launch
     bx, by, bz = tower_top
     tdx = (bx - x) // 2
     tdz = (bz - z) // 2
 
     if _is_air(workspace[*launch]):
-        _lay_dust_cell(workspace, solid, dust_owner, net_id, launch, opaque_support_block)
+        ops.lay(launch)
 
     rx, ry, rz = x + tdx, y, z + tdz
     facing = _DELTA_TO_FACING[(-tdx, -tdz)]
-    workspace[rx, ry, rz] = BlockState("minecraft:repeater", facing=facing, delay="1")
-    dust_owner[(rx, ry, rz)] = net_id
-    placed_support = _place_support(workspace, solid, dust_owner, net_id, (rx, ry, rz), opaque_support_block)
+    repeater_pos = (rx, ry, rz)
+    ops.put_block(repeater_pos, _repeater(facing))
+    ops.set_owner(repeater_pos)
+    placed_support = ops.place_support(repeater_pos)
     if not placed_support:
         raise ValueError(f"Repeater needs support but cannot place it for tower move at launch cell {launch}")
 
+    torch_is_support = REDSTONE_TORCH == opaque_support_block
     col = [
-        (bx, y,     bz, opaque_support_block),
-        (bx, y + 1, bz, REDSTONE_TORCH),
-        (bx, y + 2, bz, opaque_support_block),
-        (bx, y + 3, bz, REDSTONE_TORCH),
-        (bx, y + 4, bz, opaque_support_block),
+        (bx, y,     bz, opaque_support_block, True),
+        (bx, y + 1, bz, REDSTONE_TORCH, torch_is_support),
+        (bx, y + 2, bz, opaque_support_block, True),
+        (bx, y + 3, bz, REDSTONE_TORCH, torch_is_support),
+        (bx, y + 4, bz, opaque_support_block, True),
     ]
-    for cx, cy, cz, blk in col:
-        existing_owner = dust_owner.get((cx, cy, cz))
+    for cx, cy, cz, blk, is_support in col:
+        cell = (cx, cy, cz)
+        existing_owner = dust_owner.get(cell)
         if existing_owner is not None and existing_owner != net_id:
-            raise LayConflict(f"Tower collision at {(cx, cy, cz)} for nets {existing_owner} vs {net_id}", (tower_top, launch))
+            raise LayConflict(f"Tower collision at {cell} for nets {existing_owner} vs {net_id}", (tower_top, launch))
         if existing_owner == net_id:
             # Own stone shared with a neighbouring structure is fine; anything else in the
             # column (dust, repeater) would leave the tower without its torch.
-            if blk == opaque_support_block and (cx, cy, cz) in solid:
+            if is_support and cell in solid:
                 continue
-            raise LayConflict(f"Tower column cell {(cx, cy, cz)} already holds net {net_id}'s signal",
-                              (tower_top, (cx, cy, cz)))
-        workspace[cx, cy, cz] = blk
-        if blk == opaque_support_block:
-            solid.add((cx, cy, cz))
-        dust_owner[(cx, cy, cz)] = net_id
+            raise LayConflict(f"Tower column cell {cell} already holds net {net_id}'s signal",
+                              (tower_top, cell))
+        ops.put_block(cell, blk)
+        if is_support:
+            ops.add_solid(cell)
+        ops.set_owner(cell)
     if inverted_cells is not None:
         inverted_cells.add((bx, y + 1, bz))
         inverted_cells.add((bx, y + 2, bz))
@@ -282,8 +337,6 @@ def _lay_redstone_path(
 ) -> None:
     cells = list(path)
     n = len(cells)
-    path_cells = frozenset(cells)
-
     tower_bottom: set[int] = set()
     tower_top: set[int] = set()
     slope2_bottom: set[int] = set()
@@ -316,10 +369,8 @@ def _lay_redstone_path(
             ):
                 raise ValueError(f"Unrecognized move type at {cells[i]} -> {cells[i + 1]} (move {i + 1} of {n - 1})")
 
-    lay_dust = getattr(workspace, "dust_layer", None)
-    lay_dust = lay_dust(solid, dust_owner, net_id, opaque_support_block) if lay_dust is not None else None
-    if lay_dust is None:
-        lay_dust = lambda pos: _lay_dust_cell(workspace, solid, dust_owner, net_id, pos, opaque_support_block)
+    ops = _lay_ops(workspace, solid, dust_owner, net_id, opaque_support_block)
+    lay_dust = ops.lay
 
     special = bool(tower_bottom or tower_top or slope2_bottom or p4_bottom or p4_top)
     if not special:  # plain steps only: no move handlers to ask about
@@ -331,9 +382,10 @@ def _lay_redstone_path(
             lay_dust(cell)
         return
 
+    path_cells = frozenset(cells)
     for i, cell in enumerate(cells):
-        if i > 0:  # before the move handlers: this cell may also start a 2x slope, tower or powered drop
-            _check_slope_notch(workspace, solid, cells[i - 1], cell)
+        if i > 0 and cells[i - 1][1] != cell[1]:  # before the move handlers: this cell may also start a 2x slope, tower
+            _check_slope_notch(workspace, solid, cells[i - 1], cell)  # or powered drop; level steps are never cut
         if i in slope2_bottom:
             if i > 0:
                 _check_slope_notch(workspace, solid, cells[i - 1], cell)
@@ -348,11 +400,11 @@ def _lay_redstone_path(
             continue  # already placed by their respective move handler
 
         if i in tower_bottom:
-            _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells)
+            _lay_tower_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block, inverted_cells, ops)
 
         elif i in p4_bottom:
             _lay_powered_minus4_move(workspace, solid, dust_owner, net_id, cell, cells[i + 1], opaque_support_block,
-                                     inverted_cells, goal, terminal_positions, path_cells)
+                                     inverted_cells, goal, terminal_positions, path_cells, ops)
 
         else:
             lay_dust(cell)
@@ -587,9 +639,7 @@ def _place_repeaters_for_net(
                         facing = _OPPOSITE_SIDE[_DELTA_TO_FACING[(rx - rpx, rz - rpz)]]
                         if not is_repeater_at((rx, ry, rz)):
                             dust_owner.pop((rx, ry, rz), None)
-                            workspace[rx, ry, rz] = BlockState(
-                                "minecraft:repeater", facing=facing, delay="1"
-                            )
+                            workspace[rx, ry, rz] = _repeater(facing)
                         reset_depth = depths[j]
                         reset_idx = j
                         break

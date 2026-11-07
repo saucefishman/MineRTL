@@ -2793,3 +2793,170 @@ cdef class NetChecks:
         if self.has_gate_contact():
             result |= FAULT_GATE
         return result
+
+
+# ---------------------------------------------------------------------------------------------
+# Laying a net's plain dust cells (compiled twin of wire._lay_dust_cell over a journaling stack).
+#
+# ripup.JournalingWorkspace.dust_layer builds one per path and has the same Python fallback for what it
+# doesn't do (a stair support, a conflict in the support). Same writes, same journal entries in the same
+# order, same exceptions as the Python it replaces: change both.
+
+from cpython.dict cimport PyDict_GetItem, PyDict_SetItem
+from cpython.set cimport PySet_Add
+from cpython.ref cimport PyObject
+
+cdef enum:
+    DL_DUST = 32   # palette entry's cls bit: a redstone wire or torch id
+    DL_AIR = 64    # minecraft:air
+    DL_KIND = 31   # _BlockIndex kind bits
+
+
+@cython.final
+cdef class DustLayer:
+    cdef CellGrid grid
+    cdef uint32_t[:, :, :] blocks
+    cdef list palette, cls, journal
+    cdef dict writer, slots
+    cdef object inner, solid, dust_owner, active, net_id, write, conflict, fallback, classify, red, support, missing
+    cdef int red_kind, support_kind
+    cdef Py_ssize_t red_slot, sup_slot
+    cdef unsigned int solid_bit
+
+    def __init__(self, CellGrid grid, blocks, list palette, list cls, dict slots, list journal, dict writer,
+                 inner, solid, dust_owner, active, net_id, write, conflict, fallback, classify, red, support,
+                 missing, int red_kind, int support_kind, unsigned int solid_bit):
+        self.grid = grid
+        self.blocks = blocks
+        self.palette, self.cls, self.slots, self.journal, self.writer = palette, cls, slots, journal, writer
+        self.inner, self.solid, self.dust_owner, self.active, self.net_id = inner, solid, dust_owner, active, net_id
+        self.write, self.conflict, self.fallback, self.classify = write, conflict, fallback, classify
+        self.red, self.support, self.missing = red, support, missing
+        self.red_kind, self.support_kind, self.solid_bit = red_kind, support_kind, solid_bit
+        hit = slots.get(id(red))
+        self.red_slot = hit[1] if hit is not None else -1
+        hit = slots.get(id(support))
+        self.sup_slot = hit[1] if hit is not None else -1
+
+    cdef inline int cls_of(self, Py_ssize_t idx) except -1:
+        cdef Py_ssize_t n = len(self.cls)
+        if idx >= n:
+            for block in self.palette[n:]:
+                self.cls.append(self.classify(block.id))
+        return <int>self.cls[idx]
+
+    @cython.boundscheck(True)
+    @cython.wraparound(False)
+    def lay(self, tuple pos):
+        cdef int x = pos[0], y = pos[1], z = pos[2], c, was
+        cdef Py_ssize_t idx = self.blocks[x, y, z]
+        cdef PyObject* p
+        cdef tuple below
+        c = self.cls_of(idx)
+        existing = self.palette[idx]
+        if c & DL_DUST:
+            p = PyDict_GetItem(self.dust_owner, pos)
+            if p != NULL and <object>p != self.net_id:
+                raise self.conflict(f"Dust collision at {pos} for nets {<object>p} vs {self.net_id}", (pos,))
+            return
+        elif not c & DL_AIR:
+            raise self.conflict(f"Tried to redstone over an existing block ({existing}) at {pos}", (pos, (x, y + 1, z)))
+        # workspace[pos] = REDSTONE
+        p = PyDict_GetItem(self.writer, pos)
+        self.journal.append(("block", self.inner, pos, existing, <object>p if p != NULL else None))
+        self.writer[pos] = self.active
+        was = c & DL_KIND
+        if was != self.red_kind:
+            self.grid.put_kind(pos, <unsigned int>(was ^ self.red_kind), <unsigned int>self.red_kind)
+        if self.red_slot < 0:
+            self.write(pos, self.red)
+            self.red_slot = self.blocks[x, y, z]
+            self.slots[id(self.red)] = (self.red, self.red_slot)
+        else:
+            self.blocks[x, y, z] = <uint32_t>self.red_slot
+        # dust_owner[pos] = net_id
+        p = PyDict_GetItem(self.dust_owner, pos)
+        self.journal.append(("dict", self.dust_owner, pos, <object>p if p != NULL else self.missing, None))
+        PyDict_SetItem(self.dust_owner, pos, self.net_id)
+        self.grid.put_owner(pos, self.net_id)
+        self.support_below(pos, x, y, z)
+
+    cdef int support_below(self, tuple pos, int x, int y, int z) except -1:
+        """wire._place_support for the cell at pos."""
+        cdef Py_ssize_t idx
+        cdef int c, was
+        cdef PyObject* p
+        cdef tuple below
+        if y <= 0:
+            return 0
+        below = (x, y - 1, z)
+        if PySet_Contains(self.solid, below):
+            return 0
+        idx = self.blocks[x, y - 1, z]
+        c = self.cls_of(idx)
+        if not c & DL_AIR or (y >= 2 and self.cls_of(self.blocks[x, y - 2, z]) & DL_DUST):
+            self.fallback(pos)  # a conflict, or maybe a stair
+            return 0
+        existing = self.palette[idx]
+        p = PyDict_GetItem(self.writer, below)
+        self.journal.append(("block", self.inner, below, existing, <object>p if p != NULL else None))
+        self.writer[below] = self.active
+        was = c & DL_KIND
+        if was != self.support_kind:
+            self.grid.put_kind(below, <unsigned int>(was ^ self.support_kind), <unsigned int>self.support_kind)
+        if self.sup_slot < 0:
+            self.write(below, self.support)
+            self.sup_slot = self.blocks[x, y - 1, z]
+            self.slots[id(self.support)] = (self.support, self.sup_slot)
+        else:
+            self.blocks[x, y - 1, z] = <uint32_t>self.sup_slot
+        self.journal.append(("set", self.solid, below, False, None))
+        PySet_Add(self.solid, below)
+        self.grid.put(below, self.solid_bit, True)
+        return 0
+
+    @cython.boundscheck(True)
+    @cython.wraparound(False)
+    def place_support(self, tuple pos):
+        self.support_below(pos, pos[0], pos[1], pos[2])
+        return True
+
+    @cython.boundscheck(True)
+    @cython.wraparound(False)
+    def put_block(self, tuple pos, block):
+        """workspace[pos] = block, journaled."""
+        cdef int x = pos[0], y = pos[1], z = pos[2], was, now
+        cdef Py_ssize_t idx = self.blocks[x, y, z], slot
+        cdef PyObject* p
+        was = self.cls_of(idx) & DL_KIND
+        existing = self.palette[idx]
+        p = PyDict_GetItem(self.writer, pos)
+        self.journal.append(("block", self.inner, pos, existing, <object>p if p != NULL else None))
+        self.writer[pos] = self.active
+        hit = self.slots.get(id(block))
+        if hit is not None and hit[0] is block:
+            slot = hit[1]
+            now = self.cls_of(slot) & DL_KIND
+            if was != now:
+                self.grid.put_kind(pos, <unsigned int>(was ^ now), <unsigned int>now)
+            self.blocks[x, y, z] = <uint32_t>slot
+        else:
+            now = self.classify(block.id) & DL_KIND
+            if was != now:
+                self.grid.put_kind(pos, <unsigned int>(was ^ now), <unsigned int>now)
+            self.write(pos, block)
+            self.slots[id(block)] = (block, self.blocks[x, y, z])
+
+    def set_owner(self, tuple pos):
+        """dust_owner[pos] = net_id, journaled."""
+        cdef PyObject* p = PyDict_GetItem(self.dust_owner, pos)
+        self.journal.append(("dict", self.dust_owner, pos, <object>p if p != NULL else self.missing, None))
+        PyDict_SetItem(self.dust_owner, pos, self.net_id)
+        self.grid.put_owner(pos, self.net_id)
+
+    def add_solid(self, tuple pos):
+        """solid.add(pos), journaled."""
+        if not PySet_Contains(self.solid, pos):
+            self.journal.append(("set", self.solid, pos, False, None))
+        PySet_Add(self.solid, pos)
+        self.grid.put(pos, self.solid_bit, True)

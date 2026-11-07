@@ -14,14 +14,21 @@ from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+import numpy as np
 from litemapy import BlockState, Region
 
 from .block_utils import _TORCH_IDS, _is_redstone_wire, _is_repeater, _is_torch, _block_str
 from .constants import _HORIZ_DIRS, REDSTONE
-from .pathfinding import IndexedWorkspace, _BlockIndex, _KINDS, _kind_of
-from .wire import LayConflict, _lay_dust_cell as _lay_dust_cell_original, _place_support
+from .pathfinding import IndexedWorkspace, _BlockIndex, _astar, _kind_of
+from .wire import LayConflict, _place_support
 
 _MISSING = object()
+
+
+def _dust_class(block_id: str) -> int:
+    """_astar.DustLayer's table entry for a block id: its _BlockIndex kind bits, 32 if it's wire or a torch, 64 if air."""
+    return _kind_of(block_id) | (32 if "redstone_wire" in block_id or block_id in _TORCH_IDS else 0) | (
+        64 if block_id == "minecraft:air" else 0)
 
 # Journal entry: (kind, target, key, prev, prev_writer)
 #   kind 'block': target=Region, prev=BlockState, prev_writer=net that wrote prev (or None)
@@ -119,7 +126,7 @@ class JournalingWorkspace:
         self.region = region
         self._rec = recorder
         self._put = getattr(region, "put", None)  # an IndexedWorkspace's write that returns the old block
-        self._lay_cache: tuple = (None, {})  # dust_layer's palette indexes
+        self._lay_cache: tuple = (None, {}, [])  # dust_layer's palette indexes
 
     def __getitem__(self, pos) -> BlockState:
         return self.region[pos]
@@ -130,9 +137,10 @@ class JournalingWorkspace:
         return inner() if inner is not None else _BlockIndex(self.region)
 
     def dust_layer(self, solid, dust_owner, net_id: str, support: BlockState):
-        """wire._lay_dust_cell(self, solid, dust_owner, net_id, pos, support) as one function of pos, or None when this
-        isn't the stack it knows: an IndexedWorkspace over a CellGrid with journaling containers, recording a net.
-        Same writes, journal entries (and their order) and exceptions; the rare cases run the originals."""
+        """An _astar.DustLayer for laying net_id's wire through this workspace, or None when this isn't the stack it
+        knows: an IndexedWorkspace over a CellGrid with journaling containers, recording a net. It writes, journals
+        (same entries and order) and raises as wire._lay_dust_cell and the other writes of the tower and drop
+        moves would; the rare cases it hands back to the originals."""
         rec = self._rec
         inner = self.region
         active = rec.active
@@ -142,86 +150,18 @@ class JournalingWorkspace:
         grid = inner._index.grid
         if grid is None or solid._grid is not grid or dust_owner._grid is not grid:
             return None
-        region = inner.region
-        palette, blocks = region._Region__palette, region._Region__blocks
-        cache = self._lay_cache
-        if cache[0] is not palette:
-            cache = self._lay_cache = (palette, {})
-        slots = cache[1]  # id(block) -> (block, its palette index): found from the first write of it
-        write = inner._write
-        journal_append = rec.journals[active].append
+        palette, blocks = inner.region._Region__palette, inner.region._Region__blocks
         writer = rec.writer
-        writer_get = writer.get
-        owner_get = dust_owner.get
-        put_kind, put_owner, put_bit = grid.put_kind, grid.put_owner, grid.put
-        solid_bit = solid._grid_bit
-        solid_has, solid_add = solid.__contains__, set.add
-        dict_set = dict.__setitem__
-        item = blocks.item
-        kinds_get = _KINDS.get
-        red_kind, support_kind = _kind_of(REDSTONE.id), _kind_of(support.id)
-        red_slot = slots.get(id(REDSTONE))
-        sup_slot = slots.get(id(support))
-        missing = _MISSING
-        torch_ids = _TORCH_IDS
-
-        def lay(pos) -> None:
-            nonlocal red_slot, sup_slot
-            if type(pos) is not tuple:
-                return _lay_dust_cell_original(self, solid, dust_owner, net_id, pos, support)
-            x, y, z = pos
-            existing = palette[item(x, y, z)]
-            block_id = existing.id
-            if "redstone_wire" in block_id or block_id in torch_ids:
-                owner = owner_get(pos)
-                if owner is not None and owner != net_id:
-                    raise LayConflict(f"Dust collision at {pos} for nets {owner} vs {net_id}", (pos,))
-                return
-            elif block_id != "minecraft:air":
-                raise LayConflict(f"Tried to redstone over an existing block ({existing}) at {pos}", (pos, (x, y + 1, z)))
-            # workspace[pos] = REDSTONE
-            journal_append(("block", inner, pos, existing, writer_get(pos)))
-            writer[pos] = active
-            was = kinds_get(block_id)
-            if was is None:
-                was = _kind_of(block_id)
-            if was != red_kind:
-                put_kind(pos, was ^ red_kind, red_kind)
-            if red_slot is None:
-                write(pos, REDSTONE)
-                red_slot = slots[id(REDSTONE)] = (REDSTONE, item(x, y, z))
-            blocks[pos] = red_slot[1]
-            # dust_owner[pos] = net_id
-            journal_append(("dict", dust_owner, pos, owner_get(pos, missing), None))
-            dict_set(dust_owner, pos, net_id)
-            put_owner(pos, net_id)
-            # _place_support
-            if y <= 0:
-                return
-            below = (x, y - 1, z)
-            if solid_has(below):
-                return
-            under = palette[item(x, y - 1, z)]
-            under_id = under.id
-            if under_id != "minecraft:air" or (y >= 2 and "redstone_wire" in palette[item(x, y - 2, z)].id):
-                _place_support(self, solid, dust_owner, net_id, pos, support)  # a conflict, or maybe a stair
-                return
-            journal_append(("block", inner, below, under, writer_get(below)))
-            writer[below] = active
-            was = kinds_get(under_id)
-            if was is None:
-                was = _kind_of(under_id)
-            if was != support_kind:
-                put_kind(below, was ^ support_kind, support_kind)
-            if sup_slot is None:
-                write(below, support)
-                sup_slot = slots[id(support)] = (support, item(x, y - 1, z))
-            blocks[below] = sup_slot[1]
-            journal_append(("set", solid, below, False, None))
-            solid_add(solid, below)
-            put_bit(below, solid_bit, True)
-
-        return lay
+        if not (type(palette) is list and blocks.dtype == np.uint32 and blocks.ndim == 3 and type(writer) is dict):
+            return None
+        cache = self._lay_cache
+        if cache[0] is not palette:  # saving a schematic replaces the palette
+            cache = self._lay_cache = (palette, {}, [])
+        # cache: palette, id(block) -> (block, its palette index) found when first written, per index _dust_class
+        return _astar.DustLayer(
+            grid, blocks, palette, cache[2], cache[1], rec.journals[active], writer, inner, solid, dust_owner, active,
+            net_id, inner._write, LayConflict, lambda pos: _place_support(self, solid, dust_owner, net_id, pos, support),
+            _dust_class, REDSTONE, support, _MISSING, _kind_of(REDSTONE.id), _kind_of(support.id), solid._grid_bit)
 
     def __setitem__(self, pos, block: BlockState) -> None:
         pos = tuple(pos)
