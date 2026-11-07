@@ -536,16 +536,12 @@ def _place_repeaters_for_net(
     """
     # Cells with >1 distinct successor across all paths are branch points;
     # a repeater there can only drive one direction so it is never viable.
-    successors: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+    first_next: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+    branch_points: set[tuple[int, int, int]] = set()
     for path in ordered_paths:
-        for i in range(len(path) - 1):
-            cell = path[i]
-            if cell not in successors:
-                successors[cell] = set()
-            successors[cell].add(path[i + 1])
-    branch_points: set[tuple[int, int, int]] = {
-        cell for cell, succs in successors.items() if len(succs) > 1
-    }
+        for cell, nxt in zip(path, path[1:]):
+            if first_next.setdefault(cell, nxt) != nxt:
+                branch_points.add(cell)
 
     sinks = {path[-1] for path in ordered_paths}  # a later branch can run on through a sink's pin cell
     if pins is not None:
@@ -578,7 +574,7 @@ def _place_repeaters_for_net(
     # reset point to pos, never past it: a walk counts signal from its first cell. Prepended
     # to tree-seed paths so the backward cap search can
     # reach viable repeater positions in the already-laid upstream wire.
-    upstream_seg: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
+    upstream_seg: dict[tuple[int, int, int], tuple[list[tuple[int, int, int]], int, int]] = {}  # pos -> (path, lo, hi)
     upstream_dist: dict[tuple[int, int, int], int] = {}  # signal already spent at that reset cell
     # The index answers repeater and torch from a set, where the region decodes a block.
     index = workspace.block_index() if hasattr(workspace, "block_index") else None
@@ -593,7 +589,8 @@ def _place_repeaters_for_net(
         start = path[0]
         # Prepend upstream segment so the cap search can look back into prior wire.
         if start in upstream_seg:
-            path = upstream_seg[start][:-1] + path  # upstream[:-1] avoids duplicating start
+            seg, lo, hi = upstream_seg[start]
+            path = seg[lo:hi - 1] + path  # upstream[:-1] avoids duplicating start
 
 
         # A path starts at a reset location, some signal past it after a tower or torch
@@ -624,7 +621,7 @@ def _place_repeaters_for_net(
 
             depths.append(depth)
             dist = depth - reset_depth
-            upstream_seg[pos] = path[reset_idx:pos_idx + 1]
+            upstream_seg[pos] = (path, reset_idx, pos_idx + 1)  # sliced when a later path starts here
             upstream_dist[pos] = depths[reset_idx] - reset_depth
             if dist >= _REPEATER_INTERVAL:
                 # Scan backward in signal-depth units, not path-index units.
