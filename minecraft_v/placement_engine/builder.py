@@ -2718,12 +2718,16 @@ def build_litematic_from_component_list(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with phase("[write] saving litematic"):
         save_schematic(schematic, str(out_path))
+    last_build_stats.clear()
+    last_build_stats.update(size=tuple(size), nets=len(comp.nets), failed=len(routing_failures),
+                            violations=len(signal_violations))
     if retain:
         _retained.append(locals())
     return out_path
 
 
 _retained: list = []  # see build_litematic_from_component_list's retain
+last_build_stats: dict = {}  # the last finished build's size and counts, for the summary line
 
 
 def build_macro(name: str, sub: ComponentList, ports: dict[str, str], cells: int, schematics_dir: Path,
