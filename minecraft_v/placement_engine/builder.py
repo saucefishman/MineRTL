@@ -2535,6 +2535,10 @@ def build_litematic_from_component_list(
 
     # Only a check of the wire as it is now: it runs in a forked process beside what follows, up to writing the build.
     signal_check = Forked(check_signals) if capture is None else None
+    # Logs only, so a fork of its own too, unless pin extensions are still to be laid.
+    support_check = Forked(lambda: _report_unsupported_blocks(
+        workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)) \
+        if capture is None and not output_pin_targets else None
     signal_violations = check_signals() if signal_check is None else []
 
     def checked_signals() -> list:
@@ -2600,8 +2604,9 @@ def build_litematic_from_component_list(
         elif snapshot_dir is not None:
             save_schematic_artifact("extensions.litematic", workspace, snapshot_dir)
 
-    with phase("[verify] unsupported blocks"):
-        _report_unsupported_blocks(workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)
+    if support_check is None:
+        with phase("[verify] unsupported blocks"):
+            _report_unsupported_blocks(workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)
 
     if capture is not None:
         capture.update(
@@ -2696,6 +2701,8 @@ def build_litematic_from_component_list(
 
     with phase("[verify] waiting for the signal check"):
         signal_violations = checked_signals()
+        if support_check is not None:
+            support_check.result()
     if signal_violations and not macros and not allow_routing_failures:
         raise RuntimeError(f"Verify still finds {len(signal_violations)} fault(s) after repair, first: {signal_violations[0]}")
     if resolved_probes or clock_entry:
