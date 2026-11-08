@@ -217,17 +217,26 @@ def _around_boxes(region: Region, boxes: Iterable[Box], reach: int) -> np.ndarra
     return np.unique(np.concatenate(found), axis=0) if len(found) > 1 else found[0]
 
 
+_NEAR_CHUNK = 1 << 20  # moved cells made at a time by cells_in_boxes_near
+
+
 def cells_in_boxes_near(region: Region, boxes: Iterable[Box], reach: int, offsets: Iterable[tuple[int, int, int]]) -> np.ndarray:
     """Cells inside the boxes, sorted, an offset away from a cell around them: what those cells could touch."""
     boxes = list(boxes)
     around = _around_boxes(region, boxes, reach)
     sx, sy, sz = region._Region__blocks.shape
-    moved = (around[:, None, :] + np.array(list(offsets), dtype=np.int64)[None, :, :]).reshape(-1, 3)
-    inside = np.zeros(len(moved), dtype=bool)
-    for lo, hi in boxes:
-        inside |= ((moved >= lo) & (moved < hi)).all(axis=1)
-    moved = moved[inside]
-    moved = moved[((moved >= 0) & (moved < (sx, sy, sz))).all(axis=1)]
+    shifts = np.array(list(offsets), dtype=np.int64)[None, :, :]
+    kept = []
+    # A slice of the cells at a time: all of them moved by every offset is dozens of times their size.
+    step = max(1, _NEAR_CHUNK // max(1, shifts.shape[1]))
+    for start in range(0, len(around), step):
+        moved = (around[start:start + step, None, :] + shifts).reshape(-1, 3)
+        inside = np.zeros(len(moved), dtype=bool)
+        for lo, hi in boxes:
+            inside |= ((moved >= lo) & (moved < hi)).all(axis=1)
+        moved = moved[inside]
+        kept.append(moved[((moved >= 0) & (moved < (sx, sy, sz))).all(axis=1)])
+    moved = np.concatenate(kept) if kept else np.empty((0, 3), dtype=np.int64)
     return np.unique(moved, axis=0)
 
 

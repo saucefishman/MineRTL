@@ -47,6 +47,21 @@ class CellSet:
             parts.append((np.asarray(origins, dtype=np.int64)[:, None] + offsets[None, :]).ravel())
         return cls(np.unique(np.concatenate(parts)) if parts else np.empty(0, dtype=np.int64))
 
+    @classmethod
+    def from_keys(cls, keys) -> CellSet:
+        """Cells given as packed keys (see pack), in any order, repeats allowed."""
+        return cls(np.unique(np.asarray(keys, dtype=np.int64)))
+
+    def with_keys(self, keys) -> CellSet:
+        """This set and some more cells, as packed keys."""
+        return CellSet.from_keys(np.concatenate((np.frombuffer(self.keys, dtype=np.int64), np.asarray(keys, dtype=np.int64))))
+
+    def cells_array(self) -> np.ndarray:
+        """The cells as an n x 3 int64 array, sorted by key."""
+        keys = np.frombuffer(self.keys, dtype=np.int64)
+        return np.stack(((keys & POS_MASK) - POS_BIAS, (keys >> POS_BITS & POS_MASK) - POS_BIAS,
+                         (keys >> 2 * POS_BITS) - POS_BIAS), axis=1)
+
     def __contains__(self, cell) -> bool:
         x, y, z = cell
         key = (x + POS_BIAS) | (y + POS_BIAS) << POS_BITS | (z + POS_BIAS) << 2 * POS_BITS

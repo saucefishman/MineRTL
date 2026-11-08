@@ -41,7 +41,7 @@ from .layout import (
 from .poisson import _poisson_placement
 from .propagate import comparator_entity, settle as settle_blocks
 from .pathfinding import IndexedWorkspace, _astar, _find_wire_path, _signal_depths
-from .cellset import CellSet
+from .cellset import CellSet, pack
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -2103,7 +2103,7 @@ def _route_all_nets(
     boxes = [(p.origin, (p.origin[0] + p.component.footprint.width, p.origin[1] + p.component.footprint.height,
                          p.origin[2] + p.component.footprint.depth)) for p in macros]
     failures += _repair_faulty_nets(router, jobs, {key for key, _ in failures},
-                                    HiddenBoxes(frozenset(_component_interior(placed)), boxes), deadline)
+                                    HiddenBoxes(_interior_cellset(placed), boxes), deadline)
     if keep_router is not None:
         keep_router.append((router, {job.key: job for job in jobs}))
     return failures, inverted_cells, router.paths
@@ -2233,7 +2233,7 @@ def _report_flat_violations(
     stamps = {p.component.id: (macros[p.component.metadata["macro"]], p.origin, bool(p.component.metadata.get("mirror_x")),
                                   bool(p.component.metadata.get("rotate_180")))
               for p in placed if p.component.type == ComponentType.CUSTOM}
-    hidden = _component_interior(placed)
+    hidden_keys: list[int] = []  # gate cells inside stamped macros, on top of the placed gates'
     opaque = _opaque_boxes(placed, macros)
     owner = OwnerOverlay(dust_owner)
     spec: dict[str, tuple[tuple[int, int, int], list[tuple[int, int, int]]]] = {}
@@ -2281,9 +2281,9 @@ def _report_flat_violations(
             for dx in range(sx):
                 for dy in range(sy):
                     for dz in range(sz):
-                        hidden.add(macro.world((x + dx, y + dy, z + dz), origin, mirrored, rotated))
+                        hidden_keys.append(pack(*macro.world((x + dx, y + dy, z + dz), origin, mirrored, rotated)))
     with ProgressBar("[verify] flat signals", len(spec)) as bar:
-        violations = verify_signals(workspace, spec, owner, HiddenBoxes(frozenset(hidden), opaque),
+        violations = verify_signals(workspace, spec, owner, HiddenBoxes(_interior_cellset(placed).with_keys(hidden_keys), opaque),
                                     on_net=lambda net_id: bar.update(info=net_id))
     for violation in violations:
         log(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
@@ -2696,7 +2696,7 @@ def build_litematic_from_component_list(
         if macros:
             return _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros, failed_nets)
         return _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
-                                         frozenset(_component_interior(placed)), failed_nets)
+                                         _interior_cellset(placed), failed_nets)
 
     # Only a check of the wire as it is now: it runs in a forked process beside what follows, up to writing the build.
     signal_check = Forked(check_signals) if capture is None else None

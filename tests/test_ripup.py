@@ -155,3 +155,39 @@ def test_pos_map_is_a_dict_of_cells():
     assert m.pop((1, 2, 3)) == "c" and (1, 2, 3) not in m and m.pop((1, 2, 3), None) is None and len(m) == 1
     m[(1, 2, 3)] = "d"  # a removed cell comes back
     assert dict(m.items()) == {(1, 2, 3): "d", (-5, 0, 7): "b"} and dict(m.copy().items()) == dict(m.items())
+
+
+def test_cell_set_as_the_hidden_cells_of_signal_bytes_matches_a_frozenset():
+    import numpy as np
+    from litemapy import BlockState
+    from minecraft_v.placement_engine.cellset import CellSet, pack
+    from minecraft_v.placement_engine.constants import REDSTONE
+    from minecraft_v.placement_engine.verify import HiddenBoxes, signal_bytes
+
+    region = Region(0, 0, 0, 8, 4, 8)
+    for x in range(8):
+        region[x, 1, 3] = REDSTONE
+    cells = {(2, 1, 3), (3, 1, 3), (5, 1, 3), (20, 1, 3)}  # the last is outside the region
+    box = [((6, 0, 0), (8, 4, 8))]
+    plain = signal_bytes(region, HiddenBoxes(frozenset(cells), box), frozenset())
+    packed = signal_bytes(region, HiddenBoxes(CellSet.from_cells(cells), box), frozenset())
+    assert plain is not None and np.array_equal(plain, packed)
+    only = CellSet.from_boxes([((2, 1, 3), (2, 1, 1))])
+    assert np.array_equal(signal_bytes(region, frozenset({(2, 1, 3), (3, 1, 3)}), frozenset()), signal_bytes(region, only, frozenset()))
+    assert CellSet.from_cells({(1, 2, 3)}).with_keys([pack(4, 5, 6), pack(1, 2, 3)]).cells_array().tolist() == [[1, 2, 3], [4, 5, 6]]
+
+
+def test_cells_in_boxes_near_gives_the_same_cells_however_it_is_chunked(monkeypatch):
+    import numpy as np
+    from litemapy import BlockState
+    from minecraft_v.placement_engine import block_utils
+
+    rng = np.random.default_rng(3)
+    region = Region(0, 0, 0, 14, 8, 14)
+    for _ in range(300):
+        region[int(rng.integers(14)), int(rng.integers(8)), int(rng.integers(14))] = STONE
+    boxes = [((3, 1, 3), (7, 5, 7)), ((9, 2, 8), (13, 6, 12))]
+    offsets = [(1, 0, 0), (-1, 0, 0), (0, 0, 2), (0, -1, 1), (2, 1, -2)]
+    whole = block_utils.cells_in_boxes_near(region, boxes, 2, offsets)
+    monkeypatch.setattr(block_utils, "_NEAR_CHUNK", 7)
+    assert np.array_equal(block_utils.cells_in_boxes_near(region, boxes, 2, offsets), whole) and len(whole)
