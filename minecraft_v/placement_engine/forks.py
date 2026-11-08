@@ -8,6 +8,8 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import TypeVar
 
+from minecraft_v.progress import log
+
 T = TypeVar("T")
 R = TypeVar("R")
 
@@ -60,13 +62,16 @@ def free_bytes() -> int | None:
         return None
 
 
-def children_that_fit(wanted: int, share: float) -> int:
+def children_that_fit(wanted: int, share: float, what: str = "fork") -> int:
     """How many of `wanted` children of this process, each dirtying `share` of its size, the free memory takes."""
     free = free_bytes()
     if wanted < 1 or free is None:
         return wanted
     each = max(parent_bytes() * share, 1)
-    return max(0, min(wanted, int(free * _USE_OF_FREE / each)))
+    fit = max(0, min(wanted, int(free * _USE_OF_FREE / each)))
+    log(f"[fork] {what}: {fit} of {wanted} children (free {free / 2**30:.1f} GB, {each / 2**30:.1f} GB each)"
+        f"{'' if fit >= wanted else ', the rest run here'}")
+    return fit
 
 
 def workers() -> int:
@@ -87,7 +92,7 @@ def fork_batches(fn: Callable[[Sequence[T]], R], items: Sequence[T], processes: 
     than a pickled object per item."""
     n = min(processes or workers(), len(items) // _MIN_PER_WORKER)
     if n > 1 and hasattr(os, "fork"):
-        n = children_that_fit(n, _WORKER_SHARE)
+        n = children_that_fit(n, _WORKER_SHARE, "fork_map")
     if n <= 1 or not hasattr(os, "fork"):
         return [fn(items)]
     bounds = [len(items) * k // n for k in range(n + 1)]
@@ -150,7 +155,7 @@ class Forked:
         self._error: BaseException | None = None
         self._pid = 0
         self._read = -1
-        if not hasattr(os, "fork") or workers() <= 1 or not children_that_fit(1, _FORKED_SHARE):
+        if not hasattr(os, "fork") or workers() <= 1 or not children_that_fit(1, _FORKED_SHARE, "Forked"):
             self._done = True
             try:
                 self._value = fn()
