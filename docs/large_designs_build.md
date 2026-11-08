@@ -110,6 +110,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   1.1-1.5 GB forks), save 12.3 GB. Litematic 46 MB, world 694x784x769, artifacts 118 MB. Was killed at 14 GB before.
   Goal not yet met: parent 12.3 GB at save, verify fork private memory on top, 10 routing failures.
 
+- 2026-11-08 a3e6fa2 merged post-route-mem: verify fork hides gate interiors as packed keys, verify workers capped at 4
+  (MINECRAFT_V_VERIFY_WORKERS), chunked settle neighbourhood. Signal child -6..-20%; output same. Post-wire phases at
+  datapath x24: repair +1.6 GB native A* transient, hold +93, timing +40, settle +60 (+200 transient), fork ~30% of parent.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets incl. clock): classify + smallest repro. (worker4, prio -10)
