@@ -150,6 +150,12 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   Candidate fixes after the heap dump: trim pools per net / at phase ends, shrink_to_fit beyond a cap,
   malloc_zone_pressure_relief after routing. Dump (nat-a1, cpu x64) waits for x512c.
 
+- 2026-11-08 cpu x512 acceptance #3 (base a8112c3 + d6c576f, merged as 23a3a91): COMPLETED 7,249 s. Parent
+  phys_footprint_peak 11.26 GB (< 12: parent goal met). Wire 10.24 GB max, 2 failed at wire done (was 15: cull fix) ->
+  1 after repair (net_2 clock: repeater extension). Verify 0 violations. Hold/timing window: parent 9.2 GB + forks
+  (3.3 GB + 4 x 1.4-1.8 GB) = 18.5 GB summed (overcounts COW-shared pages; true total unmeasured). Litematic 46 MB.
+  Remaining: fork memory at hold/timing (worker2), net_2 repeater (worker4), 3 seeds.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
