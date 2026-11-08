@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import collections
 from typing import Iterable
 from litemapy import BlockState, Region
 from . import _astar
@@ -525,28 +527,32 @@ def _place_repeaters_for_net(
     if pins is not None:
         sinks &= pins
 
-    def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
+    def reject_reason(path: list[tuple[int, int, int]], j: int) -> str | None:
+        """Why no repeater can go at path[j], or None if one can."""
         if j <= 0 or j >= len(path) - 1:
-            return False
+            return "end"
         if path[j] in sinks:
-            return False  # a repeater across the pin cell hides the wire from the gate
+            return "sink"  # a repeater across the pin cell hides the wire from the gate
         x, y, z = path[j]
         px, py, pz = path[j - 1]
         nx, ny, nz = path[j + 1]
         dx, dz = x - px, z - pz
         if (dx, dz) not in _DELTA_TO_FACING:
-            return False
+            return "vertical"
         # At a slope's foot it would read the block under the slope: glass, or powered by other wire.
         if (ny != y or y != py) and not (_foot_repeaters[0] and y == py - 1 and ny == y):
-            return False
+            return "slope"
         if (nx - x, nz - z) != (dx, dz):
-            return False  # turn after repeater
+            return "turn"  # turn after repeater
         if path[j] in branch_points:
-            return False  # branch point — repeater drives only one output
+            return "branch"  # branch point: a repeater drives only one output
         if (checks.signal_returns(net_id, path[j + 1], path[j - 1], path[j]) if checks is not None
                 else _signal_returns(workspace, dust_owner, net_id, path[j + 1], path[j - 1], path[j])):
-            return False  # wire past the repeater also touches its input: it would latch on
-        return True
+            return "returns"  # wire past the repeater also touches its input: it would latch on
+        return None
+
+    def is_viable(path: list[tuple[int, int, int]], j: int) -> bool:
+        return reject_reason(path, j) is None
 
     # upstream_seg[pos] = path segment [last_reset_cell, ..., pos] from the most recent
     # reset point to pos, never past it: a walk counts signal from its first cell. Prepended
@@ -619,9 +625,10 @@ def _place_repeaters_for_net(
                         reset_idx = j
                         break
                 else:
+                    reasons = collections.Counter(reject_reason(path, j) for j in range(cap, reset_idx, -1))
                     raise LayConflict(
                         f"Net {net_id!r}: cannot place repeater to extend signal at path depth {pos_idx} "
-                        f"(signal dist {dist} >= {_REPEATER_INTERVAL}, no viable position in "
+                        f"(signal dist {dist} >= {_REPEATER_INTERVAL}, rejected {dict(reasons)}, no viable position in "
                         f"{path[reset_idx+1:cap+1]})",
                         tuple(path[reset_idx + 1:pos_idx]),
                     )
