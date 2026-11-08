@@ -141,6 +141,9 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   ~1.7 GB of the x64 peak is allocator/native, unattributed. Third x512 acceptance on base + d6c576f started (worker2).
 - Reliability TODO: scipy FFT "RuntimeError: Work item submitted after shutdown" in 2 back-to-back builds (rerun ok).
 
+- 2026-11-08 1 GB synthetic load: streaming loader peak 2,662 MB (was 4,198 whole-text parse), 211 s both. With synth
+  8.9 GB: GOAL 2 (1 GB synth + load < 12 GB) PASSES on the synthetic design with ~3 GB margin. cpu N=5900 pending.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
