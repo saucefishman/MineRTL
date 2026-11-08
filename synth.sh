@@ -165,9 +165,12 @@ fi
 yosys_log="${artifacts_dir}/yosys.log"
 yosys_err="${artifacts_dir}/yosys.err"
 yosys_spinner() {
-    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) i=0 start=$SECONDS pass
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) i=0 start=$SECONDS pass= latest
     while true; do
-        pass="$(grep -E '^[0-9]+\. Executing' "$yosys_log" 2>/dev/null | tail -n 1 | cut -c1-60 || true)"
+        # Only the log's end: a multi-GB netlist's log is tens of MB, and grepping all of it every 0.1 s costs a core.
+        # A pass header further back than that is not found, so the last one seen stays.
+        latest="$(tail -c 65536 "$yosys_log" 2>/dev/null | grep -E '^[0-9]+\. Executing' | tail -n 1 | cut -c1-60 || true)"
+        [[ -z "$latest" ]] || pass="$latest"
         printf '\r%s [yosys] %ds %s\033[K' "${frames[i++ % 10]}" "$((SECONDS - start))" "$pass" >&2
         sleep 0.1
     done
@@ -274,30 +277,69 @@ if [[ "$use_synth_cache" == true ]] && ! grep -qE '`include[[:space:]]|\$readmem
                   printf '%s\n' "${f##*/}"; cat "$f"; done; } | "${sha[@]}" | cut -c1-24)"
     synth_cache="${synth_cache_dir%/}/${key}"
 fi
-if [[ -n "$synth_cache" && -f "$synth_cache/netlist.json" ]]; then
+# Entries are gzipped (a netlist shrinks ~15x). The newest stay: a hit touches its entry, and a store drops the oldest
+# entries while the cache is over MINECRAFT_V_SYNTH_CACHE_MAX_GB (default 5), keeping the one just used.
+if command -v pigz >/dev/null; then gz=(pigz -1); else gz=(gzip -1); fi
+evict_synth_cache() {
+    local max_kb used_kb=0 entry kb sizes=() entries=()
+    max_kb="$(awk -v gb="${MINECRAFT_V_SYNTH_CACHE_MAX_GB:-5}" 'BEGIN { printf "%d", gb * 1048576 }')"
+    while IFS= read -r entry; do  # oldest first
+        entry="${entry%/}"
+        case "$entry" in */binaries|*.tmp*) continue ;; esac
+        kb="$(du -sk "$entry" | cut -f1)"
+        entries+=("$entry")
+        sizes+=("$kb")
+        used_kb=$((used_kb + kb))
+    done < <(ls -1dtr "${synth_cache_dir%/}"/*/ 2>/dev/null)
+    local i
+    for ((i = 0; i < ${#entries[@]} - 1 && used_kb > max_kb; i++)); do
+        rm -rf "${entries[i]}"
+        used_kb=$((used_kb - sizes[i]))
+    done
+}
+if [[ -n "$synth_cache" && -f "$synth_cache/netlist.json.gz" ]]; then
     stop_spinner
-    cp "$synth_cache/netlist.json" "$synth_cache/yosys.log" "$synth_cache/yosys.err" "$artifacts_dir/"
+    touch "$synth_cache"
+    "${gz[0]}" -dc "$synth_cache/netlist.json.gz" > "$artifacts_dir/netlist.json"
+    "${gz[0]}" -dc "$synth_cache/yosys.log.gz" > "$yosys_log"
+    cp "$synth_cache/yosys.err" "$artifacts_dir/"
     echo "[yosys] netlist from $synth_cache (--no-synth-cache to run yosys)" >&2
     cat "$yosys_err"
 else
+    # yosys writes the netlist into a pipe that unplace reads: it is on disk once, not as a raw file and a rewritten copy.
+    netlist_pipe="${artifacts_dir}/netlist.pipe"
+    rm -f "$netlist_pipe"
+    mkfifo "$netlist_pipe"
+    unplace "$netlist_pipe" > "${artifacts_dir}/netlist.json.tmp" &
+    unplace_pid=$!
     yosys_status=0
     yosys -q -l "$yosys_log" -p "${yosys_script}
-write_json \"${artifacts_dir}/netlist.json\"
+write_json \"${netlist_pipe}\"
 stat
 " > "$yosys_err" 2>&1 || yosys_status=$?
     stop_spinner
     cat "$yosys_err"
+    exec 3<>"$netlist_pipe" 3>&-  # unplace is still waiting to open the pipe if yosys failed before write_json: end its input
+    unplace_status=0
+    wait "$unplace_pid" || unplace_status=$?
+    rm -f "$netlist_pipe"
     if [[ $yosys_status -ne 0 ]]; then
+        rm -f "${artifacts_dir}/netlist.json.tmp"
         exit "$yosys_status"
     fi
-    unplace "${artifacts_dir}/netlist.json" > "${artifacts_dir}/netlist.json.tmp"
+    if [[ $unplace_status -ne 0 ]]; then
+        exit "$unplace_status"
+    fi
     mv "${artifacts_dir}/netlist.json.tmp" "${artifacts_dir}/netlist.json"
     if [[ -n "$synth_cache" ]]; then
         mkdir -p "$synth_cache.tmp$$"
-        cp "$artifacts_dir/netlist.json" "$yosys_log" "$yosys_err" "$synth_cache.tmp$$/"
+        "${gz[@]}" -c "$artifacts_dir/netlist.json" > "$synth_cache.tmp$$/netlist.json.gz"
+        "${gz[@]}" -c "$yosys_log" > "$synth_cache.tmp$$/yosys.log.gz"
+        cp "$yosys_err" "$synth_cache.tmp$$/"
         if [[ -e "$synth_cache" ]] || ! mv "$synth_cache.tmp$$" "$synth_cache" 2>/dev/null; then
             rm -rf "$synth_cache.tmp$$"  # another build got there first
         fi
+        evict_synth_cache
     fi
 fi
 

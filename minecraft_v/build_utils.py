@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,9 +37,22 @@ def save_build_artifacts(
         component_list: ComponentList,
         artifacts_dir: Path = DEFAULT_ARTIFACTS_DIR,
 ) -> str:
-    """Writes component_list.json; returns its text."""
+    """Writes component_list.json, one line; returns its SHA-256. Each part is dumped on its own: the whole text of a big
+    list is gigabytes, and nothing here needs it in memory."""
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    out = artifacts_dir / "component_list.json"
-    text = component_list.model_dump_json(indent=2)
-    out.write_text(text)
-    return text
+    digest = hashlib.sha256()
+    with open(artifacts_dir / "component_list.json", "wb") as f:
+        def put(data: bytes) -> None:
+            f.write(data)
+            digest.update(data)
+
+        put(b'{"schema_version":%s,"components":[' % json.dumps(component_list.schema_version).encode())
+        def put_all(items) -> None:
+            for i, item in enumerate(items):
+                put(item.model_dump_json().encode() if i == 0 else b"," + item.model_dump_json().encode())
+
+        put_all(component_list.components)
+        put(b'],"nets":[')
+        put_all(component_list.nets)
+        put(b"]}")
+    return digest.hexdigest()

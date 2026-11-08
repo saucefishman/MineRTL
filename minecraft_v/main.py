@@ -30,6 +30,7 @@ from minecraft_v.placement_engine.ir import (
     NetConnection,
     NetEndpoint,
     PinRef,
+    PlacementHints,
 )
 
 
@@ -109,8 +110,11 @@ def _add_ram_group(stacks, components: list[Component], bit_endpoints) -> None:
                                 metadata={"macro": block.name, "bank": True, "south_pins": True}))
 
 
-def module_to_component_list(module: Module) -> ComponentList:
+def module_to_component_list(module: Module, consume: bool = False) -> ComponentList:
+    """consume: empty module.cells as they're converted, so a big netlist's cells are freed while the components grow."""
     components: list[Component] = []
+    pin_refs: dict[tuple, PinRef] = {}  # gate pins repeat by type, direction and tie: one PinRef each, shared
+    no_hints = PlacementHints()  # nothing reads or sets hints, so every component can share the empty one
     init_high = _init_high_bits(module)
     # bit_id -> [(component_id, pin_name, Direction)]
     bit_endpoints: dict[int, list[tuple[str, str, Direction]]] = defaultdict(list)
@@ -131,7 +135,8 @@ def module_to_component_list(module: Module) -> ComponentList:
     if grouped:
         _add_ram_group(stacks, components, bit_endpoints)
 
-    for cell_name, cell in module.cells.items():
+    for cell_name in list(module.cells):
+        cell = module.cells.pop(cell_name) if consume else module.cells[cell_name]
         if cell.type in DEBUG_CELLS or cell_name in grouped:
             continue
         if cell.type in BLOCK_CELLS:
@@ -166,15 +171,18 @@ def module_to_component_list(module: Module) -> ComponentList:
                 pin_dir = Direction.IN if cell.port_directions[pin_name] == "input" else Direction.OUT
             else:
                 pin_dir = schematic_pin.direction
-            pin_ref = apply_schematic_pin(pin_name, pin_dir, schematic)
             const_val: str | None = None
             for bit in cell.connections.get(pin_name, []):
                 if isinstance(bit, int):
                     bit_endpoints[bit].append((cell_name, pin_name, pin_dir))
                 elif isinstance(bit, str) and bit in ('0', '1', 'x', 'z'):
                     const_val = bit
-            if const_val is not None:
-                pin_ref = pin_ref.model_copy(update={"const_value": const_val})
+            pin_ref = pin_refs.get((comp_type, pin_name, pin_dir, const_val))
+            if pin_ref is None:
+                pin_ref = apply_schematic_pin(pin_name, pin_dir, schematic)
+                if const_val is not None:
+                    pin_ref = pin_ref.model_copy(update={"const_value": const_val})
+                pin_refs[comp_type, pin_name, pin_dir, const_val] = pin_ref
             pins.append(pin_ref)
 
         starts_high = comp_type in (ComponentType.DFF, ComponentType.DFFE) and \
@@ -185,6 +193,7 @@ def module_to_component_list(module: Module) -> ComponentList:
             pins=pins,
             params=dict(cell.parameters),
             footprint=schematic.footprint,
+            hints=no_hints,
             metadata={"init": 1} if starts_high else {},
         ))
 
@@ -291,7 +300,7 @@ def main():
     out_litematic.with_suffix(SERVER_FILE_SUFFIX).unlink(missing_ok=True)
 
     with phase("[load] reading netlist"), open(args.netlist) as f:
-        netlist = Netlist.model_validate_json(f.read())
+        netlist = Netlist.from_json(f.read())
 
     schematic_name = args.schematic_name or args.module
 
@@ -301,11 +310,12 @@ def main():
         raise SystemExit(f"Module '{args.module}' not found. Available: {available}")
     set_block_cache(Path(args.macro_cache) / "ram")
     with phase("[load] netlist to components"):
-        component_list = module_to_component_list(module)
         probes = extract_probes(module) if args.debug_prints else None
+        component_list = module_to_component_list(module, consume=True)
+    del netlist, module  # converted: its memory is the largest share of a big build's peak
 
     with phase("[load] saving component list"):
-        component_json = save_build_artifacts(component_list)
+        component_key = save_build_artifacts(component_list)
 
     allow_routing_failures = args.allow_routing_failures or args.route_deadline is not None
     output_pin_targets = (
@@ -358,7 +368,7 @@ def main():
                                                             else max(2, 2 * _MACRO_BANK_COLUMNS)),
                                                            on_class=report, min_coverage=_MACRO_MIN_COVERAGE,
                                                            repeats_cache=Path(args.macro_cache) / "repeats",
-                                                           comp_json=component_json)
+                                                           comp_key=component_key)
         macros = {**macros, **rams}
         log(f"[macro] {len(instances)} instances; top level {len(component_list.components)} components, "
               f"{len(component_list.nets)} nets")

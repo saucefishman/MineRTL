@@ -716,13 +716,13 @@ _REPEATS_TIME_LIMIT = 30.0  # find_repeated's; a search that ran into it isn't k
 
 
 def _find_repeated_cached(comp: ComponentList, max_fanout: int, min_cells: int,
-                          cache_dir: Path | None, comp_json: str | None = None) -> list[RepeatedClass]:
+                          cache_dir: Path | None, comp_key: str | None = None) -> list[RepeatedClass]:
     """find_repeated, kept in cache_dir by netlist, settings and the finder's code: a big netlist takes seconds.
-    comp_json: comp as JSON already, to key by (a different form keys differently, so no harm in either)."""
+    comp_key: a digest of comp's JSON, to key by (a different form keys differently, so no harm in either)."""
     if cache_dir is None:
         return find_repeated(comp, max_fanout, min_cells, _REPEATS_TIME_LIMIT)
     code = Path(__file__).with_name("subgraphs.py").read_bytes()
-    text = comp_json if comp_json is not None else comp.model_dump_json()
+    text = comp_key if comp_key is not None else comp.model_dump_json()
     key = hashlib.sha256(b"%d %d\n" % (max_fanout, min_cells) + code + text.encode()).hexdigest()[:24]
     path = cache_dir / f"{key}.pkl"
     try:
@@ -743,13 +743,13 @@ def _find_repeated_cached(comp: ComponentList, max_fanout: int, min_cells: int,
 
 def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dict[str, str], int], Macro],
                    max_fanout: int = 2, min_cells: int = 8, row_tiles: int = 0, bank_columns: int = 0, min_instances: int = 2, on_class: Callable[[RepeatedClass, Macro], None] | None = None,
-                   min_coverage: float = 0.0, repeats_cache: Path | None = None, comp_json: str | None = None,
+                   min_coverage: float = 0.0, repeats_cache: Path | None = None, comp_key: str | None = None,
                    ) -> tuple[ComponentList, dict[str, Macro], list[Instance]]:
     """Replace every repeated subcircuit with a CUSTOM component; returns (top netlist, macros, instances).
 
     min_coverage: below this share of the gates in repeats, nothing is replaced. Macros are obstacles the rest of the
     wire has to go around; they pay for that only when they hold most of the design.
-    repeats_cache: directory keeping what find_repeated found, by netlist. comp_json: comp's JSON, if at hand.
+    repeats_cache: directory keeping what find_repeated found, by netlist. comp_key: a digest of comp's JSON, if at hand.
     """
     macros: dict[str, Macro] = {}
     instances: list[Instance] = []
@@ -759,7 +759,7 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
     pin_rows: list[tuple[str, str, str, Direction]] = []
 
     # Small repeats route worse as macros than as gates.
-    classes = [cls for cls in _find_repeated_cached(comp, max_fanout, min_cells, repeats_cache, comp_json)
+    classes = [cls for cls in _find_repeated_cached(comp, max_fanout, min_cells, repeats_cache, comp_key)
                if len(cls.instances) >= min_instances
                and not _chains_within(cls)]
     gates = sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM)
