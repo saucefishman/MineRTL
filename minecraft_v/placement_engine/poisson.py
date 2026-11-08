@@ -45,7 +45,11 @@ _MU_MIN, _MU_MAX = 0.75, 1.1  # per-iteration lambda growth (ePlace)
 _MU_REF = 0.002              # wirelength rise, as a share of total, that costs one step of growth
 _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
-_LEGAL_BLOCK_PAIRS = 1 << 20  # box pairs the legalizer measures at once
+_LEGAL_BLOCK_PAIRS = 1 << 20  # box pairs the all-pairs legalizer measures at once
+_LEGAL_RECHECK = 0.25  # of the neighbourhood the first pass uses, the one later passes check
+_LEGAL_ROUNDS = 50  # legalizing passes before it falls back to every pair
+_LEGAL_ALL_PAIRS_MAX = 50_000  # boxes the every-pair fallback takes on (n*n bytes, 2.5 GB here)
+_NEAR_PAIRS_CHUNK = 1 << 20  # box pairs tested at once when looking for neighbours
 _REFINE_PASSES = 2  # a fixed amount of work, so a build is the same every run (on floweypu: 4s each, a third gains 0.1%)
 _REFINE_POPS = 60
 _FFT_WORKERS = 4             # threads for the Poisson solve's transforms; the result depends on it, so placements do
@@ -606,8 +610,123 @@ def _occupancy(sizes: np.ndarray):
     return _Occupancy(sizes)
 
 
+def _near_pairs(lo: np.ndarray, hi: np.ndarray, margin: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Every pair i < j of boxes [lo, hi) with a gap under `margin` on each axis (zero: overlapping), found through a grid.
+
+    Each box is entered in the grid cells its widened extent touches; the pairs sharing a cell are tested, and a pair is
+    kept only in the cell holding the corner of its overlap, so none comes twice. Order is fixed by the inputs."""
+    n = len(lo)
+    empty = np.zeros(0, dtype=np.int64)
+    if n < 2:
+        return empty, empty
+    lo_w, hi_w = lo - margin / 2, hi + margin / 2
+    origin = lo_w.min(axis=0)
+    cell = np.maximum(np.median(hi_w - lo_w, axis=0) * 1.5, 1.0)
+    first = np.floor((lo_w - origin) / cell).astype(np.int64)
+    span = np.floor((hi_w - origin) / cell).astype(np.int64) - first + 1
+    dims = first.max(axis=0) + span.max(axis=0)
+    count = span.prod(axis=1)
+    box = np.repeat(np.arange(n), count)
+    local = np.arange(len(box)) - np.repeat(np.cumsum(count) - count, count)
+    along_z, rest = local % span[box, 2], local // span[box, 2]
+    key = ((first[box, 0] + rest // span[box, 1]) * dims[1] + first[box, 1] + rest % span[box, 1]) * dims[2] + first[box, 2] + along_z
+    order = np.argsort(key, kind="stable")
+    key, box = key[order], box[order]
+    end = np.searchsorted(key, key, side="right")
+    later = end - np.arange(len(key)) - 1  # entries after this one in its cell
+    done = np.cumsum(later)
+    ii, jj = [], []
+    start = 0
+    while start < len(key):
+        stop = max(int(np.searchsorted(done, (done[start - 1] if start else 0) + _NEAR_PAIRS_CHUNK, side="right")), start + 1)
+        counts = later[start:stop]
+        a = np.repeat(np.arange(start, stop), counts)
+        b = a + 1 + np.arange(len(a)) - np.repeat(np.cumsum(counts) - counts, counts)
+        bi, bj = box[a], box[b]
+        keep = (lo_w[bi] < hi_w[bj]).all(axis=1) & (lo_w[bj] < hi_w[bi]).all(axis=1)
+        a, bi, bj = a[keep], bi[keep], bj[keep]
+        corner = np.floor((np.maximum(lo_w[bi], lo_w[bj]) - origin) / cell).astype(np.int64)  # the overlap's lowest corner
+        keep = ((corner[:, 0] * dims[1] + corner[:, 1]) * dims[2] + corner[:, 2]) == key[a]
+        ii.append(np.minimum(bi, bj)[keep])
+        jj.append(np.maximum(bi, bj)[keep])
+        start = stop
+    return np.concatenate(ii), np.concatenate(jj)
+
+
 def _legalize(pos: np.ndarray, sizes: np.ndarray, flat: bool) -> np.ndarray:
-    """Remove overlap while keeping relative order: each pair of boxes is separated along one axis.
+    """Remove overlap while keeping relative order, as _legalize_all_pairs does, with constraints only between boxes that
+    are near each other: memory and time grow with the boxes and their neighbours, not with their pairs.
+
+    This is constraint-graph compaction (a pair of boxes gets an edge along the axis that needs the least movement, and a
+    longest-path pass finds the lowest coordinates), but with the edges taken from a neighbourhood instead of from every
+    pair. Boxes that were far apart can be pushed into each other, so after each pass the result is checked for overlap
+    (also through the grid) and the pairs found become edges, until none overlap.
+    """
+    n = len(pos)
+    centre = pos + sizes / 2
+    axes = [a for a in range(3) if not (a == 1 and flat)]
+    order = {a: np.argsort(centre[:, a], kind="stable") for a in axes}
+    rank = {a: np.empty(n, dtype=np.int64) for a in axes}
+    for a in axes:
+        rank[a][order[a]] = np.arange(n)
+    edges: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {a: [] for a in axes}  # (earlier box, later box) along the axis
+
+    def constrain(i: np.ndarray, j: np.ndarray, out: np.ndarray | None = None) -> None:
+        """Edges for the pairs, but with `out` given (where the boxes are now) only for those it doesn't yet keep apart."""
+        need = np.stack([(sizes[i, a] + sizes[j, a]) / 2 - np.abs(centre[i, a] - centre[j, a]) for a in range(3)], axis=1)
+        need = need * _LEGAL_AXIS_COST
+        if flat:
+            need[:, 1] = np.inf
+        choice = need.argmin(axis=1)
+        for a in axes:
+            i_a, j_a = i[choice == a], j[choice == a]
+            first = rank[a][i_a] < rank[a][j_a]
+            before, after = np.where(first, i_a, j_a), np.where(first, j_a, i_a)
+            if out is not None:
+                short = out[after, a] < out[before, a] + sizes[before, a]
+                before, after = before[short], after[short]
+            edges[a].append((before, after))
+
+    def lowest() -> np.ndarray:
+        out = np.array(pos, dtype=float)
+        for a in axes:
+            status(f"legalizing, axis {'xyz'[a]}")
+            before = np.concatenate([e[0] for e in edges[a]]) if edges[a] else np.zeros(0, dtype=np.int64)
+            after = np.concatenate([e[1] for e in edges[a]]) if edges[a] else np.zeros(0, dtype=np.int64)
+            by_after = np.argsort(after, kind="stable")
+            start = np.concatenate([[0], np.cumsum(np.bincount(after, minlength=n))]).tolist()
+            before, size, kept = before[by_after].tolist(), sizes[:, a].tolist(), np.rint(pos[:, a]).tolist()
+            put = [0.0] * n
+            for i in order[a].tolist():
+                floor = 0.0
+                for k in range(start[i], start[i + 1]):
+                    j = before[k]
+                    if put[j] + size[j] > floor:
+                        floor = put[j] + size[j]
+                # Keep the global placement's spread where nothing pushes, so far apart stays far apart.
+                put[i] = kept[i] if kept[i] > floor else floor
+            out[:, a] = put
+        return out
+
+    margin = np.median(sizes, axis=0) if n else np.zeros(3)
+    constrain(*_near_pairs(pos, pos + sizes, margin))
+    for _ in range(_LEGAL_ROUNDS):
+        out = lowest()
+        # Pairs near each other now, not only the overlapping ones: every pass then pushes less into the next.
+        i, j = _near_pairs(out, out + sizes, margin * _LEGAL_RECHECK)
+        if not ((out[i] < out[j] + sizes[j]) & (out[j] < out[i] + sizes[i])).all(axis=1).any():
+            return out
+        constrain(i, j, out)
+    if n > _LEGAL_ALL_PAIRS_MAX:  # n*n bytes: past this, more than the machine has
+        raise RuntimeError(f"legalizing {n} boxes did not settle in {_LEGAL_ROUNDS} rounds")
+    log(f"[place] WARNING: legalizing {n} boxes did not settle in {_LEGAL_ROUNDS} rounds; using every pair")
+    return _legalize_all_pairs(pos, sizes, flat)
+
+
+def _legalize_all_pairs(pos: np.ndarray, sizes: np.ndarray, flat: bool) -> np.ndarray:
+    """_legalize over every pair of boxes, which takes n*n bytes and as many pair checks: the reference, and the fallback.
+
+    Remove overlap while keeping relative order: each pair of boxes is separated along one axis.
 
     That axis is the one needing the least movement (Y counts extra), the pair keeps its order on it,
     and a longest-path sweep along each axis then gives the smallest coordinates meeting all pairs.

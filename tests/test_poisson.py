@@ -221,15 +221,65 @@ def test_legalize_separates_stacked_boxes():
             assert any(out[i, a] + sizes[i, a] <= out[j, a] or out[j, a] + sizes[j, a] <= out[i, a] for a in range(3))
 
 
-def test_legalize_by_blocks_of_rows_equals_all_pairs_at_once(monkeypatch):
+def test_all_pairs_legalize_by_blocks_of_rows_equals_all_pairs_at_once(monkeypatch):
     rng = np.random.default_rng(3)
     pos = rng.integers(0, 60, (150, 3)).astype(float)
     sizes = rng.integers(2, 14, (150, 3)).astype(float)
     for flat in (False, True):
         monkeypatch.setattr(poisson, "_LEGAL_BLOCK_PAIRS", 1 << 30)
-        whole = poisson._legalize(pos, sizes, flat)
+        whole = poisson._legalize_all_pairs(pos, sizes, flat)
         monkeypatch.setattr(poisson, "_LEGAL_BLOCK_PAIRS", 400)  # 2 rows at a time
-        assert (poisson._legalize(pos, sizes, flat) == whole).all()
+        assert (poisson._legalize_all_pairs(pos, sizes, flat) == whole).all()
+
+
+def _overlapping_pairs(pos, sizes):
+    return [(i, j) for i in range(len(pos)) for j in range(i + 1, len(pos))
+            if ((pos[i] < pos[j] + sizes[j]) & (pos[j] < pos[i] + sizes[i])).all()]
+
+
+def test_near_pairs_are_the_pairs_closer_than_the_margin():
+    rng = np.random.default_rng(4)
+    lo = rng.integers(0, 100, (250, 3)).astype(float)
+    size = rng.integers(1, 30, (250, 3)).astype(float)
+    for margin in (np.zeros(3), np.array([5.0, 0.0, 12.0])):
+        i, j = poisson._near_pairs(lo, lo + size, margin)
+        want = {(a, b) for a in range(250) for b in range(a + 1, 250)
+                if ((lo[a] - margin / 2 < lo[b] + size[b] + margin / 2) & (lo[b] - margin / 2 < lo[a] + size[a] + margin / 2)).all()}
+        assert len(i) == len(want) and set(zip(i.tolist(), j.tolist())) == want and (i < j).all()
+
+
+def test_legalize_leaves_no_overlap_and_flat_keeps_y():
+    rng = np.random.default_rng(7)
+    for n, span in ((300, 150), (500, 60)):
+        for flat in (False, True):
+            pos = rng.integers(0, span, (n, 3)).astype(float)
+            sizes = rng.integers(2, 20, (n, 3)).astype(float)
+            if flat:
+                sizes[:, 1] = 1
+            out = poisson._legalize(pos, sizes, flat)
+            assert _overlapping_pairs(out, sizes) == []
+            assert (out >= 0).all()
+            if flat:
+                assert (out[:, 1] == pos[:, 1]).all()
+
+
+def test_legalize_is_deterministic():
+    rng = np.random.default_rng(9)
+    pos = rng.integers(0, 80, (300, 3)).astype(float)
+    sizes = rng.integers(2, 20, (300, 3)).astype(float)
+    assert (poisson._legalize(pos, sizes, False) == poisson._legalize(pos, sizes, False)).all()
+
+
+def test_legalize_settles_boxes_stacked_on_one_spot():
+    sizes = np.tile([6.0, 3.0, 5.0], (400, 1))
+    for flat in (False, True):
+        out = poisson._legalize(np.zeros((400, 3)), sizes, flat)
+        assert _overlapping_pairs(out, sizes) == []
+
+
+def test_legalize_without_boxes():
+    assert poisson._legalize(np.zeros((0, 3)), np.zeros((0, 3)), False).shape == (0, 3)
+    assert poisson._legalize(np.zeros((1, 3)), np.ones((1, 3)), False).tolist() == [[0.0, 0.0, 0.0]]
 
 
 def _bank(height: int, **metadata) -> Component:
