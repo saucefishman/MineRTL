@@ -2632,7 +2632,7 @@ def build_litematic_from_component_list(
                 ],
             }
             for p in placed
-        ], indent=None)
+        ], indent=None, compress=True)
 
     # Snapshots are slow debug output (litematic serialization); stale ones are cleared either way.
     if DEFAULT_SNAPSHOT_DIR.exists():

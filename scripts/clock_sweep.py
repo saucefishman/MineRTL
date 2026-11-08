@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from settle_schematic import headless_binary
+from minecraft_v.build_utils import artifact_exists, load_artifact_json
 
 ROOT = Path(__file__).parent.parent
 SLOW_FACTOR = 8      # the reference run's half period, against the generated one
@@ -24,7 +25,7 @@ POOL = 4             # values per bus width
 
 def top_ports(netlist: Path) -> tuple[list[str], list[str]]:
     """(input, output) names as the pins file spells them."""
-    modules = json.loads(netlist.read_text())["modules"]
+    modules = load_artifact_json(netlist)["modules"]
     top = next(m for name, m in modules.items() if m.get("attributes", {}).get("top") or name == "main")
     names: tuple[list[str], list[str]] = ([], [])
     for name, port in top["ports"].items():
@@ -36,7 +37,7 @@ def top_ports(netlist: Path) -> tuple[list[str], list[str]]:
 def build(project: str, out: Path, seed: str, *args: str) -> int:
     out.mkdir(parents=True, exist_ok=True)
     env_args = ["env", f"MINECRAFT_V_ARTIFACTS_DIR={out}"]
-    if not (out / "netlist.json").exists():
+    if not artifact_exists(out / "netlist.json"):
         flags = [a for a in args if a in ("--tiled-ram", "--no-tiled-ram")]
         subprocess.run([*env_args, "bash", "synth.sh", project, "--synth-only", *flags], cwd=ROOT, check=True)
     rest = [a for a in args if a not in ("--tiled-ram", "--no-tiled-ram")]

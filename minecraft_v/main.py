@@ -10,7 +10,7 @@ from pathlib import Path
 
 _PROCESS_START = time.time()  # before the project imports, which take a second or so themselves
 
-from minecraft_v.build_utils import save_build_artifacts
+from minecraft_v.build_utils import open_artifact, save_build_artifacts
 from minecraft_v.cell_library import CELL_TYPE_MAP, SCHEMATIC_MAP, SCHEMATICS_DIR, apply_schematic_pin
 from minecraft_v.models import Module, Netlist
 from minecraft_v.placement_engine import build_litematic_from_component_list, builder, pathfinding
@@ -299,7 +299,7 @@ def main():
     # MCHPRS loads a sibling sidecar: one from an older build would read wrong blocks
     out_litematic.with_suffix(SERVER_FILE_SUFFIX).unlink(missing_ok=True)
 
-    with phase("[load] reading netlist"), open(args.netlist) as f:
+    with phase("[load] reading netlist"), open_artifact(args.netlist) as f:
         netlist = Netlist.from_json(f.read())
 
     schematic_name = args.schematic_name or args.module

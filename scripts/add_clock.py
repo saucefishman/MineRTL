@@ -8,12 +8,13 @@ import sys
 from litemapy import Schematic
 
 from minecraft_v.placement_engine.builder import _construct_clock_region
+from minecraft_v.build_utils import load_artifact_json
 
 
 def add_clock(in_path: str, layout_path: str, out_path: str, pin: str, critical_path_ticks: int) -> None:
     schematic = Schematic.load(in_path)
     main = schematic.regions["main"]
-    origin = next(c["origin"] for c in json.load(open(layout_path)) if c["id"] == pin)
+    origin = next(c["origin"] for c in load_artifact_json(layout_path) if c["id"] == pin)
     target = (origin[0], origin[1], origin[2] + 2)
     clock = _construct_clock_region(target, critical_path_ticks)
     # The same as the builder: the first clock row is inside main, and loaders paste regions in any order.

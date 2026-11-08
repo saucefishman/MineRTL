@@ -1,7 +1,8 @@
+import gzip
 import hashlib
 import json
 
-from minecraft_v.build_utils import save_build_artifacts
+from minecraft_v.build_utils import load_artifact_json, save_build_artifacts
 from minecraft_v.main import module_to_component_list
 from minecraft_v.models import Netlist
 
@@ -39,6 +40,21 @@ def test_consume_gives_the_same_components_and_empties_the_cells():
 def test_saved_component_list_is_json_of_the_list_and_returns_its_digest(tmp_path):
     comp = module_to_component_list(Netlist.from_json(json.dumps(NETLIST)).modules["main"])
     digest = save_build_artifacts(comp, tmp_path)
-    data = (tmp_path / "component_list.json").read_bytes()
+    data = gzip.decompress((tmp_path / "component_list.json.gz").read_bytes())
+    assert load_artifact_json(tmp_path / "component_list.json") == json.loads(data)  # either name reads the .gz
     assert hashlib.sha256(data).hexdigest() == digest
     assert json.loads(data) == json.loads(comp.model_dump_json())
+
+
+def test_artifacts_read_by_either_name_and_a_saved_one_replaces_an_older_plain_file(tmp_path):
+    from minecraft_v.build_utils import artifact_exists, open_artifact, save_artifact
+    (tmp_path / "component_list.json").write_text("stale")
+    comp = module_to_component_list(Netlist.from_json(json.dumps(NETLIST)).modules["main"])
+    save_build_artifacts(comp, tmp_path)
+    assert not (tmp_path / "component_list.json").exists()  # else a reader would take the stale one
+    assert artifact_exists(tmp_path / "component_list.json")
+    path = save_artifact("layout.json", [{"a": 1}], tmp_path, indent=None, compress=True)
+    assert path.name == "layout.json.gz" and load_artifact_json(tmp_path / "layout.json") == [{"a": 1}]
+    (tmp_path / "plain.json").write_text("[1]")
+    with open_artifact(tmp_path / "plain.json") as f:
+        assert json.load(f) == [1]

@@ -8,6 +8,7 @@ routes to them like to any gate pin. extract_macros swaps the instances for CUST
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -724,9 +725,9 @@ def _find_repeated_cached(comp: ComponentList, max_fanout: int, min_cells: int,
     code = Path(__file__).with_name("subgraphs.py").read_bytes()
     text = comp_key if comp_key is not None else comp.model_dump_json()
     key = hashlib.sha256(b"%d %d\n" % (max_fanout, min_cells) + code + text.encode()).hexdigest()[:24]
-    path = cache_dir / f"{key}.pkl"
+    path = cache_dir / f"{key}.pkl.gz"  # classes are repetitive: gzip -1 keeps a tenth
     try:
-        with open(path, "rb") as f:
+        with gzip.open(path, "rb") as f:
             return pickle.load(f)
     except Exception:  # a stale or damaged pickle (a moved class, a changed layout) must not break a build: rebuild it
         pass
@@ -735,7 +736,7 @@ def _find_repeated_cached(comp: ComponentList, max_fanout: int, min_cells: int,
     if time.monotonic() - t0 < 0.9 * _REPEATS_TIME_LIMIT:
         cache_dir.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".tmp{os.getpid()}")
-        with open(tmp, "wb") as f:
+        with gzip.open(tmp, "wb", compresslevel=1) as f:
             pickle.dump(classes, f)
         os.replace(tmp, path)
     return classes

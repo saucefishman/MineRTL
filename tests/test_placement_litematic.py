@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from litemapy import Schematic
 
+from minecraft_v.build_utils import artifact_exists, open_artifact
 from minecraft_v.cell_library import SCHEMATICS_DIR
 from minecraft_v.main import module_to_component_list
 from minecraft_v.models import Cell, Module, Port
@@ -230,7 +231,7 @@ def test_synth_runs_on_a_project_path_with_spaces(tmp_path: Path):
     run = subprocess.run([root / "synth.sh", project, "--synth-only", "--artifacts-dir", tmp_path / "art dir"],
                          cwd=root, capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
-    assert (tmp_path / "art dir" / "netlist.json").exists()
+    assert artifact_exists(tmp_path / "art dir" / "netlist.json")  # gzipped by synth.sh
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
@@ -256,7 +257,8 @@ endmodule
         run = subprocess.run([copy / "synth.sh", project, "--synth-only", "--no-synth-cache", "--artifacts-dir", art],
                              cwd=tmp_path, capture_output=True, text=True, timeout=300)
         assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
-        netlists.append((art / "netlist.json").read_text())
+        with open_artifact(art / "netlist.json") as f:
+            netlists.append(f.read())
     assert netlists[0] == netlists[1]
     assert "$print" in netlists[0] or "$write" in netlists[0]
     assert str(tmp_path) not in netlists[0] and not re.search(r"\$0x[0-9a-f]+:", netlists[0])

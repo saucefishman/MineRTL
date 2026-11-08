@@ -15,6 +15,7 @@ from pathlib import Path
 
 from minecraft_v.placement_engine.propagate import apply_states
 from minecraft_v.progress import log, phase, status
+from minecraft_v.build_utils import artifact_exists, load_artifact_json
 
 with phase("[settle] starting"):
     from litemapy import Schematic
@@ -65,7 +66,7 @@ def macro_clock_cell(region, terminal: tuple[int, int, int]) -> tuple[int, int, 
 
 def simulated_states(region, layout_path: str) -> list[str]:
     cuts = []
-    for comp in json.load(open(layout_path)):
+    for comp in load_artifact_json(layout_path):
         if comp["type"] not in ("DFF", "DFFE"):
             continue
         clock, world = component_blocks(comp)
@@ -74,8 +75,8 @@ def simulated_states(region, layout_path: str) -> list[str]:
             for (x, z), props in DFF_CLOCK_LOW.items():
                 region[world(x, z)] = region[world(x, z)].with_properties(**props)
     macro_clocks = Path(layout_path).with_name("macro_clocks.json")
-    if macro_clocks.exists():
-        for terminal in json.load(open(macro_clocks)):
+    if artifact_exists(macro_clocks):
+        for terminal in load_artifact_json(macro_clocks):
             cuts.append(macro_clock_cell(region, tuple(terminal)))
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

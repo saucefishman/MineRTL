@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from litemapy import Schematic
 
+from minecraft_v.build_utils import open_artifact
 from minecraft_v.placement_engine.probes import PROBE_MARKER, parse_format
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,7 +52,7 @@ def test_prints_stripped_when_off(tmp_path):
     (tmp_path / "out.server.json").write_text("{}")
     out = build(tmp_path, "--no-debug-prints")
     assert out.exists() and not out.with_suffix(".server.json").exists()
-    assert "$print" not in (tmp_path / "art/netlist.json").read_text()
+    assert "$print" not in open_artifact(tmp_path / "art/netlist.json").read()
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")

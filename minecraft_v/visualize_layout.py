@@ -12,6 +12,7 @@ from pathlib import Path
 
 from minecraft_v.build_utils import DEFAULT_ARTIFACTS_DIR as ARTIFACTS_DIR
 from minecraft_v.placement_engine.ir import ComponentType
+from minecraft_v.build_utils import load_artifact_json
 
 SCALE = 20  # pixels per block
 PADDING = 40
@@ -184,7 +185,7 @@ def main():
     parser.add_argument("--out", default=str(ARTIFACTS_DIR / "layout.svg"))
     args = parser.parse_args()
 
-    layout = json.loads(Path(args.layout).read_text())
+    layout = load_artifact_json(args.layout)
     svg = build_svg(layout)
 
     ET.indent(svg, space="  ")

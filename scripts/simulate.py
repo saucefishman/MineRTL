@@ -23,6 +23,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 
 from minecraft_v.placement_engine.ir import load_component_list, ComponentType, Direction
+from minecraft_v.build_utils import artifact_exists
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +371,7 @@ def main() -> None:
     args = parser.parse_args()
 
     path = Path(args.component_list)
-    if not path.exists():
+    if not artifact_exists(path):
         print(f"error: {path} not found", file=sys.stderr)
         sys.exit(1)
 

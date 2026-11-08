@@ -29,6 +29,7 @@ import numpy as np
 from litemapy import BlockState, Region
 from minecraft_v.placement_engine.ram import rom_contents
 from minecraft_v.placement_engine.verify import find_live_pin_wire
+from minecraft_v.build_utils import artifact_exists, load_artifact_json
 from settle_schematic import headless_binary
 
 READABLE = ("minecraft:redstone_wire", "minecraft:repeater", "minecraft:comparator", "minecraft:redstone_torch",
@@ -82,7 +83,7 @@ class Netlist:
     """Two-state simulation of a yosys JSON module, RAM blocks modelled per techmap/ram_4r2w.v."""
 
     def __init__(self, path: Path, top: str = "main"):
-        module = json.load(open(path))["modules"][top]
+        module = load_artifact_json(path)["modules"][top]
         self.module = module
         self.cells = module["cells"]
         self.values: dict[Bit, int] = defaultdict(int, {"0": 0, "1": 1, "x": 0, "z": 0})
@@ -239,7 +240,7 @@ def live_pins_on_wire(build: Path, region: Region, terminals: dict, nets: dict) 
     """Pins that drive their cell, with no net, and something conductive there: a short no net's samples can show."""
     taken = {terminals[key] for source, sinks in nets.values() for key in (source, *sinks) if key in terminals}
     live = {f"{comp['id']}:{pin['name']}": terminals[comp["id"], pin["name"]]
-            for comp in json.load(open(build / "component_layout.json")) if comp["type"] in ("CUSTOM", "INPUT_PIN")
+            for comp in load_artifact_json(build / "component_layout.json") if comp["type"] in ("CUSTOM", "INPUT_PIN")
             for pin in comp["pins"] if pin["direction"] == "OUT" and (comp["id"], pin["name"]) in terminals
             and terminals[comp["id"], pin["name"]] not in taken}
     return find_live_pin_wire(region, live)
@@ -247,15 +248,15 @@ def live_pins_on_wire(build: Path, region: Region, terminals: dict, nets: dict) 
 
 def endpoints(build: Path) -> tuple[dict, dict]:
     """(component, pin) -> terminal cell, and net id -> (source endpoint, sink endpoints)."""
-    layout = {c["id"]: c for c in json.load(open(build / "component_layout.json"))}
+    layout = {c["id"]: c for c in load_artifact_json(build / "component_layout.json")}
     terminals = {}
     for comp in layout.values():
         for pin in comp["pins"]:
             terminals[comp["id"], pin["name"]] = pin_terminal(comp, pin)
-    if (build / "terminals.json").exists():  # exact cells, from the build itself: replaces what the layout implies
-        terminals = {(cid, pin): tuple(pos) for cid, pin, pos in json.load(open(build / "terminals.json"))}
+    if artifact_exists(build / "terminals.json"):  # exact cells, from the build itself: replaces what the layout implies
+        terminals = {(cid, pin): tuple(pos) for cid, pin, pos in load_artifact_json(build / "terminals.json")}
     nets = {}
-    for net in json.load(open(build / "component_list.json"))["nets"]:
+    for net in load_artifact_json(build / "component_list.json")["nets"]:
         ends = [net["source"], *net["sinks"]]
         keys = []
         for e in ends:
@@ -528,8 +529,8 @@ def analyse(args, work, netlist, nets, terminals, cell_names, samples, labels) -
     for net_id, (source, sinks) in nets.items():
         for key in (source, *sinks):
             net_of[key] = net_id
-    layout = json.load(open(args.build / "component_layout.json"))
-    component_list = json.load(open(args.build / "component_list.json"))
+    layout = load_artifact_json(args.build / "component_layout.json")
+    component_list = load_artifact_json(args.build / "component_list.json")
     # Pins tied to constants aren't on nets.
     constants = {(c["id"], p["name"]): p.get("const_value") for c in component_list["components"] for p in c["pins"]
                  if p.get("const_value") is not None}

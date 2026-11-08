@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from litemapy import Region
 
+from minecraft_v.build_utils import load_artifact_json
 from minecraft_v.placement_engine.builder import _GreedyRouter, _wall_vias
 from minecraft_v.placement_engine.ir import Component, ComponentType, Footprint, NetConnection, NetEndpoint
 from minecraft_v.placement_engine.layout import _Placed
@@ -42,7 +43,7 @@ def _build(tmp: Path, project: Path, *flags: str) -> tuple[str, list[dict], Path
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
     log = run.stdout + run.stderr
     assert run.returncode == 0, log[-2000:]
-    return log, json.loads((tmp / "artifacts" / "component_layout.json").read_text()), out
+    return log, load_artifact_json(tmp / "artifacts" / "component_layout.json"), out
 
 
 def _memory(tmp: Path, words: int, bits: int) -> Path:

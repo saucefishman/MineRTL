@@ -148,7 +148,8 @@ def load_component_list(path_or_dict):
         payload = path_or_dict
     else:
         path = Path(path_or_dict)
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        from minecraft_v.build_utils import load_artifact_json  # a function-level import: build_utils imports this module
+        payload = load_artifact_json(path)
     return ComponentList.from_dict(payload)
 
 
