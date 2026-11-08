@@ -1188,6 +1188,17 @@ def set_first_fanout(fanout: int) -> None:
     _first_fanout[0] = fanout
 
 
+def _without_traceback(e: BaseException) -> BaseException:
+    """e kept for its message: its traceback would hold every frame's locals, a failed search's whole tables and cell
+    lists, for as long as the failure is listed (and the exceptions it was raised from, through their context)."""
+    seen, link = set(), e
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        link.__traceback__ = None
+        link = link.__cause__ or link.__context__
+    return e
+
+
 class _GreedyRouter:
     """Greedy, journaled routing of _RouteJobs with the retry layers that make it robust:
 
@@ -1861,7 +1872,7 @@ class _GreedyRouter:
                         continue
                     if fail_fast:
                         raise RuntimeError(f"Routing failed for net {job.key}: {e}") from e
-                    failures.append((job.key, e))
+                    failures.append((job.key, _without_traceback(e)))
                     log(f"[error] skipped net {job.key}: {e}")
                     if is_debug():
                         self._dump_around(job)
