@@ -136,6 +136,11 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   abc 2.6 at that moment; yosys alone max 8.6), gates unchanged, yosys 2,119 s (was 4,453), disk peak 128 MB (was 1.14
   GB). abc is ~2.5 GB at this size. Load runs (old vs streaming loader) and cpu N=5900 queued.
 
+- 2026-11-08 grid-mem d6c576f (held): routed paths as n x 3 int32 (_PackedPath), router state cleared + gc after hold
+  before forks/save. No measurable gain at x64/dp24 (Python objects only ~870 MB of 2.58 GB x64 peak; paths 24 MB);
+  ~1.7 GB of the x64 peak is allocator/native, unattributed. Third x512 acceptance on base + d6c576f started (worker2).
+- Reliability TODO: scipy FFT "RuntimeError: Work item submitted after shutdown" in 2 back-to-back builds (rerun ok).
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
