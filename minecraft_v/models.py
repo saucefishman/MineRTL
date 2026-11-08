@@ -1,3 +1,4 @@
+import io
 import json
 from dataclasses import dataclass, field
 
@@ -41,6 +42,97 @@ class Module:
     netnames: dict[str, NetName] = field(default_factory=dict)
 
 
+class _Reader:
+    """A JSON text read in chunks: values are decoded one at a time with json's own decoder, and the containers on the way
+    to them (objects only) are walked here, so no more than a chunk and the value being decoded is ever held."""
+
+    def __init__(self, f, chunk: int):
+        self.f, self.chunk = f, chunk
+        self.buf, self.i, self.eof = "", 0, False
+
+    def _more(self) -> None:
+        data = self.f.read(self.chunk)
+        if data:
+            self.buf = self.buf[self.i:] + data
+            self.i = 0
+        else:
+            self.eof = True
+
+    def _next(self) -> str:
+        """The next character that isn't whitespace, left unread ("" at the end)."""
+        while True:
+            while self.i < len(self.buf) and self.buf[self.i] in " \t\r\n":
+                self.i += 1
+            if self.i < len(self.buf) or self.eof:
+                return self.buf[self.i] if self.i < len(self.buf) else ""
+            self._more()
+
+    def value(self):
+        """The next value, whole."""
+        self._next()
+        while True:
+            try:
+                value, end = _DECODER.raw_decode(self.buf, self.i)
+            except json.JSONDecodeError:
+                if self.eof:
+                    raise
+            else:
+                if end < len(self.buf) or self.eof:  # a number touching the chunk's end may go on
+                    self.i = end
+                    return value
+            self._more()
+
+    def keys(self):
+        """The keys of the next object, each to be followed by reading its value (or its own keys) before the next."""
+        if self._next() != "{":
+            raise json.JSONDecodeError("expected an object", self.buf, self.i)
+        self.i += 1
+        first = True
+        while True:
+            c = self._next()
+            if c == "}":
+                self.i += 1
+                return
+            if not first:
+                if c != ",":
+                    raise json.JSONDecodeError("expected , or }", self.buf, self.i)
+                self.i += 1
+            first = False
+            key = self.value()
+            if self._next() != ":":
+                raise json.JSONDecodeError("expected :", self.buf, self.i)
+            self.i += 1
+            yield key
+
+
+_DECODER = json.JSONDecoder()
+
+
+def _cell(c: dict) -> Cell:
+    return Cell(c["hide_name"], c["type"], c["parameters"], c["connections"], c.get("port_directions", {}),
+                c.get("attributes", {}) if c["type"] == "$print" else {})
+
+
+def _module(r: _Reader) -> Module:
+    ports: dict[str, Port] = {}
+    cells: dict[str, Cell] = {}
+    netnames: dict[str, NetName] = {}
+    for key in r.keys():
+        if key == "ports":
+            ports = {n: Port(p["direction"], p["bits"]) for n, p in r.value().items()}
+        elif key == "cells":
+            for name in r.keys():
+                cells[name] = _cell(r.value())
+        elif key == "netnames":
+            for name in r.keys():
+                v = r.value()
+                if "init" in v.get("attributes", {}):
+                    netnames[name] = NetName(v["bits"], v["attributes"])
+        else:
+            r.value()
+    return Module(ports, cells, netnames)
+
+
 @dataclass(slots=True)
 class Netlist:
     creator: str
@@ -48,18 +140,21 @@ class Netlist:
 
     @classmethod
     def from_json(cls, text: str) -> "Netlist":
-        """Only what a build reads is kept: netnames with an "init" (the rest name wires for debugging, a quarter of
-        the file) and the attributes of $print cells (their source line); other cells' are mostly source locations."""
-        raw = json.loads(text)
-        modules = {}
-        for name in list(raw["modules"]):
-            m = raw["modules"].pop(name)  # one module's parsed JSON at a time
-            cells = m["cells"]
-            for cell_name in list(cells):
-                c = cells.pop(cell_name)
-                cells[cell_name] = Cell(c["hide_name"], c["type"], c["parameters"], c["connections"],
-                                        c.get("port_directions", {}), c.get("attributes", {}) if c["type"] == "$print" else {})
-            netnames = {n: NetName(v["bits"], v["attributes"]) for n, v in m.get("netnames", {}).items()
-                        if "init" in v.get("attributes", {})}
-            modules[name] = Module({n: Port(p["direction"], p["bits"]) for n, p in m["ports"].items()}, cells, netnames)
-        return cls(raw.get("creator", ""), modules)
+        return cls.from_stream(io.StringIO(text))
+
+    @classmethod
+    def from_stream(cls, f, chunk: int = 1 << 20) -> "Netlist":
+        """Read from a text file or stream without holding it whole: a gigabyte of netlist decoded at once is several.
+        Only what a build reads is kept: netnames with an "init" (the rest name wires for debugging, a quarter of the
+        file) and the attributes of $print cells (their source line); other cells' are mostly source locations."""
+        r = _Reader(f, chunk)
+        creator, modules = "", {}
+        for key in r.keys():
+            if key == "creator":
+                creator = r.value()
+            elif key == "modules":
+                for name in r.keys():
+                    modules[name] = _module(r)
+            else:
+                r.value()
+        return cls(creator, modules)

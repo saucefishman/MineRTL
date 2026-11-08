@@ -58,3 +58,37 @@ def test_artifacts_read_by_either_name_and_a_saved_one_replaces_an_older_plain_f
     (tmp_path / "plain.json").write_text("[1]")
     with open_artifact(tmp_path / "plain.json") as f:
         assert json.load(f) == [1]
+
+
+def _reference(text: str) -> Netlist:
+    """What from_json was before it streamed: the whole text parsed at once."""
+    from minecraft_v.models import Cell, Module, NetName, Port
+    raw = json.loads(text)
+    modules = {}
+    for name, m in raw["modules"].items():
+        cells = {n: Cell(c["hide_name"], c["type"], c["parameters"], c["connections"], c.get("port_directions", {}),
+                         c.get("attributes", {}) if c["type"] == "$print" else {}) for n, c in m["cells"].items()}
+        netnames = {n: NetName(v["bits"], v["attributes"]) for n, v in m.get("netnames", {}).items()
+                    if "init" in v.get("attributes", {})}
+        modules[name] = Module({n: Port(p["direction"], p["bits"]) for n, p in m["ports"].items()}, cells, netnames)
+    return Netlist(raw.get("creator", ""), modules)
+
+
+def test_streaming_reads_what_json_loads_would_at_any_chunk_size():
+    import io
+    second = json.loads(json.dumps(NETLIST["modules"]["main"]))
+    second["cells"]["m"] = {"hide_name": 0, "type": "ram_window", "parameters": {"W": "0101"}, "attributes": {},
+                            "connections": {"a": [12345678901, "x", 7]}}
+    doc = {**NETLIST, "extra": [1, 2.5e3, {"k": None}], "modules": {**NETLIST["modules"], "sub": second}}
+    for text in (json.dumps(doc), json.dumps(doc, indent=2), json.dumps(doc, separators=(",", ":"))):
+        want = _reference(text)
+        for chunk in (1, 2, 3, 7, 64, 1 << 20):
+            assert Netlist.from_stream(io.StringIO(text), chunk) == want
+
+
+def test_streaming_a_truncated_netlist_fails():
+    import io
+    import pytest
+    text = json.dumps(NETLIST)
+    with pytest.raises(json.JSONDecodeError):
+        Netlist.from_stream(io.StringIO(text[:-9]), 5)

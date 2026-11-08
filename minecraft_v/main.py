@@ -300,7 +300,7 @@ def main():
     out_litematic.with_suffix(SERVER_FILE_SUFFIX).unlink(missing_ok=True)
 
     with phase("[load] reading netlist"), open_artifact(args.netlist) as f:
-        netlist = Netlist.from_json(f.read())
+        netlist = Netlist.from_stream(f)
 
     schematic_name = args.schematic_name or args.module
 
