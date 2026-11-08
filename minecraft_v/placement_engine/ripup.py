@@ -18,6 +18,7 @@ import numpy as np
 from litemapy import BlockState, Region
 
 from .block_utils import _TORCH_IDS, _is_redstone_wire, _is_repeater, _is_torch, _block_str
+from .cellset import POS_BIAS, POS_BITS, POS_MASK
 from .constants import _HORIZ_DIRS, REDSTONE
 from .pathfinding import IndexedWorkspace, _BlockIndex, _astar, _kind_of
 from .wire import LayConflict, _check_slope_notch, _place_support
@@ -37,9 +38,134 @@ def _dust_class(block_id: str) -> int:
 _Entry = tuple[str, Any, Any, Any, Any]
 
 
+_POS_BITS, _POS_BIAS, _POS_MASK = POS_BITS, POS_BIAS, POS_MASK
+_KIND_CODES = {"block": 0, "set": 1, "dict": 2}
+_KIND_NAMES = ("block", "set", "dict")
+
+
+class _Tables:
+    """What a packed journal's small integers stand for: the objects entries point at, net ids, blocks."""
+
+    def __init__(self) -> None:
+        self.targets: list[Any] = []
+        self.target_index: dict[int, int] = {}
+        self.names: list[str] = []
+        self.name_index: dict[str, int] = {}
+        self.blocks: list[BlockState] = []
+        self.block_index: dict[BlockState, int] = {}
+
+    def target(self, obj: Any) -> int:
+        i = self.target_index.get(id(obj))
+        if i is None:
+            i = self.target_index[id(obj)] = len(self.targets)
+            self.targets.append(obj)  # kept alive, so the id stays this object's
+        return i
+
+    def name(self, s: str) -> int:
+        i = self.name_index.get(s)
+        if i is None:
+            i = self.name_index[s] = len(self.names)
+            self.names.append(s)
+        return i
+
+    def block(self, b: BlockState) -> int:
+        i = self.block_index.get(b)
+        if i is None:
+            i = self.block_index[b] = len(self.blocks)
+            self.blocks.append(b)
+        return i
+
+
+class PackedJournal:
+    """A finished net's journal as arrays, 17 bytes an entry instead of a 5-tuple and its position tuple (about 250).
+    Thawed back to the list of entries, equal to what was frozen, when anything wants to read or extend it."""
+    __slots__ = ("code", "key", "prev", "writer")
+
+    def __init__(self, entries: list, tables: _Tables) -> None:
+        n = len(entries)
+        code = np.empty(n, dtype=np.uint8)
+        key = np.empty(n, dtype=np.int64)
+        prev = np.empty(n, dtype=np.int32)
+        writer = np.empty(n, dtype=np.int32)
+        target, name, block = tables.target, tables.name, tables.block
+        for i, (kind, tgt, pos, p, w) in enumerate(entries):
+            c = _KIND_CODES[kind]
+            code[i] = c | target(tgt) << 2
+            x, y, z = pos
+            key[i] = (x + _POS_BIAS) | (y + _POS_BIAS) << _POS_BITS | (z + _POS_BIAS) << 2 * _POS_BITS
+            if c == 0:
+                prev[i] = block(p)
+                writer[i] = -1 if w is None else name(w)
+            elif c == 1:
+                prev[i] = 1 if p else 0
+                writer[i] = -1
+            else:
+                prev[i] = -1 if p is _MISSING else name(p)
+                writer[i] = -1
+        self.code, self.key, self.prev, self.writer = code, key, prev, writer
+
+    def __len__(self) -> int:
+        return len(self.code)
+
+    def thaw(self, tables: _Tables) -> list:
+        targets, names, blocks = tables.targets, tables.names, tables.blocks
+        out = []
+        for c, k, p, w in zip(self.code.tolist(), self.key.tolist(), self.prev.tolist(), self.writer.tolist()):
+            pos = ((k & _POS_MASK) - _POS_BIAS, (k >> _POS_BITS & _POS_MASK) - _POS_BIAS, (k >> 2 * _POS_BITS) - _POS_BIAS)
+            kind = c & 3
+            if kind == 0:
+                out.append(("block", targets[c >> 2], pos, blocks[p], None if w < 0 else names[w]))
+            elif kind == 1:
+                out.append(("set", targets[c >> 2], pos, bool(p), None))
+            else:
+                out.append(("dict", targets[c >> 2], pos, _MISSING if p < 0 else names[p], None))
+        return out
+
+
+class _Journals(dict):
+    """net id -> its journal: a list while it is being written or read, a PackedJournal once Recorder.freeze has it."""
+
+    def __init__(self, tables: _Tables) -> None:
+        super().__init__()
+        self._tables = tables
+
+    def __missing__(self, key):
+        value = self[key] = []
+        return value
+
+    def __getitem__(self, key):
+        value = dict.get(self, key, _MISSING)
+        if value is _MISSING:
+            return self.__missing__(key)
+        if type(value) is PackedJournal:
+            value = self[key] = value.thaw(self._tables)
+        return value
+
+    def get(self, key, default=None):
+        return self[key] if key in self else default
+
+    def pop(self, key, *default):
+        if key in self:
+            value = self[key]  # thawed
+            del self[key]
+            return value
+        if default:
+            return default[0]
+        raise KeyError(key)
+
+    def freeze(self, key) -> None:
+        value = dict.get(self, key)
+        if type(value) is list:
+            if value:
+                dict.__setitem__(self, key, PackedJournal(value, self._tables))
+            else:
+                dict.__delitem__(self, key)  # nothing written: not worth a key (a read makes it again)
+
+
 class Recorder:
     def __init__(self) -> None:
-        self.journals: dict[str, list[_Entry]] = defaultdict(list)
+        self._tables = _Tables()
+        self.journals: _Journals = _Journals(self._tables)
         self.active: str | None = None
         # Latest net to write each block via JournalingWorkspace — identifies who depends on a support.
         self.writer: dict[tuple[int, int, int], str] = {}
@@ -52,6 +178,8 @@ class Recorder:
             yield
         finally:
             self.active = prev
+            if prev is None:
+                self.journals.freeze(net_id)  # the net's done for now: its journal waits as arrays
 
     def log(self, entry: _Entry) -> None:
         self.journals[self.active].append(entry)
