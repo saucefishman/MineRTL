@@ -481,9 +481,9 @@ def _find_wire_path(
     def make_world():
         """The kernel's move generation over this search's world."""
         eprot, prot = _keepout_spec(effective_protected), _keepout_spec(protected)
-        if eprot is None or prot is None or not isinstance(dust_owner, dict):
-            raise TypeError("the A* kernel reads protected cells as a set or a _ForeignKeepout and dust_owner as a dict, "
-                            f"not {type(effective_protected).__name__}, {type(protected).__name__}, {type(dust_owner).__name__}")
+        if eprot is None or prot is None:
+            raise TypeError("the A* kernel reads protected cells as a set or a _ForeignKeepout, "
+                            f"not {type(effective_protected).__name__}, {type(protected).__name__}")
         return _astar.World(
             ix_non_air, ix_wire, ix_torch, ix_repeater, solid, dust_owner, net_id, bounds, max_bridge_y,
             goal, x_h_factor, eprot, prot, fp_relief, footprint_blocked, inverted_cells,

@@ -168,7 +168,7 @@ class Recorder:
         self.journals: _Journals = _Journals(self._tables)
         self.active: str | None = None
         # Latest net to write each block via JournalingWorkspace — identifies who depends on a support.
-        self.writer: dict[tuple[int, int, int], str] = {}
+        self.writer = _astar.PosMap()
 
     @contextmanager
     def recording(self, net_id: str) -> Iterator[None]:
@@ -185,66 +185,191 @@ class Recorder:
         self.journals[self.active].append(entry)
 
 
-class JournaledSet(set):
-    _grid = None  # _astar.CellGrid mirroring this set, and which bit (see CellGrid)
+_NOT_IN_GRID = _astar.NOT_IN_GRID
+
+
+class JournaledSet:
+    """A set of cells whose changes are journaled. Once a CellGrid mirrors it (_adopt), the cells the grid covers live
+    only in the grid's words, a bit each; the rest stay in _back. Without a grid it is a plain set in _back."""
+    _grid = None  # _astar.CellGrid holding this set's cells, and which bit (see CellGrid)
     _grid_bit = 0
 
     def __init__(self, recorder: Recorder, iterable=(), name: str = ""):
-        super().__init__(iterable)
+        self._back: set = set(iterable)
         self._rec = recorder
         self.name = name
 
+    def __contains__(self, key) -> bool:
+        grid = self._grid
+        if grid is not None:
+            found = grid.test(key, self._grid_bit)
+            if found >= 0:
+                return found == 1
+        return key in self._back
+
+    def _put(self, key, present: bool) -> None:
+        grid = self._grid
+        if grid is None or not grid.put_in(key, self._grid_bit, present):
+            if present:
+                self._back.add(key)
+            else:
+                self._back.discard(key)
+
     def add(self, key) -> None:
-        if self._rec.active is not None and not set.__contains__(self, key):
+        if self._rec.active is not None and key not in self:
             self._rec.log(("set", self, key, False, None))
-        set.add(self, key)
-        if self._grid is not None:
-            self._grid.put(key, self._grid_bit, True)
+        self._put(key, True)
 
     def discard(self, key) -> None:
-        if self._rec.active is not None and set.__contains__(self, key):
+        if self._rec.active is not None and key in self:
             self._rec.log(("set", self, key, True, None))
-        set.discard(self, key)
-        if self._grid is not None:
-            self._grid.put(key, self._grid_bit, False)
+        self._put(key, False)
 
     def _restore(self, key, present: bool) -> None:
-        if present:
-            set.add(self, key)
-        else:
-            set.discard(self, key)
-        if self._grid is not None:
-            self._grid.put(key, self._grid_bit, present)
+        self._put(key, present)
+
+    def update(self, keys) -> None:
+        for key in keys:
+            self.add(key)
+
+    def _adopt(self) -> None:
+        """The grid now has this set's cells: drop those from _back that it covers."""
+        grid = self._grid
+        for key in [k for k in self._back if grid.test(k, self._grid_bit) >= 0]:
+            self._back.discard(key)
+
+    def __iter__(self) -> Iterator[tuple[int, int, int]]:
+        yield from list(self._back)
+        grid = self._grid
+        if grid is not None:
+            yield from map(tuple, grid.cells_with(self._grid_bit).tolist())
+
+    def __len__(self) -> int:
+        grid = self._grid
+        return len(self._back) + (grid.count_bit(self._grid_bit) if grid is not None else 0)
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def copy(self) -> set:
+        return set(self)
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, (set, frozenset, JournaledSet)) and set(self) == set(other)
+
+    __hash__ = None
+
+    def __repr__(self) -> str:
+        return f"JournaledSet({self.name!r}, {len(self)} cells)"
 
 
-class JournaledDict(dict):
-    _grid = None  # _astar.CellGrid mirroring this dict
+class JournaledDict:
+    """cell -> net id, journaled; the dict API. Like JournaledSet, a CellGrid's cells live only in the grid."""
+    _grid = None  # _astar.CellGrid holding this dict's cells (its owner words)
 
     def __init__(self, recorder: Recorder, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        self._back: dict = dict(*args, **kwargs)
         self._rec = recorder
+
+    def get(self, key, default=None):
+        grid = self._grid
+        if grid is not None:
+            owner = grid.owner_at(key)
+            if owner is not _NOT_IN_GRID:
+                return default if owner is None else owner
+        return self._back.get(key, default)
+
+    def __getitem__(self, key):
+        owner = self.get(key, _MISSING)
+        if owner is _MISSING:
+            raise KeyError(key)
+        return owner
+
+    def __contains__(self, key) -> bool:
+        return self.get(key, _MISSING) is not _MISSING
+
+    def _put(self, key, value) -> None:
+        """value None: the cell has no owner."""
+        grid = self._grid
+        if grid is None or not grid.put_owner_in(key, value):
+            if value is None:
+                self._back.pop(key, None)
+            else:
+                self._back[key] = value
 
     def __setitem__(self, key, value) -> None:
         if self._rec.active is not None:
-            self._rec.log(("dict", self, key, dict.get(self, key, _MISSING), None))
-        dict.__setitem__(self, key, value)
-        if self._grid is not None:
-            self._grid.put_owner(key, value)
+            self._rec.log(("dict", self, key, self.get(key, _MISSING), None))
+        self._put(key, value)
 
     def pop(self, key, *default):
-        if self._rec.active is not None and dict.__contains__(self, key):
-            self._rec.log(("dict", self, key, dict.__getitem__(self, key), None))
-        if self._grid is not None:
-            self._grid.put_owner(key, None)
-        return dict.pop(self, key, *default)
+        prev = self.get(key, _MISSING)
+        if prev is _MISSING:
+            if default:
+                return default[0]
+            raise KeyError(key)
+        if self._rec.active is not None:
+            self._rec.log(("dict", self, key, prev, None))
+        self._put(key, None)
+        return prev
+
+    def __delitem__(self, key) -> None:
+        self.pop(key)
+
+    def setdefault(self, key, default=None):
+        prev = self.get(key, _MISSING)
+        if prev is _MISSING:
+            self[key] = default
+            return default
+        return prev
+
+    def update(self, *args, **kwargs) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
 
     def _restore(self, key, prev) -> None:
-        if prev is _MISSING:
-            dict.pop(self, key, None)
-        else:
-            dict.__setitem__(self, key, prev)
-        if self._grid is not None:
-            self._grid.put_owner(key, None if prev is _MISSING else prev)
+        self._put(key, None if prev is _MISSING else prev)
+
+    def _adopt(self) -> None:
+        """The grid now has this dict's cells: drop those from _back that it covers."""
+        grid = self._grid
+        for key in [k for k in self._back if grid.owner_at(k) is not _NOT_IN_GRID]:
+            del self._back[key]
+
+    def items(self) -> list:
+        grid = self._grid
+        items = list(self._back.items())
+        if grid is not None:
+            cells, owners = grid.owned_cells()
+            items.extend(zip(map(tuple, cells.tolist()), owners))
+        return items
+
+    def keys(self) -> list:
+        return [k for k, _ in self.items()]
+
+    def values(self) -> list:
+        return [v for _, v in self.items()]
+
+    def __iter__(self) -> Iterator[tuple[int, int, int]]:
+        return iter(self.keys())
+
+    def __len__(self) -> int:
+        grid = self._grid
+        return len(self._back) + (grid.count_bit(_astar.G_OWNED_BIT) if grid is not None else 0)
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def copy(self) -> dict:
+        return dict(self.items())
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, (dict, JournaledDict)) and dict(self.items()) == dict(other.items())
+
+    __hash__ = None
+
+    def __repr__(self) -> str:
+        return f"JournaledDict({len(self)} cells)"
 
 
 class JournalingWorkspace:
@@ -280,7 +405,7 @@ class JournalingWorkspace:
             return None
         palette, blocks = inner.region._Region__palette, inner.region._Region__blocks
         writer = rec.writer
-        if not (type(palette) is list and blocks.dtype == np.uint32 and blocks.ndim == 3 and type(writer) is dict):
+        if not (type(palette) is list and blocks.dtype == np.uint32 and blocks.ndim == 3 and type(writer) is _astar.PosMap):
             return None
         cache = self._lay_cache
         if cache[0] is not palette:  # saving a schematic replaces the palette
