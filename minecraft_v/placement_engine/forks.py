@@ -12,6 +12,61 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 _MIN_PER_WORKER = 64  # fewer items than this per process don't pay for a fork
+# What a child dirties of the parent's memory, as a share of the parent's footprint: x512 measured 15-19% for each of
+# fork_map's workers, and a signal check that holds its results grew to 70%. Forking is skipped when the children would
+# not fit in what the machine has free, as the work runs here instead (and gives the same answer, only one at a time).
+_WORKER_SHARE = 0.2
+_FORKED_SHARE = 0.75
+_USE_OF_FREE = 0.7  # of the memory free and inactive, which children may take
+
+
+def parent_bytes() -> int:
+    """The larger of this process's physical footprint (macOS counts compressed and swapped pages, which RSS doesn't) and
+    its resident size (in a fork, the footprint is only what it has written so far; the resident size has what it shares)."""
+    import re
+    import subprocess
+    best = 0
+    try:
+        out = subprocess.run(["footprint", "-p", str(os.getpid())], capture_output=True, text=True, timeout=30).stdout
+        m = re.search(r"phys_footprint:\s*([\d.]+)\s*(\w+)", out)
+        if m:
+            best = int(float(m.group(1)) * {"B": 1, "KB": 1 << 10, "MB": 1 << 20, "GB": 1 << 30}[m.group(2)])
+        rss = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True, timeout=30).stdout
+        best = max(best, int(rss.strip() or 0) * 1024)
+    except (OSError, subprocess.SubprocessError, KeyError, ValueError):
+        pass
+    if not best:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        best = peak if sys.platform == "darwin" else peak * 1024
+    return best
+
+
+def free_bytes() -> int | None:
+    """Memory free or cheap to take back (free, inactive, speculative), or None where that can't be read."""
+    import re
+    import subprocess
+    try:
+        if os.path.exists("/proc/meminfo"):
+            with open("/proc/meminfo") as f:
+                m = re.search(r"MemAvailable:\s+(\d+) kB", f.read())
+            return int(m.group(1)) * 1024 if m else None
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=30).stdout
+        size = int(re.search(r"page size of (\d+) bytes", out).group(1))
+        pages = sum(int(m.group(1)) for key in ("Pages free", "Pages inactive", "Pages speculative")
+                    for m in [re.search(key + r":\s+(\d+)", out)] if m)
+        return pages * size
+    except (OSError, subprocess.SubprocessError, AttributeError, ValueError):
+        return None
+
+
+def children_that_fit(wanted: int, share: float) -> int:
+    """How many of `wanted` children of this process, each dirtying `share` of its size, the free memory takes."""
+    free = free_bytes()
+    if wanted < 1 or free is None:
+        return wanted
+    each = max(parent_bytes() * share, 1)
+    return max(0, min(wanted, int(free * _USE_OF_FREE / each)))
 
 
 def workers() -> int:
@@ -23,6 +78,8 @@ def fork_map(fn: Callable[[T], R], items: Sequence[T], processes: int | None = N
     """[fn(item) for item in items], in order, the items split in runs across forked processes. Results come back
     pickled, so fn should be cheap to return from. Without fork, or for few items, it all runs here."""
     n = min(processes or workers(), len(items) // _MIN_PER_WORKER)
+    if n > 1 and hasattr(os, "fork"):
+        n = children_that_fit(n, _WORKER_SHARE)
     if n <= 1 or not hasattr(os, "fork"):
         return [fn(item) for item in items]
     bounds = [len(items) * k // n for k in range(n + 1)]
@@ -85,7 +142,7 @@ class Forked:
         self._error: BaseException | None = None
         self._pid = 0
         self._read = -1
-        if not hasattr(os, "fork") or workers() <= 1:
+        if not hasattr(os, "fork") or workers() <= 1 or not children_that_fit(1, _FORKED_SHARE):
             self._done = True
             try:
                 self._value = fn()
