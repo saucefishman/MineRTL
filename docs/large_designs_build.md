@@ -39,6 +39,10 @@ cell; router A* ~1 GB at x32; `_compact` O(n^2) time.
 ## State log
 
 - 2026-11-07: synth/load scaling measured (synthetic + cpu xN); fixes 3e5d482, 7601f17, 1ef06ef committed.
+- 2026-11-08 cpu x256 (in progress, 9b672d6): repeats cover 19956/74595 gates (27%) -> no macros, 75K flat; global
+  place 23 s, legalize+compact ~5.6 min, world 539x601x546 (177M); wire >28 min, mostly net_2 (clock?) hitting the
+  5000-node cap per sink and ripping; RSS only ~1.6 GB. Time, not memory, is the x256 wall. worker3 investigating
+  why repeats don't form.
 
 ## Complexity map (from code, 2026-11-08; constants still to fit)
 
