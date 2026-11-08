@@ -78,6 +78,12 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   MALLOC_LARGE 5.8 + VM_ALLOCATE 4.4 + LARGE_REUSABLE 0.8 + small/medium 0.9 GB -> big buffers (~27 B/world cell)
   dominate, not small Python objects. Artifacts 290 MB (pre-gzip). Goal not met.
 
+- 2026-11-08 1 GB acceptance, synthetic N=5600 (1,014 MB netlist, 1.65M cells), current flow: yosys footprint peak
+  11.26 GB, 81 min (1,971 s sys: paging); Python load (read, parse, to components, save) footprint peak 7.8 GB, 220 s;
+  synth disk peak 1.14 GB. PASS under 12 GB (one run). cpu N=5900 version running (peak 10.6 GB so far).
+  Feasibility of several-GB netlists on this machine: see the reply of 2026-11-08 (synth+load ~1-1.5 GB ceiling now;
+  full build ceiling below cpu x512, ~90 MB netlist).
+
 ## TODO (ranked, memory/disk only)
 
 0. Routing-phase memory at x512 (14+ GB). x32 inventory (worker2): world-sized arrays only ~7 B/world cell (Region
