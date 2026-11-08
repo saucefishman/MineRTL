@@ -1705,7 +1705,8 @@ class _GreedyRouter:
                     raise
                 if "cannot place repeater" in str(e):
                     laid = self.laid.get(job.key)
-                    on_stretch = sum(1 for path in laid.paths if path[0] in set(e.cells)) if laid else -1
+                    cells = set(e.cells)
+                    on_stretch = sum(1 for path in laid.paths if path[0] in cells) if laid else -1
                     log(f"[lay] {job.key}: attempt {lay_attempts}, {len(e.cells)}-cell stretch with {on_stretch} branches starting on it")
                 if stretch and "cannot place repeater" in str(e) and lay_attempts == 1:
                     # Every sink is laid by now: only the branch at the fault has to go. The stretch can
