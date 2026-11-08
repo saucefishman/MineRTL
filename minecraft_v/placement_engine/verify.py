@@ -23,6 +23,7 @@ Rules (see tests/test_verify.py):
 from __future__ import annotations
 
 import itertools
+import os
 from collections import deque
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
@@ -34,8 +35,9 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 from .block_utils import cells_where, lookup
+from .cellset import CellSet, pack
 from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
-from .forks import fork_map
+from .forks import fork_map, workers
 
 try:
     from . import _signals
@@ -169,6 +171,9 @@ class OwnerOverlay:
 
 
 _NONE = object()
+# Searching nets in forked workers: each one's own arrays are tens to a hundred MB, on top of the forked check they run
+# beside, so a few cover the time for less memory than a process per core.
+_VERIFY_WORKERS = int(os.environ.get("MINECRAFT_V_VERIFY_WORKERS", "4"))
 
 
 class HiddenBoxes:
@@ -212,7 +217,7 @@ def signal_grid(region: Region, blocked: Collection[Pos], terminals: Collection[
 def signal_bytes(region: Region, blocked: Collection[Pos], terminals: Collection[Pos]) -> np.ndarray | None:
     """signal_grid's cell bytes, before they go in a Grid."""
     palette, blocks = getattr(region, "_Region__palette", None), getattr(region, "_Region__blocks", None)
-    if _signals is None or blocks is None or not isinstance(blocked, (HiddenBoxes, set, frozenset)):
+    if _signals is None or blocks is None or not isinstance(blocked, (HiddenBoxes, set, frozenset, CellSet)):
         return None
     table = np.array([cell_byte(b) for b in palette], dtype=np.uint8)
     size = blocks.shape
@@ -226,7 +231,10 @@ def signal_bytes(region: Region, blocked: Collection[Pos], terminals: Collection
             grid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 0
         cells = blocked.cells
     if cells:
-        hidden = np.fromiter(itertools.chain.from_iterable(cells), dtype=np.int64, count=3 * len(cells)).reshape(-1, 3)
+        if isinstance(cells, CellSet):  # decoded in bulk: no tuple per cell
+            hidden = cells.cells_array()
+        else:
+            hidden = np.fromiter(itertools.chain.from_iterable(cells), dtype=np.int64, count=3 * len(cells)).reshape(-1, 3)
         hidden = hidden[((hidden >= 0) & (hidden < size)).all(axis=1)]
         grid[hidden[:, 0], hidden[:, 1], hidden[:, 2]] = 0
     if len(ends):
@@ -687,7 +695,8 @@ def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owne
 
     # Nets are searched one by one, each on its own: forked processes take a share each.
     same = _unchanged_nets(memo, nets, cells, blocked, terminals) if memo is not None and cells is not None else set()
-    searched = iter(fork_map(check, [item for item in nets.items() if item[0] not in same]))
+    searched = iter(fork_map(check, [item for item in nets.items() if item[0] not in same],
+                             min(workers(), _VERIFY_WORKERS)))
     checked = [memo.found[n][1:] if n in same else next(searched) for n in nets]
     found: list[list[Violation]] = [net for net, _ in checked]
     reached: list[np.ndarray] = [keys for _, keys in checked]
