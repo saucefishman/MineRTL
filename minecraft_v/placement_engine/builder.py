@@ -6,6 +6,7 @@ import re
 import time
 import zlib
 from collections import deque
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Collection
@@ -1115,6 +1116,37 @@ class _RouteJob:
     replay: dict[Pos, list[Pos]] = field(default_factory=dict)  # target -> a path to lay again as it was, in that order
 
 
+class _PackedPath(Sequence):
+    """A laid path kept as an n x 3 int32 array (12 bytes a cell where a list of tuples costs over 100) and read as the list
+    of (x, y, z) tuples it was: items are made when asked for."""
+    __slots__ = ("cells",)
+
+    def __init__(self, path: Iterable[Pos]):
+        self.cells = np.array(path if isinstance(path, (list, tuple)) else list(path), dtype=np.int32).reshape(-1, 3)
+
+    def __len__(self) -> int:
+        return len(self.cells)
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return list(map(tuple, self.cells[i].tolist()))
+        return tuple(self.cells[i].tolist())
+
+    def __iter__(self):
+        return map(tuple, self.cells.tolist())
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, (list, tuple, _PackedPath)) and len(self) == len(other) and all(a == b for a, b in zip(self, other))
+
+    __hash__ = None
+
+    def __add__(self, other):
+        return [*self, *other]
+
+    def __radd__(self, other):
+        return [*other, *self]
+
+
 @dataclass
 class _KeptBranches:
     """A job's laid branches and where it stopped, while the jobs around a failed sink get ripped."""
@@ -1542,6 +1574,7 @@ class _GreedyRouter:
             _signal_depths([path], depths, in_place=True)
             path_targets.append(dst)
             path_cells.append(self._cells_since(job.key, mark))
+        paths = [p if isinstance(p, _PackedPath) else _PackedPath(p) for p in paths]
         # For route_job_retrying to keep, if a check below fails.
         self.laid[job.key] = _KeptBranches(paths, reached_vias, vias, leads, sinks, len(targets), path_targets, path_cells)
         # The net's earlier paths first, so a branch starting mid-net counts signal from the
@@ -2693,6 +2726,11 @@ def build_litematic_from_component_list(
         with phase("[hold] fixing hold"):
             flat_period = _hold_with_detours(workspace, flat, flat_ends, failed_nets, probed, opaque, macros, clock_requirement,
                                              hold_shorts, kept_router[0] if kept_router else None)
+
+    # Hold fixing was the router's last use: its journals, laid branches and per-net checks are not carried into the forked
+    # checks and the save.
+    kept_router.clear()
+    gc.collect()
 
     def check_signals() -> list:
         if macros:
