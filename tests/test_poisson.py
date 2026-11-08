@@ -248,6 +248,18 @@ def test_near_pairs_are_the_pairs_closer_than_the_margin():
         assert len(i) == len(want) and set(zip(i.tolist(), j.tolist())) == want and (i < j).all()
 
 
+def test_compact_matches_every_pair_scan():
+    rng = np.random.default_rng(11)
+    for n, span, big in ((1, 10, 5), (200, 60, 14), (300, 400, 30), (250, 25, 40)):
+        pos = rng.integers(0, span, (n, 3)).astype(float)
+        sizes = rng.integers(1, big, (n, 3)).astype(float)
+        for axis in range(3):
+            fast, slow = pos.copy(), pos.copy()
+            poisson._compact(fast, sizes, axis)
+            poisson._compact_all_pairs(slow, sizes, axis)
+            assert (fast == slow).all()
+
+
 def test_legalize_leaves_no_overlap_and_flat_keeps_y():
     rng = np.random.default_rng(7)
     for n, span in ((300, 150), (500, 60)):
