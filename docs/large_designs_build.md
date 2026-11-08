@@ -164,6 +164,11 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   load 4.5 GB with the old loader. GOAL 2 PASSES on both designs. Native partial dump (another agent's x64 build,
   captured by mistake): two 256 MB FlatMap blocks (PosMap/owner_map?), MALLOC_LARGE_REUSABLE 862 MB, most of it swapped.
 
+- 2026-11-08 cpu x512 acceptance #4 (f05691e, memory-aware forks): COMPLETED. Peak total = parent 11.26 GB; no forked
+  child ran beside it (fork sizing fell back to in-process at hold/timing/verify), so the 18.5 GB overlap is gone.
+  1 failure (net_2 clock repeater), verify 0. Build stats time 7,138 s (was 6,841). MEMORY GOAL MET for seed 0.
+  Remaining: net_2 (worker4: reserve repeater slots on big nets), seeds 1 and 2.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
