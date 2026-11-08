@@ -43,6 +43,11 @@ cell; router A* ~1 GB at x32; `_compact` O(n^2) time.
   place 23 s, legalize+compact ~5.6 min, world 539x601x546 (177M); wire >28 min, mostly net_2 (clock?) hitting the
   5000-node cap per sink and ripping; RSS only ~1.6 GB. Time, not memory, is the x256 wall. worker3 investigating
   why repeats don't form.
+- 2026-11-08 x256 killed at ~40 min (9G reservation blocked 5 queued jobs). net_2 = clk, 6,400 sinks (next largest
+  18), 32 node-cap failures in 8 min, each ripping 4-8 nets. Fits from x32/x64/x128 (time exponent): global place 0.5,
+  legalize+compact 1.76, layout+route 1.43 (x256 already over its prediction), hold+ext+verify 2.08. x512 estimate
+  >=98 min (wire >=65, hold/verify ~20, legalize+compact ~17); peak RSS ~5 GB. Time is the wall, not memory.
+  Clock tree agent started (branch claude/clock-tree).
 
 ## Complexity map (from code, 2026-11-08; constants still to fit)
 
@@ -60,8 +65,11 @@ Predicted break order at x512 flat: routing-state memory > verify fork copy > `_
 
 ## TODO (ranked)
 
-1. Baseline cpu x256 full build + per-phase exponents from x32/x64/x128. (worker, running)
+1. Clock tree for the 6-12K-sink clock net (wire phase >=65 min at x512). (clock-tree agent, running)
 2. `_compact` sub-quadratic. (worker2, running)
+2b. Macros don't form at x256 (27% coverage). (worker3, running)
+2c. hold + ext + verify time exponent ~2: find the quadratic step (complexity map: hold margins O(B*(n+p)),
+    HiddenBoxes O(Q*R), _wall_vias). Next for worker.
 3. Routing-state memory: wire cells as Python tuples in several structures; move to compact arrays keyed by cell id.
    Needs memray of the route phase first. (child session once the profile is in)
 4. Verify fork: owner dict / hidden set allocated in the child; share or build compactly.
