@@ -156,6 +156,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   (3.3 GB + 4 x 1.4-1.8 GB) = 18.5 GB summed (overcounts COW-shared pages; true total unmeasured). Litematic 46 MB.
   Remaining: fork memory at hold/timing (worker2), net_2 repeater (worker4), 3 seeds.
 
+- 2026-11-08 merged d262646: fork_map/Forked start only as many children as free memory fits (shares 0.2 / 0.75), else
+  run in-process; same results. x512 hold/timing forks were nested (signal child + its own fork_map of 4); child
+  footprint = its private dirtied pages. Not yet measured at x512. Next: x512 rerun on current base, then 3 seeds.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
