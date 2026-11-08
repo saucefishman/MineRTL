@@ -19,6 +19,7 @@ Synthesis options:
   --synth-only          Stop after writing the netlist
   --no-tiled-ram        Build memories from flip-flops instead of RAM blocks
   --no-synth-cache      Run yosys even if build/synth_cache has this netlist (same sources, script and yosys)
+  --hier-synth          Flatten last: less yosys memory for repeated modules, at the cost of optimizing across them
 
 Build options:
 EOF
@@ -39,6 +40,7 @@ out_litematic_dir=""
 out_litematic="build/result.litematic"
 synth_only=false
 use_synth_cache=true
+hier_synth=false
 synth_cache_dir="build/synth_cache"
 debug_prints=true
 tiled_ram=true
@@ -72,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-synth-cache)  # run yosys even when build/synth_cache has the netlist
             use_synth_cache=false
+            shift
+            ;;
+        --hier-synth)  # flatten after mapping instead of before: a module repeated N times is optimized once
+            hier_synth=true
             shift
             ;;
         --synth-only)  # stop after writing the netlist
@@ -198,6 +204,13 @@ if [[ "$debug_prints" == false ]]; then
 fi
 # Source locations are most of a big design's attributes and memory in yosys (a fifth of its peak at 600K gates), and only
 # $print cells' are read, for the prints' names.
+flatten_early='flatten -noscopeinfo'
+flatten_late=''
+if [[ "$hier_synth" == true ]]; then
+    flatten_early=''
+    flatten_late='flatten -noscopeinfo
+opt_clean'
+fi
 strip_src='setattr -unset src t:$print %n'
 map_tiled_ram=""
 if [[ "$tiled_ram" == true ]]; then
@@ -229,7 +242,7 @@ yosys_script="
 read_verilog -sv \"${dir}/*.v\"
 read_verilog -lib \"${here}/techmap/ram_cells.v\"
 hierarchy -check -top ${top}
-flatten -noscopeinfo
+${flatten_early}
 proc
 ${strip_src}
 ${strip_debug}
@@ -247,7 +260,8 @@ opt -nosdff
 techmap -map \"${here}/techmap/sdff_decompose.v\" -map \"${here}/techmap/sdffe_decompose.v\"
 techmap -map \"${here}/techmap/dffe_pn_decompose.v\"
 opt_clean
-${abc_step}"
+${abc_step}
+${flatten_late}"
 
 # Names in the netlist carry the paths yosys read files by and, for $write cells, a memory address. Without them the
 # netlist is the same from any checkout and any run, and so is the build, as names feed hashing.
@@ -304,8 +318,10 @@ evict_synth_cache() {
 if [[ -n "$synth_cache" && -f "$synth_cache/netlist.json.gz" ]]; then
     stop_spinner
     touch "$synth_cache"
-    "${gz[0]}" -dc "$synth_cache/netlist.json.gz" > "$artifacts_dir/netlist.json"
-    "${gz[0]}" -dc "$synth_cache/yosys.log.gz" > "$yosys_log"
+    # Kept gzipped, as in the cache: the build and the scripts read either (minecraft_v.build_utils.open_artifact).
+    rm -f "$artifacts_dir/netlist.json" "$yosys_log"  # an older build's plain files would be read first
+    cp "$synth_cache/netlist.json.gz" "$artifacts_dir/netlist.json.gz"
+    cp "$synth_cache/yosys.log.gz" "$yosys_log.gz"
     cp "$synth_cache/yosys.err" "$artifacts_dir/"
     echo "[yosys] netlist from $synth_cache (--no-synth-cache to run yosys)" >&2
     cat "$yosys_err"
@@ -314,7 +330,7 @@ else
     netlist_pipe="${artifacts_dir}/netlist.pipe"
     rm -f "$netlist_pipe"
     mkfifo "$netlist_pipe"
-    unplace "$netlist_pipe" > "${artifacts_dir}/netlist.json.tmp" &
+    unplace "$netlist_pipe" | "${gz[@]}" -n -c > "${artifacts_dir}/netlist.json.gz.tmp" &
     unplace_pid=$!
     yosys_status=0
     yosys -q -l "$yosys_log" -p "${yosys_script}
@@ -328,17 +344,19 @@ stat
     wait "$unplace_pid" || unplace_status=$?
     rm -f "$netlist_pipe"
     if [[ $yosys_status -ne 0 ]]; then
-        rm -f "${artifacts_dir}/netlist.json.tmp"
+        rm -f "${artifacts_dir}/netlist.json.gz.tmp"
         exit "$yosys_status"
     fi
     if [[ $unplace_status -ne 0 ]]; then
         exit "$unplace_status"
     fi
-    mv "${artifacts_dir}/netlist.json.tmp" "${artifacts_dir}/netlist.json"
+    rm -f "${artifacts_dir}/netlist.json"  # an older build's plain file would be read first
+    mv "${artifacts_dir}/netlist.json.gz.tmp" "${artifacts_dir}/netlist.json.gz"
+    "${gz[@]}" -n -c "$yosys_log" > "$yosys_log.gz.tmp" && mv "$yosys_log.gz.tmp" "$yosys_log.gz" && rm -f "$yosys_log"
     if [[ -n "$synth_cache" ]]; then
         mkdir -p "$synth_cache.tmp$$"
-        "${gz[@]}" -c "$artifacts_dir/netlist.json" > "$synth_cache.tmp$$/netlist.json.gz"
-        "${gz[@]}" -c "$yosys_log" > "$synth_cache.tmp$$/yosys.log.gz"
+        cp "$artifacts_dir/netlist.json.gz" "$synth_cache.tmp$$/netlist.json.gz"
+        cp "$yosys_log.gz" "$synth_cache.tmp$$/yosys.log.gz"
         cp "$yosys_err" "$synth_cache.tmp$$/"
         if [[ -e "$synth_cache" ]] || ! mv "$synth_cache.tmp$$" "$synth_cache" 2>/dev/null; then
             rm -rf "$synth_cache.tmp$$"  # another build got there first
@@ -351,4 +369,4 @@ if [[ "$synth_only" == true ]]; then
     exit 0
 fi
 
-uv run --project "$here" python -m minecraft_v --netlist "${artifacts_dir}/netlist.json" "$@"
+uv run --project "$here" python -m minecraft_v --netlist "${artifacts_dir}/netlist.json.gz" "$@"
