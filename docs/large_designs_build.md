@@ -67,6 +67,10 @@ Variables: n components, m nets, p pins, k fanout, V world volume (~825 blocks p
 
 Predicted break order at x512 flat: routing-state memory > verify fork copy > `_compact` time > V arrays > clock k^2.
 
+**Correction 2026-11-08:** RSS undercounts here (memory compressor). cpu x512 mid-routing: RSS 1.3 GB, physical
+footprint 11.6 GB, peak 12.4 GB (`vmmap --summary`). All earlier "peak RSS" numbers are lower bounds under memory
+pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprint.
+
 ## TODO (ranked, memory/disk only)
 
 1. yosys memory. Measured 2026-11-08 (cpu/synthetic x512-x2048): current flow marginal 6.3-9.6 B RSS per netlist byte
