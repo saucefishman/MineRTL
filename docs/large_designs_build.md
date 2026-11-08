@@ -114,6 +114,11 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   (MINECRAFT_V_VERIFY_WORKERS), chunked settle neighbourhood. Signal child -6..-20%; output same. Post-wire phases at
   datapath x24: repair +1.6 GB native A* transient, hold +93, timing +40, settle +60 (+200 transient), fork ~30% of parent.
 
+- 2026-11-08 a03a3be merged yosys-mem: `setattr -unset src t:$print %n` after proc. yosys+abc peak at N=2000:
+  synthetic 3,994 -> 3,091 MB, cpu 3,584 -> 2,867 MB; gates identical. Peak pass: opt/techmap just before abc.
+  Rejected: opt_clean -purge before abc (changes gates +-5% on small examples), no &dch (+5-10% gates, no peak gain).
+  Hier flow (+src strip): -64%/-46% memory, +19% gates on synthetic -> opt-in flag next. job.py: bare --mem = GB.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets incl. clock): classify + smallest repro. (worker4, prio -10)
