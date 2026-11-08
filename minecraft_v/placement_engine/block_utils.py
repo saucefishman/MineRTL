@@ -1,7 +1,6 @@
 from __future__ import annotations
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from math import ceil, log
 import struct
 import time
@@ -10,7 +9,7 @@ import zlib
 import nbtlib
 import numpy as np
 from litemapy import BlockState, Region, Schematic
-from nbtlib.tag import Compound, Int, List, LongArray
+from nbtlib.tag import INT, Compound, Int, List, LongArray, write_numeric
 
 from .constants import STONE
 
@@ -89,13 +88,30 @@ def cells_where(blocks: np.ndarray, table: np.ndarray, skip: Iterable[Box] = ())
     return np.argwhere(mask)
 
 
+class _ChunkedLongArray(LongArray):
+    """A LongArray that writes itself in pieces: Array.write byteswaps and copies the whole array twice over."""
+    _WRITE_LONGS = 1 << 20
+
+    def write(self, fileobj, byteorder="big"):
+        write_numeric(INT, len(self), fileobj, byteorder)
+        for i in range(0, len(self), self._WRITE_LONGS):
+            piece = np.asarray(self[i:i + self._WRITE_LONGS])
+            fileobj.write((piece if self.item_type[byteorder] == piece.dtype else piece.byteswap()).tobytes())
+
+
+def _big_endian_longs(packed: np.ndarray) -> LongArray:
+    """The packed little-endian words as a big-endian NBT long array, converted in place (packed is spent)."""
+    packed.byteswap(inplace=True)
+    return packed.view(">i8").view(_ChunkedLongArray)
+
+
 def _pack_states(blocks: np.ndarray, nbits: int) -> LongArray:
     """Palette ids as Litematica's bit array: y, then z, then x, lowest bits first, values crossing long boundaries."""
     n_x, n_y, n_z = blocks.shape
     out = np.zeros(ceil(n_x * n_y * n_z * nbits / 64), dtype="<u8")
     if _compiled(blocks, "pack_states"):
         _signals.pack_states(blocks, nbits, out)
-        return LongArray(out.astype("<i8"))
+        return _big_endian_longs(out)
     done = 0  # longs written
     held = np.zeros(0, dtype=np.uint8)  # bits short of a whole long
     for y in range(n_y):
@@ -110,34 +126,66 @@ def _pack_states(blocks: np.ndarray, nbits: int) -> LongArray:
     if held.size:
         out[done] = np.frombuffer(np.packbits(np.concatenate((held, np.zeros(64 - held.size, np.uint8))),
                                               bitorder="little").tobytes(), dtype="<u8")[0]
-    return LongArray(out.astype("<i8"))
+    return _big_endian_longs(out)
 
 
-def _gzip_threaded(data: memoryview, path: str) -> None:
-    """One gzip member, deflated in pieces on threads, each piece ending on a byte boundary as pigz does."""
-    pieces = [data[i:i + _GZIP_CHUNK] for i in range(0, len(data), _GZIP_CHUNK)] or [data]
+class _GzipSink:
+    """File-like for nbtlib to write into: one gzip member, deflated in pieces on threads as the bytes arrive, each piece
+    ending on a byte boundary as pigz does. Pieces are cut at fixed sizes, so the output doesn't depend on how it was written."""
 
-    def deflate(index: int) -> bytes:
-        c = zlib.compressobj(_GZIP_LEVEL, zlib.DEFLATED, -zlib.MAX_WBITS)
-        last = index == len(pieces) - 1
-        return c.compress(pieces[index]) + c.flush(zlib.Z_FINISH if last else zlib.Z_SYNC_FLUSH)
+    def __init__(self, path: str):
+        self.out = open(path, "wb")
+        self.out.write(struct.pack("<BBBBIBB", 0x1f, 0x8b, 8, 0, int(time.time()), 2, 255))
+        self.pool = ThreadPoolExecutor(_GZIP_THREADS)
+        self.pending = bytearray()
+        self.crc = 0
+        self.size = 0
 
-    with ThreadPoolExecutor(_GZIP_THREADS) as pool, open(path, "wb") as out:
-        out.write(struct.pack("<BBBBIBB", 0x1f, 0x8b, 8, 0, int(time.time()), 2, 255))
-        for piece in pool.map(deflate, range(len(pieces))):
-            out.write(piece)
-        out.write(struct.pack("<II", zlib.crc32(data), len(data) & 0xffffffff))
+    def write(self, data) -> int:
+        self.pending += data
+        while len(self.pending) >= (_GZIP_THREADS + 1) * _GZIP_CHUNK:  # the last piece stays back: it ends the member
+            self._emit([self._take() for _ in range(_GZIP_THREADS)], last=False)
+        return len(data)
+
+    def _take(self) -> bytes:
+        piece = bytes(self.pending[:_GZIP_CHUNK])
+        del self.pending[:_GZIP_CHUNK]
+        return piece
+
+    def _emit(self, pieces: list[bytes], last: bool) -> None:
+        def deflate(index: int) -> bytes:
+            c = zlib.compressobj(_GZIP_LEVEL, zlib.DEFLATED, -zlib.MAX_WBITS)
+            return c.compress(pieces[index]) + c.flush(zlib.Z_FINISH if last and index == len(pieces) - 1 else zlib.Z_SYNC_FLUSH)
+
+        for piece in self.pool.map(deflate, range(len(pieces))):
+            self.out.write(piece)
         for piece in pieces:
-            piece.release()
+            self.crc = zlib.crc32(piece, self.crc)
+            self.size += len(piece)
+
+    def close(self) -> None:
+        pieces = []
+        while len(self.pending) > _GZIP_CHUNK:
+            pieces.append(self._take())
+        pieces.append(bytes(self.pending))  # may be empty: the member still ends
+        self.pending = bytearray()
+        for i in range(0, len(pieces), _GZIP_THREADS):
+            batch = pieces[i:i + _GZIP_THREADS]
+            self._emit(batch, last=i + _GZIP_THREADS >= len(pieces))
+        self.out.write(struct.pack("<II", self.crc, self.size & 0xffffffff))
+        self.pool.shutdown()
+        self.out.close()
 
 
 def save_schematic(schematic: Schematic, path: str) -> None:
-    """Schematic.save, the same NBT, but compressed on several threads."""
+    """Schematic.save, the same NBT, but streamed through a gzip that compresses on several threads: no whole copy of the
+    NBT, nor of the packed block array."""
     schematic.update_metadata()
-    buffer = BytesIO()
-    nbtlib.File(schematic.to_nbt(save_soft=True), gzipped=True, byteorder="big").write(buffer, "big")
-    with buffer.getbuffer() as data:
-        _gzip_threaded(data, path)
+    sink = _GzipSink(path)
+    try:
+        nbtlib.File(schematic.to_nbt(save_soft=True), gzipped=True, byteorder="big").write(sink, "big")
+    finally:
+        sink.close()
 
 
 class BulkRegion(Region):
