@@ -81,8 +81,11 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
    uint32 4 B, CellGrid uint16 2 B, CellMask 1 B; ~2.7 GB at x512) + CellGrid.__init__ transients (np.nonzero int64
    x3 per non-air cell, astype copies; 2-3 GB spike at x512). Routing growth ~2.7 KB per laid path cell: ~1 KB Python
    (tuples/journal entries wire.py:352/360/388, builder.py:1342 _cells_since) + ~1.3 GB untracked C++ (FlatMap/NodeTable
-   pools up to 32 x 1M slots x 16 B?). Doing: worker2 = grid init slabs, pool caps, CellMask drop; worker3 = memray
-   of route + fork, then packed int64 path-cell storage.
+   pools up to 32 x 1M slots x 16 B?). memray x32 (worker3): A* scratch on failing/repair searches = 2.14 of 3.2 GB peak
+   (~1 KB per expansion: cached moves, 40 B Move, Python mirror lists); persistent wire ~760 B per path cell; gate_cells
+   142 MB. Verify fork +22-30% at its moment, child memory private; not the overall peak (repair-of-failed-nets is).
+   Doing: worker2 (claude/grid-mem) = _astar.pyx scratch + grid init slabs + pools + CellMask; worker3
+   (claude/route-state) = packed int64 solid/dust_owner/journals/gate_cells.
 
 1. yosys memory. Measured 2026-11-08 (cpu/synthetic x512-x2048): current flow marginal 6.3-9.6 B RSS per netlist byte
    (earlier 12.7x overstated); hierarchical (per-module abc, flatten last) 0.5-0.7x of that, but +9-20% gates on the
