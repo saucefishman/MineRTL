@@ -77,11 +77,19 @@ def workers() -> int:
 def fork_map(fn: Callable[[T], R], items: Sequence[T], processes: int | None = None) -> list[R]:
     """[fn(item) for item in items], in order, the items split in runs across forked processes. Results come back
     pickled, so fn should be cheap to return from. Without fork, or for few items, it all runs here."""
+    runs = fork_batches(lambda run: [fn(item) for item in run], items, processes)
+    return [r for run in runs for r in run]
+
+
+def fork_batches(fn: Callable[[Sequence[T]], R], items: Sequence[T], processes: int | None = None) -> list[R]:
+    """[fn(run) for each run of items], the runs consecutive and as even as can be, one forked process each; one run,
+    here, for few items or without fork. fn gets a whole run, so what it returns can be one compact value (arrays) rather
+    than a pickled object per item."""
     n = min(processes or workers(), len(items) // _MIN_PER_WORKER)
     if n > 1 and hasattr(os, "fork"):
         n = children_that_fit(n, _WORKER_SHARE)
     if n <= 1 or not hasattr(os, "fork"):
-        return [fn(item) for item in items]
+        return [fn(items)]
     bounds = [len(items) * k // n for k in range(n + 1)]
     sys.stdout.flush()
     sys.stderr.flush()
@@ -95,7 +103,7 @@ def fork_map(fn: Callable[[T], R], items: Sequence[T], processes: int | None = N
                 gc.disable()  # a collection would walk, and so copy, the parent's whole heap
                 status = 0
                 try:
-                    data = pickle.dumps([fn(item) for item in items[bounds[k]:bounds[k + 1]]], protocol=5)
+                    data = pickle.dumps(fn(items[bounds[k]:bounds[k + 1]]), protocol=5)
                 except BaseException as e:  # noqa: BLE001 - goes back to the parent
                     status = 1
                     try:
@@ -120,7 +128,7 @@ def fork_map(fn: Callable[[T], R], items: Sequence[T], processes: int | None = N
             elif data[0]:
                 error = error or pickle.loads(data[1:])
             elif error is None:
-                results.extend(pickle.loads(data[1:]))
+                results.append(pickle.loads(data[1:]))
         if error is not None:
             raise error
         return results
