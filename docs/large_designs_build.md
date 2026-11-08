@@ -160,6 +160,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   run in-process; same results. x512 hold/timing forks were nested (signal child + its own fork_map of 4); child
   footprint = its private dirtied pages. Not yet measured at x512. Next: x512 rerun on current base, then 3 seeds.
 
+- 2026-11-08 1 GB cpu N=5900 (1.046 GB netlist, 1.74M gates): yosys footprint 9.0 GB (abc up to 1.8 GB), 31 min; Python
+  load 4.5 GB with the old loader. GOAL 2 PASSES on both designs. Native partial dump (another agent's x64 build,
+  captured by mistake): two 256 MB FlatMap blocks (PosMap/owner_map?), MALLOC_LARGE_REUSABLE 862 MB, most of it swapped.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
