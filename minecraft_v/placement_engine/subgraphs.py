@@ -6,6 +6,9 @@ unambiguous, so one greedy path replaces the beam; instances stay disjoint while
 less a pin penalty, not MDL. Growth builds the bijection between instances, so no isomorphism test is needed.
 
 - Nets above max_fanout are never followed. Cells on them still record which net it is, so they become ports.
+- CUSTOM cells (RAM and ROM blocks, other macros) never join an instance: their contents live in the block, which the
+  label can't see, so instances holding different blocks would pass as equal and be stamped with the first one's. They
+  stay in the top netlist and the nets to them become ports.
 - Seeds are groups of cells with equal colour-refinement colours.
 - Every instance adds its matching neighbour together, taking the extension the most instances support first. A step
   can lose instances before later steps pay it back (a mux tree halves per level), so growth runs until under two are
@@ -40,6 +43,7 @@ class _Circuit:
     def __init__(self, comp: ComponentList, max_fanout: int):
         cells = [c for c in comp.components if c.type not in _IO_TYPES]
         self.ids = [c.id for c in cells]
+        self.is_custom = [c.type == ComponentType.CUSTOM for c in cells]
         index = {cid: i for i, cid in enumerate(self.ids)}
         self.net_ids = [n.net_id for n in comp.nets]
         self.driver: list[tuple[int, str]] = []
@@ -320,7 +324,7 @@ def find_repeated(comp: ComponentList, max_fanout: int = 2, min_cells: int = 8, 
     """Classes of disjoint, exactly isomorphic subcircuits, largest coverage first. Stops early at time_limit."""
     deadline = time.monotonic() + time_limit
     circuit = _Circuit(comp, max_fanout)
-    taken = [False] * len(circuit.ids)
+    taken = list(circuit.is_custom)  # blocks are never part of an instance
     kept: list[_Candidate] = []
     while time.monotonic() < deadline:  # each round mines what the last one left
         free = [not t for t in taken]

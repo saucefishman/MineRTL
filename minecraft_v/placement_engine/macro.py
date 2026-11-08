@@ -764,7 +764,9 @@ def extract_macros(comp: ComponentList, build: Callable[[str, ComponentList, dic
                and not _chains_within(cls)]
     gates = sum(c.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM)
                 for c in comp.components)
-    covered = sum(len(cls.instances) * len(cls.cells) for cls in classes)
+    by_id = {c.id: c for c in comp.components}
+    # Same terms as gates: blocks (CUSTOM) count in neither
+    covered = sum(len(cls.instances) * sum(by_id[t].type != ComponentType.CUSTOM for t in cls.cells) for cls in classes)
     if classes and covered < min_coverage * gates:
         log(f"[macro] repeats cover {covered} of {gates} gates, under {min_coverage:.0%}: none made")
         return comp, {}, []
