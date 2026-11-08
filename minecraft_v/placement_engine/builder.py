@@ -1703,6 +1703,10 @@ class _GreedyRouter:
                 if (lay_attempts > _NET_RETRIES or (not stretch and job.key not in self.has_kept_wire)
                         or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)", "(gate contact)"))):
                     raise
+                if "cannot place repeater" in str(e):
+                    laid = self.laid.get(job.key)
+                    on_stretch = sum(1 for path in laid.paths if path[0] in set(e.cells)) if laid else -1
+                    log(f"[lay] {job.key}: attempt {lay_attempts}, {len(e.cells)}-cell stretch with {on_stretch} branches starting on it")
                 if stretch and "cannot place repeater" in str(e) and lay_attempts == 1:
                     # Every sink is laid by now: only the branch at the fault has to go. The stretch can
                     # run back up the wire feeding that branch, whose last cells are where it ran out.
@@ -1902,8 +1906,12 @@ class _GreedyRouter:
                             self.rip_branch(by_key[v], [where])
                             ripped.add(v)
                         queue = deque(entry for entry in queue if entry[1].key not in wider)
+                        queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in wider and entry[1].key not in big_keys)
+                        # A net routed first for its fanout re-routes its ripped branch at once: at the end of the queue
+                        # the world is full by then, and its sinks (the clock's, thousands) each fail and rip their way in.
+                        queue.extendleft(reversed([entry for entry in enumerate(pool, 1) if entry[1].key in wider
+                                                   and entry[1].key in big_keys]))
                         queue.appendleft((i, job))
-                        queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in wider)
                         continue
                     if fail_fast:
                         raise RuntimeError(f"Routing failed for net {job.key}: {e}") from e
