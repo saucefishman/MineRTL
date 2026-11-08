@@ -100,6 +100,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   480 -> 56). Load at ~300K components: 1.5 GB -> 0.87 GB footprint; load peak now the JSON parse (~4.5x netlist).
   yosys-abc adds ~0.24 GB at the combined peak (N=2000); hier flow footprint 0.67x of current, +19% gates (synthetic).
 
+- 2026-11-08 5a1f266 merged grid-mem 04eb2b5: the failed-net list kept exceptions with tracebacks, holding each failed
+  search's tables/cell lists for the rest of the build. Datapath gen.py 16: peak 5.09 -> 2.43 GB, identical results.
+  Likely a big part of x512's 14 GB (hundreds of failed searches). x512 acceptance rerun on 5a1f266 (worker2).
+
 ## TODO (ranked, memory/disk only)
 
 0a. Post-routing phases (repair/hold/timing/verify) memory: datapath x48 grew 10.6 -> 18 GB after routing. (worker3,
