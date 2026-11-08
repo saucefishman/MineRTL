@@ -174,6 +174,10 @@ def test_cell_set_as_the_hidden_cells_of_signal_bytes_matches_a_frozenset():
     assert plain is not None and np.array_equal(plain, packed)
     only = CellSet.from_boxes([((2, 1, 3), (2, 1, 1))])
     assert np.array_equal(signal_bytes(region, frozenset({(2, 1, 3), (3, 1, 3)}), frozenset()), signal_bytes(region, only, frozenset()))
+    both = CellSet.from_cells({(1, 2, 3), (9, 9, 9)}).union(CellSet.from_cells({(4, 5, 6), (1, 2, 3)}))
+    assert sorted(both) == [(1, 2, 3), (4, 5, 6), (9, 9, 9)]
+    xs, ys, zs = next(both.chunks(2))
+    assert len(xs) == 2
     assert CellSet.from_cells({(1, 2, 3)}).with_keys([pack(4, 5, 6), pack(1, 2, 3)]).cells_array().tolist() == [[1, 2, 3], [4, 5, 6]]
 
 

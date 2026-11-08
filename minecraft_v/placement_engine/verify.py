@@ -231,12 +231,14 @@ def signal_bytes(region: Region, blocked: Collection[Pos], terminals: Collection
             grid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = 0
         cells = blocked.cells
     if cells:
-        if isinstance(cells, CellSet):  # decoded in bulk: no tuple per cell
-            hidden = cells.cells_array()
+        if isinstance(cells, CellSet):  # a slice at a time, in bulk: no tuple per cell, and no copy of all of them
+            for xs, ys, zs in cells.chunks():
+                inside = (xs >= 0) & (xs < size[0]) & (ys >= 0) & (ys < size[1]) & (zs >= 0) & (zs < size[2])
+                grid[xs[inside], ys[inside], zs[inside]] = 0
         else:
             hidden = np.fromiter(itertools.chain.from_iterable(cells), dtype=np.int64, count=3 * len(cells)).reshape(-1, 3)
-        hidden = hidden[((hidden >= 0) & (hidden < size)).all(axis=1)]
-        grid[hidden[:, 0], hidden[:, 1], hidden[:, 2]] = 0
+            hidden = hidden[((hidden >= 0) & (hidden < size)).all(axis=1)]
+            grid[hidden[:, 0], hidden[:, 1], hidden[:, 2]] = 0
     if len(ends):
         at = ends[:, 0], ends[:, 1], ends[:, 2]
         grid[at] = table[blocks[at]] | 128

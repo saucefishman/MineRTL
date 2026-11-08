@@ -56,6 +56,16 @@ class CellSet:
         """This set and some more cells, as packed keys."""
         return CellSet.from_keys(np.concatenate((np.frombuffer(self.keys, dtype=np.int64), np.asarray(keys, dtype=np.int64))))
 
+    def union(self, other: CellSet) -> CellSet:
+        return CellSet.from_keys(np.concatenate((np.frombuffer(self.keys, dtype=np.int64), np.frombuffer(other.keys, dtype=np.int64))))
+
+    def chunks(self, size: int = 1 << 20):
+        """The cells as int64 (x, y, z) column arrays, size at a time."""
+        keys = np.frombuffer(self.keys, dtype=np.int64)
+        for start in range(0, len(keys), size):
+            k = keys[start:start + size]
+            yield (k & POS_MASK) - POS_BIAS, (k >> POS_BITS & POS_MASK) - POS_BIAS, (k >> 2 * POS_BITS) - POS_BIAS
+
     def cells_array(self) -> np.ndarray:
         """The cells as an n x 3 int64 array, sorted by key."""
         keys = np.frombuffer(self.keys, dtype=np.int64)
