@@ -86,6 +86,9 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
    142 MB. Verify fork +22-30% at its moment, child memory private; not the overall peak (repair-of-failed-nets is).
    Doing: worker2 (claude/grid-mem) = _astar.pyx scratch + grid init slabs + pools + CellMask; worker3
    (claude/route-state) = packed int64 solid/dust_owner/journals/gate_cells.
+   - c54d685 merged grid-mem 5a84d13: CellGrid filled per x slab (no whole-volume nonzero/astype temporaries), search
+     pools keep <=8 idle vectors. x32 peak 1841 -> 1787 MB; x512 transient saving (2-3 GB) not measured. Output same.
+     CellMask kept (each router rebuilds its grid from it). Next (worker2): attribute the x64 repair-phase peak (6.4 GB).
 
 1. yosys memory. Measured 2026-11-08 (cpu/synthetic x512-x2048): current flow marginal 6.3-9.6 B RSS per netlist byte
    (earlier 12.7x overstated); hierarchical (per-module abc, flatten last) 0.5-0.7x of that, but +9-20% gates on the

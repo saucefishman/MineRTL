@@ -41,6 +41,7 @@ from .layout import (
 from .poisson import _poisson_placement
 from .propagate import comparator_entity, settle as settle_blocks
 from .pathfinding import IndexedWorkspace, _astar, _find_wire_path, _signal_depths
+from .cellset import CellSet
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -451,29 +452,24 @@ def _opaque_boxes(placed: list[_Placed], macros: dict[str, Macro] | None) -> lis
             for fp in [p.component.footprint]]
 
 
-_interior_memo: list = []  # [placed, its cells]: routing, repair and verify all ask for the same layout's
+_interior_memo: list = []  # [placed, its length, its CellSet]: routing, repair and verify all ask for the same layout's
+
+
+def _interior_cellset(placed: list[_Placed]) -> CellSet:
+    """Cells inside non-IO component footprints, packed (a layout's millions of them as tuples were gigabytes)."""
+    if _interior_memo and _interior_memo[0] is placed and _interior_memo[1] == len(placed):
+        return _interior_memo[2]
+    cells = CellSet.from_boxes(
+        (item.origin, (item.component.footprint.width, item.component.footprint.height, item.component.footprint.depth))
+        for item in placed
+        if item.component.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM))
+    _interior_memo[:] = [placed, len(placed), cells]
+    return cells
 
 
 def _component_interior(placed: list[_Placed]) -> set[tuple[int, int, int]]:
     """Cells inside non-IO component footprints."""
-    if _interior_memo and _interior_memo[0] is placed and _interior_memo[1] == len(placed):
-        return set(_interior_memo[2])
-    cells = frozenset(_interior_cells(placed))
-    _interior_memo[:] = [placed, len(placed), cells]
-    return set(cells)
-
-
-def _interior_cells(placed: list[_Placed]) -> set[tuple[int, int, int]]:
-    return {
-        (ox + dx, oy + dy, oz + dz)
-        for item in placed
-        if item.component.type not in (ComponentType.INPUT_PIN, ComponentType.OUTPUT_PIN, ComponentType.CUSTOM)
-        for ox, oy, oz in [item.origin]
-        for fp in [item.component.footprint]
-        for dx in range(fp.width)
-        for dy in range(fp.height)
-        for dz in range(fp.depth)
-    }
+    return set(_interior_cellset(placed))
 
 
 _MACRO_WALL = 4  # keepout thickness inside a macro's box: thicker than any routing step, so the rest can be hollow
@@ -1129,7 +1125,7 @@ class _KeptBranches:
     sinks: list[Pos]
     next_target: int
     targets: list[Pos]  # per path: the via, lead or sink it was laid for
-    cells: list[frozenset[Pos]]  # per path: the blocks laying it wrote
+    cells: list[np.ndarray]  # per path: the blocks laying it wrote, as n x 3 int32
 
 
 _LOG_EVERY_SECONDS = 30.0     # routing progress in the log
@@ -1230,7 +1226,7 @@ class _GreedyRouter:
                  terminal_positions: frozenset[Pos],
                  paths: dict[str, tuple[str, list[list[Pos]]]] | None = None,
                  resume: ResumeStore | None = None,
-                 gate_cells: frozenset[Pos] = frozenset(), block_inputs: frozenset[Pos] = frozenset()):
+                 gate_cells: CellSet | frozenset[Pos] = frozenset(), block_inputs: frozenset[Pos] = frozenset()):
         self.resume = resume
         self.gate_cells = gate_cells
         self.block_inputs = block_inputs
@@ -1319,9 +1315,13 @@ class _GreedyRouter:
     @staticmethod
     def _branch_split(job: _RouteJob, laid: _KeptBranches, around: list[Pos]) -> tuple[list[int], bool]:
         """For rip_branch: the indices of the paths it keeps, and whether a via goes with the rest."""
+        near = np.array(around, dtype=np.int32).reshape(-1, 3)
+
         def distance(i: int) -> int:
-            return min((abs(c[0] - a[0]) + abs(c[1] - a[1]) + abs(c[2] - a[2]) for c in laid.cells[i] for a in around),
-                       default=1 << 30)
+            cells = laid.cells[i]
+            if not len(cells) or not len(near):
+                return 1 << 30
+            return int(np.abs(cells[:, None, :] - near[None, :, :]).sum(axis=2).min())
 
         # On a tie the later branch: fewer can hang off it.
         nearest = min(reversed(range(len(laid.paths))), key=distance, default=None)
@@ -1349,15 +1349,17 @@ class _GreedyRouter:
         kept = {laid.targets[i] for i in keep}
         return sum(1 for t in laid.targets if t in laid.sinks and t not in kept)
 
-    def _cells_since(self, key: str, mark: int) -> frozenset[Pos]:
-        return frozenset(e[2] for e in self.rec.journals[key][mark:] if e[0] == "block")
+    def _cells_since(self, key: str, mark: int) -> np.ndarray:
+        """The blocks written since mark, as an n x 3 int32 array (a frozenset of tuples was ten times the size)."""
+        cells = [e[2] for e in self.rec.journals[key][mark:] if e[0] == "block"]
+        return np.array(cells, dtype=np.int32).reshape(-1, 3)
 
     def route_job(self, job: _RouteJob, job_blocked: frozenset[Pos], first: tuple[Pos, ...] = ()) -> None:
         rec, ws = self.rec, self.ws
         kept = self.kept.pop(job.key, None)
         paths: list[list[Pos]] = kept.paths if kept else []
         path_targets: list[Pos] = kept.targets if kept else []
-        path_cells: list[frozenset[Pos]] = kept.cells if kept else []
+        path_cells: list[np.ndarray] = kept.cells if kept else []
         net_seeds = [pos for pos, owner in self.dust_owner.items()
                      if owner == job.net_id and _is_redstone_wire(self.region[pos])] if job.branch_from_net else []
         reached_vias: list[Pos] = kept.reached_vias if kept else []
@@ -2059,7 +2061,7 @@ def _route_all_nets(
     with phase("[wire] preparing nets"):
         router = _GreedyRouter(workspace, rec, solid, dust_owner, inverted_cells, footprint_blocked, max_bridge_y,
                                frozenset(pin_terminal.values()), resume=resume,
-                               gate_cells=frozenset(_component_interior(placed)),
+                               gate_cells=_interior_cellset(placed),
                                # A net's checks stop at macro inputs: past them is the macro's own wire, checked when built,
                                # and a routed bank's flip-flops would read as the net's latch.
                                block_inputs=frozenset(pin_terminal[(p.component.id, pin.name)] for p in placed

@@ -81,3 +81,36 @@ def test_rollback_undoes_only_failed_attempt():
         rollback(rec, "a", mark)
     assert _state(region, solid, dust_owner, inverted) == kept
     assert len(rec.journals["a"]) == mark
+
+
+def test_a_finished_nets_journal_is_packed_and_reads_back_the_same():
+    from minecraft_v.placement_engine.ripup import PackedJournal
+
+    rec, region, ws, solid, dust_owner, inverted = _setup()
+    path = [(1, 2, 1), (2, 2, 1), (3, 3, 1), (4, 3, 1), (6, 7, 1), (6, 8, 1)]
+    with rec.recording("a"):
+        _lay_redstone_path(ws, solid, dust_owner, path, "a", inverted_cells=inverted)
+        written = list(rec.journals["a"])
+        assert type(rec.journals["a"]) is list  # while recording it is the list the compiled layer appends to
+    assert type(dict.get(rec.journals, "a")) is PackedJournal and len(rec.journals) == 1
+    assert rec.journals["a"] == written  # the same entries, targets and previous values included
+    assert type(dict.get(rec.journals, "a")) is list  # read: thawed, to be packed again when it's next recorded
+    with rec.recording("a"):
+        pass
+    assert type(dict.get(rec.journals, "a")) is PackedJournal
+    before = _state(region, solid, dust_owner, inverted)
+    rip_up(rec, "a", region, solid, dust_owner)
+    assert "a" not in rec.journals and _state(region, solid, dust_owner, inverted) != before
+    assert not dust_owner and not solid
+
+
+def test_cell_set_matches_the_cells_of_its_boxes():
+    from minecraft_v.placement_engine.cellset import CellSet
+
+    boxes = [((0, 0, 0), (2, 3, 1)), ((5, 1, 7), (1, 1, 1)), ((1, 0, 0), (2, 2, 2)), ((9, 9, 9), (0, 4, 4))]
+    expected = {(ox + dx, oy + dy, oz + dz) for (ox, oy, oz), (w, h, d) in boxes
+                for dx in range(w) for dy in range(h) for dz in range(d)}
+    cells = CellSet.from_boxes(boxes)
+    assert set(cells) == expected and len(cells) == len(expected) and bool(cells)
+    assert all(c in cells for c in expected) and (9, 9, 9) not in cells and (6, 1, 7) not in cells
+    assert not CellSet.from_boxes([])
