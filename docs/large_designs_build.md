@@ -144,6 +144,11 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
 - 2026-11-08 1 GB synthetic load: streaming loader peak 2,662 MB (was 4,198 whole-text parse), 211 s both. With synth
   8.9 GB: GOAL 2 (1 GB synth + load < 12 GB) PASSES on the synthetic design with ~3 GB margin. cpu N=5900 pending.
 
+- 2026-11-08 native inventory (code read, worker): idle FlatMap/NodeTable thread-local pools up to ~0.5 GB, never
+  trimmed (trim_pools has no caller); _CELLS_POOL keeps the largest search's x/y/z/h/cm vectors and heap (up to ~235 MB).
+  Candidate fixes after the heap dump: trim pools per net / at phase ends, shrink_to_fit beyond a cap,
+  malloc_zone_pressure_relief after routing. Dump (nat-a1, cpu x64) waits for x512c.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
