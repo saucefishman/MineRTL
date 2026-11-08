@@ -202,8 +202,6 @@ strip_debug='delete t:$check'
 if [[ "$debug_prints" == false ]]; then
     strip_debug='delete t:$print t:$check'
 fi
-# Source locations are most of a big design's attributes and memory in yosys (a fifth of its peak at 600K gates), and only
-# $print cells' are read, for the prints' names.
 flatten_early='flatten -noscopeinfo'
 flatten_late=''
 if [[ "$hier_synth" == true ]]; then
@@ -211,6 +209,8 @@ if [[ "$hier_synth" == true ]]; then
     flatten_late='flatten -noscopeinfo
 opt_clean'
 fi
+# Source locations are most of a big design's attributes and memory in yosys (a fifth of its peak at 600K gates), and only
+# $print cells' are read, for the prints' names.
 strip_src='setattr -unset src t:$print %n'
 map_tiled_ram=""
 if [[ "$tiled_ram" == true ]]; then
