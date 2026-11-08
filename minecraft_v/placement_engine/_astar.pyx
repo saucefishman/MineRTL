@@ -691,6 +691,10 @@ cdef class _OwnCells:
             self.cells.get(cell_key(pos[0], pos[1], pos[2]), &ins)[0] = 1
 
 
+NOT_IN_GRID = object()  # CellGrid.owner_at beyond the grid; the container's own dict has such cells
+G_OWNED_BIT = G_OWNED   # for count_bit
+
+
 cdef class CellGrid:
     """One word per cell of what the searches read, mirrored from the router's containers.
 
@@ -707,6 +711,7 @@ cdef class CellGrid:
     cdef long long sx, sy
     cdef FlatMap[int] owner_map     # cell_key -> interned owner, 0 for none (no erase in FlatMap)
     cdef dict owner_ids
+    cdef list owner_names           # owner_map's value - 1 -> the owner
     cdef object keep_count
     cdef object own_obj              # the last World's keepout _own set, and its cells as a map
     cdef _OwnCells own_cells
@@ -727,6 +732,7 @@ cdef class CellGrid:
         if self.g == NULL:
             raise MemoryError("CellGrid")
         self.owner_ids = {}
+        self.owner_names = []
         # The grid holds every region cell's kind, and nothing outside the region has one: the index's sets give way to
         # views of the grid (GridKind), and searches get empty sets for cells beyond it. Millions of cells (a RAM block)
         # made each write's set.add a cache miss.
@@ -769,6 +775,8 @@ cdef class CellGrid:
         solid._grid, solid._grid_bit = self, F_SOLID
         inverted._grid, inverted._grid_bit = self, F_INV
         dust_owner._grid = self
+        for container in (solid, inverted, dust_owner):  # from here the grid holds the cells it covers
+            container._adopt()
 
     def __dealloc__(self):
         free(self.g)
@@ -832,7 +840,77 @@ cdef class CellGrid:
         oid = self.owner_ids.get(value)
         if oid is None:
             oid = self.owner_ids[value] = 1 + len(self.owner_ids)
+            self.owner_names.append(value)
         return oid
+
+    # --- the containers' cells in the grid (JournaledSet / JournaledDict keep nothing else for cells it covers) ---
+
+    cpdef int test(self, tuple pos, unsigned int bit):
+        """1 or 0: whether the cell has the bit; -1 beyond the grid."""
+        cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
+        if w == NULL:
+            return -1
+        return 1 if w[0] & bit else 0
+
+    cpdef int put_in(self, tuple pos, unsigned int bit, bint on):
+        """put, returning 1, or 0 for a cell beyond the grid (nothing written)."""
+        cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
+        if w == NULL:
+            return 0
+        w[0] = (w[0] | bit) if on else (w[0] & ~bit)
+        return 1
+
+    cpdef int put_owner_in(self, tuple pos, value):
+        """put_owner, returning 1, or 0 for a cell beyond the grid."""
+        cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
+        if w == NULL:
+            return 0
+        self.put_owner(pos, value)
+        return 1
+
+    cpdef object owner_at(self, tuple pos):
+        """The cell's owner, None, or NOT_IN_GRID."""
+        cdef uint16_t* w = self.word(pos[0], pos[1], pos[2])
+        if w == NULL:
+            return NOT_IN_GRID
+        return self.owner_in(w, pos[0], pos[1], pos[2])
+
+    cdef inline object owner_in(self, uint16_t* w, int x, int y, int z):
+        if not w[0] & G_OWNED:
+            return None
+        return self.owner_names[self.owner_map.find(cell_key(x, y, z))[0] - 1]
+
+    def cells_with(self, unsigned int bit):
+        """Every cell of the grid whose word has the bit, as an n x 3 int32 array (in x, y, z order)."""
+        cdef size_t cells = <size_t>(self.sx * self.nx)
+        grid3 = np.asarray(<uint16_t[:cells]>self.g).reshape(self.nx, self.ny, self.nz)
+        parts = []
+        step = max(1, (1 << 22) // (self.ny * self.nz))
+        for x0 in range(0, self.nx, step):
+            xs, ys, zs = np.nonzero(grid3[x0:x0 + step] & bit)
+            if len(xs):
+                parts.append(np.stack((xs + (x0 - GRID_MARGIN), ys - GRID_MARGIN, zs - GRID_MARGIN), axis=1).astype(np.int32))
+        return np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.int32)
+
+    def count_bit(self, unsigned int bit):
+        cdef size_t cells = <size_t>(self.sx * self.nx)
+        grid3 = np.asarray(<uint16_t[:cells]>self.g).reshape(self.nx, self.ny, self.nz)
+        n = 0
+        step = max(1, (1 << 22) // (self.ny * self.nz))
+        for x0 in range(0, self.nx, step):
+            n += int(np.count_nonzero(grid3[x0:x0 + step] & bit))
+        return n
+
+    def owned_cells(self):
+        """(cells, owners): the grid's dust_owner cells as an n x 3 int32 array, and who owns each, as a list."""
+        cdef Py_ssize_t i, n
+        cells = self.cells_with(G_OWNED)
+        n = len(cells)
+        owners = [None] * n
+        cdef int[:, ::1] c = cells
+        for i in range(n):
+            owners[i] = self.owner_names[self.owner_map.find(cell_key(c[i, 0], c[i, 1], c[i, 2]))[0] - 1]
+        return cells, owners
 
     cdef int load_keepout(self, count) except -1:
         """Mirrors a keepout count (a dict, or builder._KeyCounts); the bits of a previous one go."""
@@ -915,7 +993,7 @@ cdef class GridKind:
 @cython.final
 cdef class World:
     cdef object non_air, wire, torch, repeater, solid, inverted, terminal, fp_relief, fp, pending
-    cdef dict dust_owner
+    cdef object dust_owner
     cdef object net_id
     cdef int min_x, min_y, min_z, max_x, max_y, max_z, max_bridge_y
     cdef int gx, gy, gz, x_h_factor
@@ -958,7 +1036,7 @@ cdef class World:
                  int max_bridge_y, goal, int x_h_factor, eprot, prot, fp_relief, fp, inverted, terminal,
                  workspace, glass, facing, dict pos_ids, list pos_list, list h_list, list move_cache,
                  pending=frozenset(), CellGrid grid=None, bint grid_check=False):
-        for s in (non_air, wire, torch, repeater, solid, fp_relief, inverted, terminal, pending):
+        for s in (non_air, wire, torch, repeater, fp_relief, terminal, pending):  # solid, inverted: anything with `in`
             if not isinstance(s, (set, frozenset)):
                 raise TypeError(f"World needs sets, got {type(s).__name__}")
         if not (isinstance(fp, (set, frozenset)) or hasattr(fp, "mask")):
@@ -967,9 +1045,7 @@ cdef class World:
         self.solid, self.inverted, self.terminal, self.fp_relief, self.fp = solid, inverted, terminal, fp_relief, fp
         self.pending = pending
         self.has_pending = bool(pending)
-        if not isinstance(dust_owner, dict):
-            raise TypeError(f"World needs a dict dust_owner, got {type(dust_owner).__name__}")
-        self.dust_owner = <dict>dust_owner  # subclasses (JournaledDict, OverlayDict) keep dict.get
+        self.dust_owner = dust_owner  # anything with get: JournaledDict keeps its cells in the grid
         self.net_id = net_id
         self.min_x, self.min_y, self.min_z, self.max_x, self.max_y, self.max_z = bounds
         self.max_bridge_y = max_bridge_y
@@ -1155,7 +1231,7 @@ cdef class World:
         key = (x, y, z)
         cdef bint v
         if bit == F_SOLID:
-            v = PySet_Contains(self.solid, key)
+            v = key in self.solid
         elif bit == F_NONAIR:
             v = PySet_Contains(self.non_air, key)
         elif bit == F_WIRE:
@@ -1173,7 +1249,7 @@ cdef class World:
         elif bit == F_FP:
             v = fp_has(self.fp, key)
         elif bit == F_INV:
-            v = PySet_Contains(self.inverted, key)
+            v = key in self.inverted
         elif bit == F_TERM:
             v = PySet_Contains(self.terminal, key)
         elif bit == F_GLASS:
@@ -1212,7 +1288,7 @@ cdef class World:
     cdef int fill_slow(self, CellInfo* c, uint16_t* w, int x, int y, int z) except -1:
         cdef unsigned int v = 0
         key = (x, y, z)
-        if PySet_Contains(self.solid, key): v |= F_SOLID
+        if key in self.solid: v |= F_SOLID
         if w != NULL:
             v |= w[0] & (F_NONAIR | F_WIRE | F_TORCH | F_REP)
         else:
@@ -1225,7 +1301,7 @@ cdef class World:
         if fp_has(self.fp, key):
             v |= F_FP
             if not PySet_Contains(self.fp_relief, key): v |= F_EFP
-        if PySet_Contains(self.inverted, key): v |= F_INV
+        if key in self.inverted: v |= F_INV
         if PySet_Contains(self.terminal, key): v |= F_TERM
         o = self.dust_owner.get(key)
         if o is None:
@@ -3023,18 +3099,128 @@ cdef enum:
 
 
 @cython.final
+cdef class PosMap:
+    """A dict from (x, y, z) cells to net ids, in a hash table of 16 byte slots: what ripup.Recorder.writer is. The
+    DustLayer reads and writes it without making a tuple, and a cell costs bytes instead of a tuple and its table slot."""
+    cdef FlatMap[int] m              # cell_key -> interned name + 1, 0 for a cell removed
+    cdef vector[unsigned long long] order   # keys in the order first seen
+    cdef list names
+    cdef dict ids
+    cdef Py_ssize_t live
+
+    def __init__(self, items=()):
+        self.names = []
+        self.ids = {}
+        self.live = 0
+        for pos, name in (items.items() if hasattr(items, "items") else items):
+            self[pos] = name
+
+    cdef int intern(self, name) except -1:
+        i = self.ids.get(name)
+        if i is None:
+            self.names.append(name)
+            i = self.ids[name] = len(self.names)
+        return i
+
+    cdef object get_xyz(self, int x, int y, int z):
+        cdef int* p = self.m.find(cell_key(x, y, z))
+        if p == NULL or p[0] == 0:
+            return None
+        return self.names[p[0] - 1]
+
+    cdef int set_xyz(self, int x, int y, int z, name) except -1:
+        cdef int ins
+        cdef unsigned long long key = cell_key(x, y, z)
+        cdef int* p = self.m.get(key, &ins)
+        if ins:
+            self.order.push_back(key)
+        if p[0] == 0:
+            self.live += 1
+        p[0] = self.intern(name)
+        return 0
+
+    def get(self, tuple pos, default=None):
+        value = self.get_xyz(pos[0], pos[1], pos[2])
+        return default if value is None else value
+
+    def __getitem__(self, tuple pos):
+        value = self.get_xyz(pos[0], pos[1], pos[2])
+        if value is None:
+            raise KeyError(pos)
+        return value
+
+    def __setitem__(self, tuple pos, name):
+        self.set_xyz(pos[0], pos[1], pos[2], name)
+
+    def __contains__(self, pos):
+        cdef int* p
+        try:
+            p = self.m.find(cell_key(pos[0], pos[1], pos[2]))
+        except (TypeError, IndexError):
+            return False
+        return p != NULL and p[0] != 0
+
+    def pop(self, tuple pos, *default):
+        cdef int* p = self.m.find(cell_key(pos[0], pos[1], pos[2]))
+        if p == NULL or p[0] == 0:
+            if default:
+                return default[0]
+            raise KeyError(pos)
+        value = self.names[p[0] - 1]
+        p[0] = 0
+        self.live -= 1
+        return value
+
+    def __delitem__(self, tuple pos):
+        self.pop(pos)
+
+    def __len__(self):
+        return self.live
+
+    def __bool__(self):
+        return self.live > 0
+
+    def items(self):
+        cdef size_t i
+        cdef unsigned long long key
+        cdef int v
+        out = []
+        for i in range(self.order.size()):
+            key = self.order[i]
+            v = self.m.find(key)[0]
+            if v:
+                out.append((((<long long>(key >> 36)) - (1 << 17), (<long long>((key >> 18) & 0x3FFFF)) - (1 << 17),
+                             (<long long>(key & 0x3FFFF)) - (1 << 17)), self.names[v - 1]))
+        return out
+
+    def keys(self):
+        return [pos for pos, _ in self.items()]
+
+    def values(self):
+        return [name for _, name in self.items()]
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def copy(self):
+        return PosMap(self.items())
+
+
+@cython.final
 cdef class DustLayer:
     cdef CellGrid grid
     cdef uint32_t[:, :, :] blocks
     cdef list palette, cls, journal
-    cdef dict writer, slots
+    cdef PosMap writer
+    cdef dict slots, owner_back
+    cdef set solid_back              # solid's and dust_owner's cells beyond the grid; the grid has the rest
     cdef object inner, solid, dust_owner, active, net_id, write, conflict, fallback, classify, red, support, missing
     cdef int red_kind, support_kind
     cdef Py_ssize_t red_slot, sup_slot
     cdef unsigned int solid_bit
     cdef object notch_fallback
 
-    def __init__(self, CellGrid grid, blocks, list palette, list cls, dict slots, list journal, dict writer,
+    def __init__(self, CellGrid grid, blocks, list palette, list cls, dict slots, list journal, PosMap writer,
                  inner, solid, dust_owner, active, net_id, write, conflict, fallback, classify, red, support,
                  missing, int red_kind, int support_kind, unsigned int solid_bit):
         self.grid = grid
@@ -3044,10 +3230,34 @@ cdef class DustLayer:
         self.write, self.conflict, self.fallback, self.classify = write, conflict, fallback, classify
         self.red, self.support, self.missing = red, support, missing
         self.red_kind, self.support_kind, self.solid_bit = red_kind, support_kind, solid_bit
+        self.solid_back, self.owner_back = solid._back, dust_owner._back
         hit = slots.get(id(red))
         self.red_slot = hit[1] if hit is not None else -1
         hit = slots.get(id(support))
         self.sup_slot = hit[1] if hit is not None else -1
+
+    cdef inline bint solid_has(self, tuple pos) except -1:
+        cdef uint16_t* w = self.grid.word(pos[0], pos[1], pos[2])
+        if w != NULL:
+            return (w[0] & self.solid_bit) != 0
+        return pos in self.solid_back
+
+    cdef inline int solid_add(self, tuple pos) except -1:
+        if not self.grid.put_in(pos, self.solid_bit, True):
+            self.solid_back.add(pos)
+        return 0
+
+    cdef inline object owner_get(self, tuple pos):
+        """Who owns the cell, or None."""
+        cdef uint16_t* w = self.grid.word(pos[0], pos[1], pos[2])
+        if w != NULL:
+            return self.grid.owner_in(w, pos[0], pos[1], pos[2])
+        return self.owner_back.get(pos)
+
+    cdef inline int owner_set(self, tuple pos) except -1:
+        if not self.grid.put_owner_in(pos, self.net_id):
+            self.owner_back[pos] = self.net_id
+        return 0
 
     cdef inline int cls_of(self, Py_ssize_t idx) except -1:
         cdef Py_ssize_t n = len(self.cls)
@@ -3064,21 +3274,19 @@ cdef class DustLayer:
     cdef int lay_cell(self, tuple pos) except -1:
         cdef int x = pos[0], y = pos[1], z = pos[2], c, was
         cdef Py_ssize_t idx = self.blocks[x, y, z]
-        cdef PyObject* p
         cdef tuple below
         c = self.cls_of(idx)
         existing = self.palette[idx]
         if c & DL_DUST:
-            p = PyDict_GetItem(self.dust_owner, pos)
-            if p != NULL and <object>p != self.net_id:
-                raise self.conflict(f"Dust collision at {pos} for nets {<object>p} vs {self.net_id}", (pos,))
+            owner = self.owner_get(pos)
+            if owner is not None and owner != self.net_id:
+                raise self.conflict(f"Dust collision at {pos} for nets {owner} vs {self.net_id}", (pos,))
             return 0
         elif not c & DL_AIR:
             raise self.conflict(f"Tried to redstone over an existing block ({existing}) at {pos}", (pos, (x, y + 1, z)))
         # workspace[pos] = REDSTONE
-        p = PyDict_GetItem(self.writer, pos)
-        self.journal.append(("block", self.inner, pos, existing, <object>p if p != NULL else None))
-        self.writer[pos] = self.active
+        self.journal.append(("block", self.inner, pos, existing, self.writer.get_xyz(x, y, z)))
+        self.writer.set_xyz(x, y, z, self.active)
         was = c & DL_KIND
         if was != self.red_kind:
             self.grid.put_kind(pos, <unsigned int>(was ^ self.red_kind), <unsigned int>self.red_kind)
@@ -3089,10 +3297,9 @@ cdef class DustLayer:
         else:
             self.blocks[x, y, z] = <uint32_t>self.red_slot
         # dust_owner[pos] = net_id
-        p = PyDict_GetItem(self.dust_owner, pos)
-        self.journal.append(("dict", self.dust_owner, pos, <object>p if p != NULL else self.missing, None))
-        PyDict_SetItem(self.dust_owner, pos, self.net_id)
-        self.grid.put_owner(pos, self.net_id)
+        owner = self.owner_get(pos)
+        self.journal.append(("dict", self.dust_owner, pos, self.missing if owner is None else owner, None))
+        self.owner_set(pos)
         self.support_below(pos, x, y, z)
         return 0
 
@@ -3100,12 +3307,11 @@ cdef class DustLayer:
         """wire._place_support for the cell at pos."""
         cdef Py_ssize_t idx
         cdef int c, was
-        cdef PyObject* p
         cdef tuple below
         if y <= 0:
             return 0
         below = (x, y - 1, z)
-        if PySet_Contains(self.solid, below):
+        if self.solid_has(below):
             return 0
         idx = self.blocks[x, y - 1, z]
         c = self.cls_of(idx)
@@ -3113,9 +3319,8 @@ cdef class DustLayer:
             self.fallback(pos)  # a conflict, or maybe a stair
             return 0
         existing = self.palette[idx]
-        p = PyDict_GetItem(self.writer, below)
-        self.journal.append(("block", self.inner, below, existing, <object>p if p != NULL else None))
-        self.writer[below] = self.active
+        self.journal.append(("block", self.inner, below, existing, self.writer.get_xyz(x, y - 1, z)))
+        self.writer.set_xyz(x, y - 1, z, self.active)
         was = c & DL_KIND
         if was != self.support_kind:
             self.grid.put_kind(below, <unsigned int>(was ^ self.support_kind), <unsigned int>self.support_kind)
@@ -3126,8 +3331,7 @@ cdef class DustLayer:
         else:
             self.blocks[x, y - 1, z] = <uint32_t>self.sup_slot
         self.journal.append(("set", self.solid, below, False, None))
-        PySet_Add(self.solid, below)
-        self.grid.put(below, self.solid_bit, True)
+        self.solid_add(below)
         return 0
 
     @cython.boundscheck(True)
@@ -3142,12 +3346,10 @@ cdef class DustLayer:
         """workspace[pos] = block, journaled."""
         cdef int x = pos[0], y = pos[1], z = pos[2], was, now
         cdef Py_ssize_t idx = self.blocks[x, y, z], slot
-        cdef PyObject* p
         was = self.cls_of(idx) & DL_KIND
         existing = self.palette[idx]
-        p = PyDict_GetItem(self.writer, pos)
-        self.journal.append(("block", self.inner, pos, existing, <object>p if p != NULL else None))
-        self.writer[pos] = self.active
+        self.journal.append(("block", self.inner, pos, existing, self.writer.get_xyz(x, y, z)))
+        self.writer.set_xyz(x, y, z, self.active)
         hit = self.slots.get(id(block))
         if hit is not None and hit[0] is block:
             slot = hit[1]
@@ -3164,17 +3366,15 @@ cdef class DustLayer:
 
     def set_owner(self, tuple pos):
         """dust_owner[pos] = net_id, journaled."""
-        cdef PyObject* p = PyDict_GetItem(self.dust_owner, pos)
-        self.journal.append(("dict", self.dust_owner, pos, <object>p if p != NULL else self.missing, None))
-        PyDict_SetItem(self.dust_owner, pos, self.net_id)
-        self.grid.put_owner(pos, self.net_id)
+        owner = self.owner_get(pos)
+        self.journal.append(("dict", self.dust_owner, pos, self.missing if owner is None else owner, None))
+        self.owner_set(pos)
 
     def add_solid(self, tuple pos):
         """solid.add(pos), journaled."""
-        if not PySet_Contains(self.solid, pos):
+        if not self.solid_has(pos):
             self.journal.append(("set", self.solid, pos, False, None))
-        PySet_Add(self.solid, pos)
-        self.grid.put(pos, self.solid_bit, True)
+        self.solid_add(pos)
 
     def set_notch_fallback(self, fn):
         """fn(prev, cell): wire._check_slope_notch, for the steps lay_run doesn't do itself."""
@@ -3203,7 +3403,7 @@ cdef class DustLayer:
                     dy = by - ay
                     if abs(dx) + abs(dz) == 1 and (dy == 1 or dy == -1):
                         notch = (bx, by + 1, bz) if by < ay else (ax, ay + 1, az)
-                        if PySet_Contains(self.solid, notch):
+                        if self.solid_has(notch):
                             idx = self.blocks[notch[0], notch[1], notch[2]]
                             if str(self.palette[idx]) != "minecraft:glass":
                                 raise self.conflict(f"Slope {prev} -> {cell} would be cut by the block at {notch}", (cell, prev))

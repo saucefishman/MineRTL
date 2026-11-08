@@ -114,3 +114,44 @@ def test_cell_set_matches_the_cells_of_its_boxes():
     assert set(cells) == expected and len(cells) == len(expected) and bool(cells)
     assert all(c in cells for c in expected) and (9, 9, 9) not in cells and (6, 1, 7) not in cells
     assert not CellSet.from_boxes([])
+
+
+def test_containers_keep_their_cells_in_the_grid_and_the_rest_in_themselves():
+    """Once a CellGrid mirrors them, cells it covers live only in its words; cells beyond it stay in the container."""
+    from litemapy import Region
+    from minecraft_v.placement_engine.pathfinding import IndexedWorkspace
+
+    rec = Recorder()
+    region = Region(0, 0, 0, 6, 6, 6)
+    solid, dust_owner, inverted = JournaledSet(rec, name="solid"), JournaledDict(rec), JournaledSet(rec, name="inverted")
+    inside, outside = (1, 1, 1), (900, 1, 1)
+    solid.add(inside), solid.add(outside), dust_owner.__setitem__(inside, "a"), dust_owner.__setitem__(outside, "b")
+    ws = IndexedWorkspace(region)
+    ws.attach_grid(solid, dust_owner, inverted, frozenset(), frozenset())
+    assert solid._grid is not None and dust_owner._grid is not None
+    assert solid._back == {outside} and dust_owner._back == {outside: "b"}  # the cells in the grid moved there
+    assert inside in solid and outside in solid and (2, 2, 2) not in solid and len(solid) == 2
+    assert set(solid) == {inside, outside}
+    assert dust_owner.get(inside) == "a" and dust_owner[outside] == "b" and dust_owner.get((2, 2, 2)) is None
+    assert dict(dust_owner.items()) == {inside: "a", outside: "b"} and len(dust_owner) == 2 and inside in dust_owner
+    with rec.recording("n"):
+        dust_owner[inside] = "n"
+        solid.discard(inside)
+        assert dust_owner.pop(outside) == "b" and outside not in dust_owner
+    rip_up(rec, "n", region, solid, dust_owner)
+    assert dict(dust_owner.items()) == {inside: "a", outside: "b"} and set(solid) == {inside, outside}
+    assert dust_owner.pop(inside) == "a" and inside not in dust_owner and dust_owner.pop(inside, None) is None
+
+
+def test_pos_map_is_a_dict_of_cells():
+    from minecraft_v.placement_engine.pathfinding import _astar
+
+    m = _astar.PosMap()
+    m[(1, 2, 3)] = "a"
+    m[(-5, 0, 7)] = "b"
+    m[(1, 2, 3)] = "c"
+    assert m.get((1, 2, 3)) == "c" and m[(-5, 0, 7)] == "b" and m.get((9, 9, 9), "x") == "x" and len(m) == 2
+    assert dict(m.items()) == {(1, 2, 3): "c", (-5, 0, 7): "b"} and (1, 2, 3) in m and (0, 0, 0) not in m
+    assert m.pop((1, 2, 3)) == "c" and (1, 2, 3) not in m and m.pop((1, 2, 3), None) is None and len(m) == 1
+    m[(1, 2, 3)] = "d"  # a removed cell comes back
+    assert dict(m.items()) == {(1, 2, 3): "d", (-5, 0, 7): "b"} and dict(m.copy().items()) == dict(m.items())
