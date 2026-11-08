@@ -86,7 +86,9 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
 
 - 2026-11-08 synthetic datapath x48 (worker3's route-state branch) reached >=13.8 GB footprint while declaring 5G;
   job.py missed it (build in its own session, outside the job's process group). Killed by hand (swap 0.8 GB free).
-  Fixed ~/.cache/mcv-jobs/job.py to measure/kill descendants too (new clients only).
+  Fixed ~/.cache/mcv-jobs/job.py to measure/kill descendants too (new clients only). The x48 base run (before
+  route-state) also passed 16.6 GB and was killed by hand: the synthetic datapath outgrows 12 GB far earlier than
+  cpu xN (x48 is ~150-200K cells? to confirm), so it is the harder test design.
 
 ## TODO (ranked, memory/disk only)
 
