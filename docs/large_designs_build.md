@@ -112,6 +112,7 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
 
 ## TODO (ranked, memory/disk only)
 
+0c. Routing failures at x512 (10 nets incl. clock): classify + smallest repro. (worker4, prio -10)
 0b. Save step streaming (parent +1 GB at x512 save). (worker2)
 0a. Post-routing phases (repair/hold/timing/verify) memory: datapath x48 grew 10.6 -> 18 GB after routing. (worker3,
     claude/post-route-mem)
