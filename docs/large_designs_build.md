@@ -96,6 +96,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   PosMap. cpu x64 parent peak 6426 (original) -> 5375 MB; x64 routing end 4203 -> 3719. Datapath x48: routing done at
   10.6 GB (~7 KB per path cell, mostly A*/grid, not Python), then repair/hold/timing climbed past 16.6-18 GB unfinished.
 
+- 2026-11-08 18e68c3 merged ir-slots: IR as slotted dataclasses (Component 1264 -> 280 B, PinRef 480 -> 80, NetEndpoint
+  480 -> 56). Load at ~300K components: 1.5 GB -> 0.87 GB footprint; load peak now the JSON parse (~4.5x netlist).
+  yosys-abc adds ~0.24 GB at the combined peak (N=2000); hier flow footprint 0.67x of current, +19% gates (synthetic).
+
 ## TODO (ranked, memory/disk only)
 
 0a. Post-routing phases (repair/hold/timing/verify) memory: datapath x48 grew 10.6 -> 18 GB after routing. (worker3,
@@ -124,7 +128,7 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
     held until the acceptance runs leave the queue). 1 GB netlist: ~3.8 GB -> ~0.7 GB artifacts + litematic.
 2d. Forked verify memory (owner dict / hidden set in the child, CoW from parent writes). (worker3, running)
 2c. cpu x512 acceptance build, base branch. (worker2, running)
-3. Python load ~8.5x netlist: slot IR models (Component/Net ~3-5 KB each); or load hierarchical JSON.
+3. DONE 18e68c3 (IR slots). Next load lever: streaming JSON parse. yosys per-pass memory (worker, claude/yosys-mem).
 4. Routing-state memory: wire cells as Python tuples in ~6 structures; verify fork's own owner dict / hidden set.
 5. V-dense arrays (~7 B persistent per world cell + transients).
 6. Disk per build: component_list.json (1.4x netlist), component_layout.json, resume pickles, snapshots.
