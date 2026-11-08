@@ -124,6 +124,9 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   cpu x64 parent peak 2,837 (b4c9583) -> 2,304 MB; datapath x16 2,432 -> 2,164 MB. Datapath x24 repair spike gone
   after the traceback fix (peak 2,576 MB vs ~4.2 GB). Next: pack router.paths/laid.paths, free grids before save/fork.
 
+- 2026-11-08 6f6c271 merged synth-flow: synth.sh writes netlist.json.gz + yosys.log.gz directly (cache copies them),
+  build reads the .gz; opt-in --hier-synth (flatten after abc). Next: streaming JSON load (worker).
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
