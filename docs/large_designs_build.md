@@ -84,6 +84,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   Feasibility of several-GB netlists on this machine: see the reply of 2026-11-08 (synth+load ~1-1.5 GB ceiling now;
   full build ceiling below cpu x512, ~90 MB netlist).
 
+- 2026-11-08 synthetic datapath x48 (worker3's route-state branch) reached >=13.8 GB footprint while declaring 5G;
+  job.py missed it (build in its own session, outside the job's process group). Killed by hand (swap 0.8 GB free).
+  Fixed ~/.cache/mcv-jobs/job.py to measure/kill descendants too (new clients only).
+
 ## TODO (ranked, memory/disk only)
 
 0. Routing-phase memory at x512 (14+ GB). x32 inventory (worker2): world-sized arrays only ~7 B/world cell (Region
