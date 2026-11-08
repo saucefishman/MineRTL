@@ -156,6 +156,11 @@ cdef extern from * nogil:
             return HeapEntry{top.f, top.neg_h, d.g, top.counter, d.g_wire, d.node, d.parent, d.group};
         }
     };
+    // Every pool of idle slot vectors, so their size can be read and given back (pool_bytes, trim_pools).
+    struct PoolInfo { size_t (*bytes)(); void (*trim)(size_t); };
+    static std::vector<PoolInfo>& pool_registry() { static std::vector<PoolInfo> r; return r; }
+    static size_t pools_bytes() { size_t n = 0; for (auto& r : pool_registry()) n += r.bytes(); return n; }
+    static void pools_trim(size_t keep) { for (auto& r : pool_registry()) r.trim(keep); }
     // Open-addressing (linear probing) hash map from 64-bit keys; values value-initialised.
     // Key and value share a slot (one cache line per probe); ~0 marks an empty slot, which no
     // node or cell key uses. Pointers it returns are invalidated by the next get() that inserts.
@@ -166,8 +171,15 @@ cdef extern from * nogil:
         size_t mask = 0, count = 0;
         // A search makes several of these: storage goes round a pool rather than through malloc, which
         // hands big blocks back to the system. One pool per thread.
+        static size_t pool_bytes() { size_t n = 0; for (auto& v : pool()) n += v.capacity() * sizeof(Slot); return n; }
+        static void pool_trim(size_t keep) {  // drop idle vectors until at most keep bytes are held
+            auto& p = pool();
+            while (!p.empty() && pool_bytes() > keep) p.pop_back();
+        }
         static std::vector<std::vector<Slot>>& pool() {
             static thread_local std::vector<std::vector<Slot>> p;
+            static bool registered = (pool_registry().push_back({&pool_bytes, &pool_trim}), true);
+            (void)registered;
             return p;
         }
         FlatMap() {
@@ -177,7 +189,7 @@ cdef extern from * nogil:
         }
         ~FlatMap() {
             std::vector<std::vector<Slot>>& p = pool();
-            if (p.size() < 32 && slots.capacity() <= (1u << 20)) p.emplace_back(std::move(slots));
+            if (p.size() < 8 && slots.capacity() <= (1u << 20)) p.emplace_back(std::move(slots));
         }
         void reset(size_t cap) {
             slots.assign(cap, Slot{EMPTY, V()});
@@ -216,7 +228,7 @@ cdef extern from * nogil:
             reset(old.size() * 2);
             int ins;
             for (const Slot& s : old) if (s.key != EMPTY) *get(s.key, &ins) = s.val;
-            if (p.size() < 32 && old.capacity() <= (1u << 20)) p.emplace_back(std::move(old));
+            if (p.size() < 8 && old.capacity() <= (1u << 20)) p.emplace_back(std::move(old));
         }
     };
     typedef int bint_;
@@ -233,8 +245,15 @@ cdef extern from * nogil:
         size_t mask = 0, count = 0;
         unsigned long long depth_mask = 0;
         bool side_g = false;
+        static size_t pool_bytes() { size_t n = 0; for (auto& v : pool()) n += v.capacity() * sizeof(NodeSlot); return n; }
+        static void pool_trim(size_t keep) {
+            auto& p = pool();
+            while (!p.empty() && pool_bytes() > keep) p.pop_back();
+        }
         static std::vector<std::vector<NodeSlot>>& pool() {
             static thread_local std::vector<std::vector<NodeSlot>> p;
+            static bool registered = (pool_registry().push_back({&pool_bytes, &pool_trim}), true);
+            (void)registered;
             return p;
         }
         NodeTable() {
@@ -244,7 +263,7 @@ cdef extern from * nogil:
         }
         ~NodeTable() {
             std::vector<std::vector<NodeSlot>>& p = pool();
-            if (p.size() < 32 && slots.capacity() <= (1u << 20)) p.emplace_back(std::move(slots));
+            if (p.size() < 8 && slots.capacity() <= (1u << 20)) p.emplace_back(std::move(slots));
         }
         void reset(size_t cap, unsigned long long depths, bool side) {
             slots.assign(cap, NodeSlot{EMPTY, 0, 0});
@@ -327,7 +346,7 @@ cdef extern from * nogil:
                 while (slots[i].key != EMPTY) i = (i + 1) & mask;
                 slots[i] = s;
             }
-            if (p.size() < 32 && old.capacity() <= (1u << 20)) p.emplace_back(std::move(old));
+            if (p.size() < 8 && old.capacity() <= (1u << 20)) p.emplace_back(std::move(old));
         }
     };
     """
@@ -346,6 +365,9 @@ cdef extern from * nogil:
         void push(const HeapEntry& e)
         HeapEntry pop()
         bint empty()
+    size_t pools_bytes() nogil
+    void pools_trim(size_t keep) nogil
+
     cdef cppclass FlatMap[V]:
         void prefetch(unsigned long long k)
         V* find(unsigned long long k)
@@ -712,19 +734,31 @@ cdef class CellGrid:
         self.solid, self.dust_owner, self.inverted, self.fp, self.terminal = solid, dust_owner, inverted, fp, terminal
         cdef size_t cells = <size_t>(self.sx * self.nx)
         flat = np.asarray(<uint16_t[:cells]>self.g)
-        xs, ys, zs = np.nonzero(kinds)
-        flat[(xs + GRID_MARGIN) * self.sx + (ys + GRID_MARGIN) * self.sy + (zs + GRID_MARGIN)] = (
-            ((kinds[xs, ys, zs] & 15).astype(np.uint16) << 1)  # kind bits are F_NONAIR.. >> 1
-            | ((kinds[xs, ys, zs] & 16).astype(np.uint16) << 8))  # and G_GLASS >> 8
+        grid3 = flat.reshape(self.nx, self.ny, self.nz)
+        mask = getattr(fp, "mask", None)
+        # A slab of x planes at a time: the whole volume's kinds, nonzero coordinates and uint16 temporaries would each be
+        # several times the grid at once. Only cells with blocks are written unless a mask forces every word.
+        step = max(1, (1 << 22) // (self.ny * self.nz))
+        for x0 in range(0, width, step):
+            x1 = min(x0 + step, width)
+            slab = kinds(x0, x1) if callable(kinds) else kinds[x0:x1]
+            xs, ys, zs = np.nonzero(slab)
+            if len(xs):
+                k = slab[xs, ys, zs]
+                flat[(xs + (x0 + GRID_MARGIN)) * self.sx + (ys + GRID_MARGIN) * self.sy + (zs + GRID_MARGIN)] = (
+                    ((k & 15).astype(np.uint16) << 1)  # kind bits are F_NONAIR.. >> 1
+                    | ((k & 16).astype(np.uint16) << 8))  # and G_GLASS >> 8
+            del slab, xs, ys, zs
         for cells_set, bit in ((solid, F_SOLID), (inverted, F_INV), (terminal, F_TERM)):
             self.put_all(cells_set, bit)
-        mask = getattr(fp, "mask", None)
         if mask is not None:  # a CellMask: every cell's F_FP at once, none left to ask the set for
-            grid3 = flat.reshape(self.nx, self.ny, self.nz)
-            grid3 |= G_FP_READ
             mx, my, mz = mask.shape
-            inner = grid3[GRID_MARGIN:GRID_MARGIN + mx, GRID_MARGIN:GRID_MARGIN + my, GRID_MARGIN:GRID_MARGIN + mz]
-            inner |= (mask[:inner.shape[0], :inner.shape[1], :inner.shape[2]].astype(np.uint16) * F_FP)
+            for x0 in range(0, self.nx, step):
+                grid3[x0:x0 + step] |= G_FP_READ
+            for x0 in range(0, min(mx, self.nx - GRID_MARGIN), step):
+                x1 = min(x0 + step, mx, self.nx - GRID_MARGIN)
+                inner = grid3[GRID_MARGIN + x0:GRID_MARGIN + x1, GRID_MARGIN:GRID_MARGIN + my, GRID_MARGIN:GRID_MARGIN + mz]
+                inner |= (mask[x0:x1, :inner.shape[1], :inner.shape[2]].astype(np.uint16) * F_FP)
             self.put_all(fp.extra, F_FP)
         for pos, value in dust_owner.items():
             self.put_owner(pos, value)
@@ -1899,7 +1933,7 @@ cdef class _Cells:
         self.moves.clear()
         self.m4_sides.clear()
         self.m4_cells.clear()
-        if self.moves.capacity() > (1u << 22):  # a huge search: not kept for the next ones
+        if self.moves.capacity() > (1u << 20):  # a huge search: not kept for the next ones
             vector[Move]().swap(self.moves)
 
     cdef int flush_cells(self, dict pos_ids, list pos_list, list h_list, list move_cache) except -1:
@@ -2119,6 +2153,26 @@ cdef struct Expanded:  # a state already expanded at a cell, for subset dominanc
     int sig     # signal depth | candidate << 4 | tower << 7
     double g
     int next    # the cell's previous entry, or -1
+
+
+def pool_bytes() -> int:
+    """Bytes of idle hash-table storage the search keeps for the next ones."""
+    return pools_bytes()
+
+
+def cells_pool_bytes() -> int:
+    """Bytes the idle per-search cell vectors hold."""
+    cdef _Cells c
+    cdef size_t n = 0
+    for c in _CELLS_POOL:
+        n += (c.x.capacity() * 3 * sizeof(int) + c.h.capacity() * sizeof(long long) + c.cm.capacity() * sizeof(CellMoves)
+              + c.moves.capacity() * sizeof(Move) + c.m4_sides.capacity() * sizeof(M4Side) + c.m4_cells.capacity() * sizeof(int))
+    return n
+
+
+def trim_pools(size_t keep=0) -> None:
+    """Give back idle search storage beyond `keep` bytes per pool."""
+    pools_trim(keep)
 
 
 def set_foot_repeaters(bint on) -> None:

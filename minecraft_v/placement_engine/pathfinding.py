@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import functools
 import numpy as np
 from litemapy import BlockState, Region
 
@@ -178,14 +179,18 @@ class _BlockIndex:
         return idx
 
     @staticmethod
-    def kinds(region: Region) -> np.ndarray:
-        """Per cell of region: 1 not air | 2 wire | 4 torch | 8 repeater | 16 GLASS (the grid's alone)."""
-        kinds = np.array([
+    def kinds_table(region: Region) -> np.ndarray:
+        """Per palette entry: the kind bits (see kinds)."""
+        return np.array([
             (0 if _is_air(b) else 1) | (2 if _is_redstone_wire(b) else 0)
             | (4 if _is_torch(b) else 0) | (8 if _is_repeater(b) else 0) | (16 if b == GLASS else 0)
             for b in region._Region__palette
         ], dtype=np.uint8)
-        return lookup(region._Region__blocks, kinds)
+
+    @staticmethod
+    def kinds(region: Region, lo: int = 0, hi: int | None = None) -> np.ndarray:
+        """Per cell of region (of the x slab lo:hi): 1 not air | 2 wire | 4 torch | 8 repeater | 16 GLASS (the grid's alone)."""
+        return lookup(region._Region__blocks[lo:hi], _BlockIndex.kinds_table(region))
 
     @classmethod
     def layered(cls, base: _BlockIndex, overlay: dict[tuple[int, int, int], BlockState]) -> _BlockIndex:
@@ -277,7 +282,7 @@ class IndexedWorkspace:
         region = self.region
         if self._built is None:  # the grid replaces the sets with views of itself: millions of cells not to collect
             self._built = _BlockIndex.empty()
-        _astar.CellGrid(region.width, region.height, region.length, _BlockIndex.kinds(region), self._built, solid, dust_owner,
+        _astar.CellGrid(region.width, region.height, region.length, functools.partial(_BlockIndex.kinds, region), self._built, solid, dust_owner,
                         inverted_cells, footprint_blocked, terminal_positions)
 
 
