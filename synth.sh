@@ -196,6 +196,9 @@ strip_debug='delete t:$check'
 if [[ "$debug_prints" == false ]]; then
     strip_debug='delete t:$print t:$check'
 fi
+# Source locations are most of a big design's attributes and memory in yosys (a fifth of its peak at 600K gates), and only
+# $print cells' are read, for the prints' names.
+strip_src='setattr -unset src t:$print %n'
 map_tiled_ram=""
 if [[ "$tiled_ram" == true ]]; then
     # Index and width rewrites first: they remove most barrel shifters from register arrays.
@@ -228,6 +231,7 @@ read_verilog -lib \"${here}/techmap/ram_cells.v\"
 hierarchy -check -top ${top}
 flatten -noscopeinfo
 proc
+${strip_src}
 ${strip_debug}
 ${map_tiled_ram}
 memory_map
