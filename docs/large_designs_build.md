@@ -4,9 +4,11 @@ Branch `claude/verilog-synthesis-memory-disk-b9eff2`. Machine: 16 GB RAM, ~30 GB
 
 ## Findings summary
 
-Goal (user, 2026-11-07):
-- cpu x512 (~150K cells): full synth + build under 12 GB peak, within 60 min, 0 routing failures, on 3 seeds.
+Goal (user, 2026-11-07; time dropped 2026-11-08):
+- cpu x512 (~150K cells): full synth + build under 12 GB peak, 0 routing failures, on 3 seeds. No time limit, but no
+  significant time regression.
 - A 1 GB netlist through synth + load under 12 GB.
+- Memory and disk only. Time work only as a side effect.
 
 Done so far (all on this branch, unmerged):
 - 3e5d482: lean netlist load (20x -> 8.5x netlist bytes), gzipped capped synth cache, fifo yosys -> unplace, tail-only
@@ -28,7 +30,9 @@ cell; router A* ~1 GB at x32; `_compact` O(n^2) time.
 
 ## User's rules
 
-- Done = cpu x512 under 12 GB, 60 min, 0 routing failures, 3 seeds; plus 1 GB netlist synth + load under 12 GB.
+- Done = cpu x512 under 12 GB, 0 routing failures, 3 seeds; plus 1 GB netlist synth + load under 12 GB.
+- "do not focus on time, that is a separate matter. if time improvement is a side effect of memory improvements, ok,
+  but otherwise do not consider time (as long there is no significant regression in time)" (2026-11-08)
 - May change: placement (if routing failures and wire length don't worsen), defaults, add dependencies, synth flow.
 - Git: commit to this branch only; no merge to main, no push until asked.
 - "why do you need to evaluate like this? can't you map out O of the various steps" (2026-11-07): derive complexity
@@ -63,24 +67,20 @@ Variables: n components, m nets, p pins, k fanout, V world volume (~825 blocks p
 
 Predicted break order at x512 flat: routing-state memory > verify fork copy > `_compact` time > V arrays > clock k^2.
 
-## TODO (ranked)
+## TODO (ranked, memory/disk only)
 
-1. Clock tree for the 6-12K-sink clock net (wire phase >=65 min at x512). (clock-tree agent, running)
-2. `_compact` sub-quadratic. (worker2, running)
-2b. Macros don't form at x256 (27% coverage). (worker3, running)
-2c. hold + ext + verify time exponent ~2: find the quadratic step (complexity map: hold margins O(B*(n+p)),
-    HiddenBoxes O(Q*R), _wall_vias). Next for worker.
-3. Routing-state memory: wire cells as Python tuples in several structures; move to compact arrays keyed by cell id.
-   Needs memray of the route phase first. (child session once the profile is in)
-4. Verify fork: owner dict / hidden set allocated in the child; share or build compactly.
-5. Check find_repeated at x512: finishes in 30 s? coverage >=50%? (decides flat vs macro)
-6. Correctness: repeat finder labels by type, so different-content ROMs may share a tile (subgraphs.py:61); check
-   macro_netlist keeps per-instance ROMs, e.g. simulate two cores with different programs.
-7. Clock-net k^2 terms (refine/mirror Nets::of, _TreeCells.nearest).
-8. V-dense arrays: fewer persistent full-volume grids.
-9. Python IR models slotted (~3-5 KB per component).
-10. yosys: per-module synthesis / ABC before flatten for the 1 GB netlist target.
-11. Disk per build: component_list.json, resume pickles, snapshots.
+1. yosys memory (~12.7x netlist; 16 GB at ~1.2 GB): measure hierarchical flow (per-module abc, flatten last, or keep
+   hierarchy in the JSON and expand in the loader). (worker, running)
+2. Correctness: repeat finder merges cores with different ROMs into one macro (labels ignore block contents). Fix by
+   excluding CUSTOM cells from the finder; + coverage accounting. (worker3, running)
+3. Python load ~8.5x netlist: slot IR models (Component/Net ~3-5 KB each); or load hierarchical JSON.
+4. Routing-state memory: wire cells as Python tuples in ~6 structures; verify fork's own owner dict / hidden set.
+5. V-dense arrays (~7 B persistent per world cell + transients).
+6. Disk per build: component_list.json (1.4x netlist), component_layout.json, resume pickles, snapshots.
+7. Macros at scale (hierarchical abc gives 82-88% coverage) shrink flat state; finder needs >30 s at x128+.
+
+Stopped (time only, user 2026-11-08): clock tree (branch claude/clock-tree), `_compact` sub-quadratic
+(claude/compact-subquadratic), hold/verify time exponent.
 
 ## Waiting on user
 
