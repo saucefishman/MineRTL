@@ -132,6 +132,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   streaming netlist load (cpu x512 parse peak 452 -> 277 MB). a64133a verify child: macro gate boxes packed (x24 child
   574 -> 506 MB). Verify child ~80% private; starts at 184 MB from refcount CoW. Next: arrays pre-built before fork.
 
+- 2026-11-08 1 GB synth rerun (synthetic N=5600, current synth.sh, yosys+abc summed): combined peak 8.9 GB (yosys 6.3 +
+  abc 2.6 at that moment; yosys alone max 8.6), gates unchanged, yosys 2,119 s (was 4,453), disk peak 128 MB (was 1.14
+  GB). abc is ~2.5 GB at this size. Load runs (old vs streaming loader) and cpu N=5900 queued.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
