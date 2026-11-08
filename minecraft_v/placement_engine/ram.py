@@ -666,7 +666,7 @@ def build_group(name: str, specs: list[StackSpec], banks_out: list | None = None
 
 _built: dict[str, Macro] = {}
 _cache_dir: Path | None = None
-_CODE = ("ram.py", "ram_timing.py", "tick_sim.py", "macro.py", "propagate.py", "cosmetics.py", "verify.py", "block_utils.py")
+_CODE = ("ir.py", "ram.py", "ram_timing.py", "tick_sim.py", "macro.py", "propagate.py", "cosmetics.py", "verify.py", "block_utils.py")
 
 
 def set_block_cache(directory: Path | None) -> None:

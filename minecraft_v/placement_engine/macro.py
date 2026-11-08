@@ -295,7 +295,7 @@ def load_macro(name: str, directory: Path) -> Macro | None:
     region = next(iter(Schematic.load(str(schem_path)).regions.values()))
     blocks = [(p, region[p]) for p in region.block_positions() if not _is_air(region[p])]
     return Macro(
-        name=name, footprint=Footprint(**meta["footprint"]), pins=[PinRef(**p) for p in meta["pins"]],
+        name=name, footprint=Footprint(**meta["footprint"]), pins=[PinRef.model_validate(p) for p in meta["pins"]],
         blocks=blocks, arcs=meta["arcs"], q_out=meta["q_out"], setup=meta["setup"],
         terminals={k: tuple(v) for k, v in meta["terminals"].items()},
         drivers={k: tuple(v) for k, v in meta["drivers"].items()},
