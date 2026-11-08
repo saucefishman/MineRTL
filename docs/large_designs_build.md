@@ -69,8 +69,10 @@ Predicted break order at x512 flat: routing-state memory > verify fork copy > `_
 
 ## TODO (ranked, memory/disk only)
 
-1. yosys memory (~12.7x netlist; 16 GB at ~1.2 GB): measure hierarchical flow (per-module abc, flatten last, or keep
-   hierarchy in the JSON and expand in the loader). (worker, running)
+1. yosys memory. Measured 2026-11-08 (cpu/synthetic x512-x2048): current flow marginal 6.3-9.6 B RSS per netlist byte
+   (earlier 12.7x overstated); hierarchical (per-module abc, flatten last) 0.5-0.7x of that, but +9-20% gates on the
+   synthetic design (no cross-copy merging), -2% on cpu; hierarchical JSON (no final flatten) saves disk only with
+   shared modules. Next: direct 1 GB netlist synth + load acceptance test on the current flow. (worker, queued)
 2. DONE af66228: repeat finder kept blocks out of instances (different-ROM cores could share a tile); coverage counts
    gates only. Parked: forced small macros (x4/x8, --macro-min-instances 2) fail routing/verify (separate issue).
 2b. Disk per build audit + cuts. (worker3, running)
