@@ -556,12 +556,21 @@ def _find_wire_path(
         group_best_h[:] = initial_group_best_h
         reached, best_node, h_radius_pruned, early_stop_reason, came_from = _run_search(
             search_args, net_id, next_world, stagnation=stagnation, budget=budget)
-    if reached is None and early_stop_reason is None and h_radius_pruned:
-        # The open list ran dry only because the h-radius cull discarded detours (typically a
-        # blocked approach close to the goal): search again without the cull.
-        group_best_h[:] = initial_group_best_h
-        reached, best_node, _, early_stop_reason, came_from = _run_search(
-            search_args, net_id, next_world, h_radius_factor=0, stagnation=stagnation, budget=budget)
+    if reached is None and h_radius_pruned and not timed_out and (early_stop_reason is None or stagnation < 0):
+        # The h-radius cull discarded detours (typically a blocked approach close to the goal, or a goal behind a wall:
+        # the search floods the near face, its best h shrinks, and the way over or round is culled): search again
+        # without the cull. A search that stopped early (stagnation, caps) counts too, unless it was a tight first try,
+        # which fails fast on purpose so the blockers around the sink can be ripped.
+        ran_dry = early_stop_reason is None
+        # Capped per cell first, as the searches above: without the cull an uncapped one floods the wall's near face
+        # and hits its expansion cap. A list that ran dry is also tried uncapped, as it always was.
+        for cell_cap in ((_ROUTE_CELL_STATES, 0) if _ROUTE_CELL_STATES and stagnation < 0 else (0,)):
+            group_best_h[:] = initial_group_best_h
+            reached, best_node, _, early_stop_reason, came_from = _run_search(
+                search_args, net_id, next_world, h_radius_factor=0, stagnation=stagnation, budget=budget,
+                cell_cap=cell_cap)
+            if reached is not None or not ran_dry or (early_stop_reason or "").startswith("timeout"):
+                break
 
     if reached is None:
         lamp = BlockState("minecraft:redstone_lamp")

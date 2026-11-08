@@ -660,3 +660,17 @@ def test_long_edge_split_only_on_large_designs(monkeypatch):
     assert builder._long_edge_split[0] == 0
     builder.set_long_edge_split(12448)
     assert builder._long_edge_split[0] == 100
+
+
+def test_goal_behind_a_wall_found_after_the_h_radius_cull_floods_the_near_face():
+    # A pin behind a macro as wide as the world, 14 up. The search floods the near face, its best h shrinks to the wall
+    # distance, and the h-radius cull then discards the climb over it. The cull is dropped for a second search.
+    bounds = (0, 0, 0, 56, 40, 70)
+    region = Region(0, 0, 0, 57, 41, 71)
+    rec = Recorder()
+    solid, dust_owner = JournaledSet(rec, name="solid"), JournaledDict(rec)
+    wall = frozenset((x, y, z) for x in range(57) for y in range(14) for z in range(20, 48))
+    path = pathfinding._find_wire_path(region, solid, dust_owner, (28, 1, 10), (28, 1, 54), "n", bounds, bounds[4],
+                                       protected=wall)
+    assert path[0] == (28, 1, 10) and path[-1] == (28, 1, 54)
+    assert max(y for _, y, _ in path) >= 14
