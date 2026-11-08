@@ -45,6 +45,7 @@ _MU_MIN, _MU_MAX = 0.75, 1.1  # per-iteration lambda growth (ePlace)
 _MU_REF = 0.002              # wirelength rise, as a share of total, that costs one step of growth
 _MAX_STEP_BINS = 1.0         # largest move in one iteration, in bins
 _LEGAL_AXIS_COST = np.array([1.0, 1.5, 1.0])  # legalizer: separating along Y costs more than X or Z
+_LEGAL_BLOCK_PAIRS = 1 << 20  # box pairs the legalizer measures at once
 _REFINE_PASSES = 2  # a fixed amount of work, so a build is the same every run (on floweypu: 4s each, a third gains 0.1%)
 _REFINE_POPS = 60
 _FFT_WORKERS = 4             # threads for the Poisson solve's transforms; the result depends on it, so placements do
@@ -613,13 +614,18 @@ def _legalize(pos: np.ndarray, sizes: np.ndarray, flat: bool) -> np.ndarray:
     Sorting by centre keeps each axis's constraints acyclic, and every pair ends up apart on its axis.
     """
     centre = pos + sizes / 2
-    # Movement needed to separate each pair along each axis; negative means already apart.
-    need = np.stack([(sizes[:, a, None] + sizes[None, :, a]) / 2 - np.abs(centre[:, a, None] - centre[None, :, a])
-                     for a in range(3)], axis=2)
-    need = need * _LEGAL_AXIS_COST
-    if flat:
-        need[:, :, 1] = np.inf
-    choice = need.argmin(axis=2)
+    n = len(pos)
+    # The axis each pair is separated along, from the movement needed along each (negative: already apart). All pairs'
+    # three movements at once are n*n*3 floats, gigabytes for thousands of boxes: a block of rows at a time.
+    choice = np.empty((n, n), dtype=np.int8)
+    rows = max(1, _LEGAL_BLOCK_PAIRS // max(n, 1))
+    for lo in range(0, n, rows):
+        need = np.stack([(sizes[lo:lo + rows, a, None] + sizes[None, :, a]) / 2
+                         - np.abs(centre[lo:lo + rows, a, None] - centre[None, :, a]) for a in range(3)], axis=2)
+        need = need * _LEGAL_AXIS_COST
+        if flat:
+            need[:, :, 1] = np.inf
+        choice[lo:lo + rows] = need.argmin(axis=2)
     out = np.zeros_like(pos)
     for a in range(3):
         if a == 1 and flat:

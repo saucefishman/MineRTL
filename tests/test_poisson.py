@@ -221,6 +221,17 @@ def test_legalize_separates_stacked_boxes():
             assert any(out[i, a] + sizes[i, a] <= out[j, a] or out[j, a] + sizes[j, a] <= out[i, a] for a in range(3))
 
 
+def test_legalize_by_blocks_of_rows_equals_all_pairs_at_once(monkeypatch):
+    rng = np.random.default_rng(3)
+    pos = rng.integers(0, 60, (150, 3)).astype(float)
+    sizes = rng.integers(2, 14, (150, 3)).astype(float)
+    for flat in (False, True):
+        monkeypatch.setattr(poisson, "_LEGAL_BLOCK_PAIRS", 1 << 30)
+        whole = poisson._legalize(pos, sizes, flat)
+        monkeypatch.setattr(poisson, "_LEGAL_BLOCK_PAIRS", 400)  # 2 rows at a time
+        assert (poisson._legalize(pos, sizes, flat) == whole).all()
+
+
 def _bank(height: int, **metadata) -> Component:
     return Component(id=f"bank{height}", type=ComponentType.CUSTOM, pins=[], footprint=Footprint(width=300, height=height, depth=100),
                      metadata={"bank": True, **metadata})
