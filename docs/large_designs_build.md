@@ -70,8 +70,15 @@ Predicted break order at x512 flat: routing-state memory > verify fork copy > `_
 **Correction 2026-11-08:** RSS undercounts here (memory compressor). cpu x512 mid-routing: RSS 1.3 GB, physical
 footprint 11.6 GB, peak 12.4 GB (`vmmap --summary`). All earlier "peak RSS" numbers are lower bounds under memory
 pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprint.
+- 2026-11-08 cpu x512 acceptance (base 9a92dcc): KILLED by job.py at 14.0 GB footprint in routing, 4349 s. No macros
+  (13% coverage), 150,896 components, world 694x784x704 (383M, density 0.47). Place 1744 s (old _compact). At 12.3 GB:
+  MALLOC_LARGE 5.8 + VM_ALLOCATE 4.4 + LARGE_REUSABLE 0.8 + small/medium 0.9 GB -> big buffers (~27 B/world cell)
+  dominate, not small Python objects. Artifacts 290 MB (pre-gzip). Goal not met.
 
 ## TODO (ranked, memory/disk only)
+
+0. Routing-phase memory at x512 (14+ GB). worker2: inventory of world-sized arrays (owner, dtype, B/world cell);
+   worker3: memray of the route phase + fork. Then shrink the top buffers.
 
 1. yosys memory. Measured 2026-11-08 (cpu/synthetic x512-x2048): current flow marginal 6.3-9.6 B RSS per netlist byte
    (earlier 12.7x overstated); hierarchical (per-module abc, flatten last) 0.5-0.7x of that, but +9-20% gates on the
