@@ -104,8 +104,15 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   search's tables/cell lists for the rest of the build. Datapath gen.py 16: peak 5.09 -> 2.43 GB, identical results.
   Likely a big part of x512's 14 GB (hundreds of failed searches). x512 acceptance rerun on 5a1f266 (worker2).
 
+- 2026-11-08 cpu x512 acceptance rerun on 5a1f266: COMPLETED, 7,773 s. Wire 5,081 s, 166,254 nets, 15 failed -> 10
+  after repair (incl. net_2 clock: repeater extension), verify 0 violations, critical path 234 ticks. Parent footprint:
+  place 0.54 GB, wire 9.98 GB, repair 10.24 GB (+2 forks 1.2 GB), timing/hold/verify 11.3 GB (+5.2 GB verify fork +
+  1.1-1.5 GB forks), save 12.3 GB. Litematic 46 MB, world 694x784x769, artifacts 118 MB. Was killed at 14 GB before.
+  Goal not yet met: parent 12.3 GB at save, verify fork private memory on top, 10 routing failures.
+
 ## TODO (ranked, memory/disk only)
 
+0b. Save step streaming (parent +1 GB at x512 save). (worker2)
 0a. Post-routing phases (repair/hold/timing/verify) memory: datapath x48 grew 10.6 -> 18 GB after routing. (worker3,
     claude/post-route-mem)
 0. Routing-phase memory at x512 (14+ GB). x32 inventory (worker2): world-sized arrays only ~7 B/world cell (Region
