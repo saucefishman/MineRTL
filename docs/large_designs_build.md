@@ -71,8 +71,10 @@ Predicted break order at x512 flat: routing-state memory > verify fork copy > `_
 
 1. yosys memory (~12.7x netlist; 16 GB at ~1.2 GB): measure hierarchical flow (per-module abc, flatten last, or keep
    hierarchy in the JSON and expand in the loader). (worker, running)
-2. Correctness: repeat finder merges cores with different ROMs into one macro (labels ignore block contents). Fix by
-   excluding CUSTOM cells from the finder; + coverage accounting. (worker3, running)
+2. DONE af66228: repeat finder kept blocks out of instances (different-ROM cores could share a tile); coverage counts
+   gates only. Parked: forced small macros (x4/x8, --macro-min-instances 2) fail routing/verify (separate issue).
+2b. Disk per build audit + cuts. (worker3, running)
+2c. cpu x512 acceptance build, base branch. (worker2, running)
 3. Python load ~8.5x netlist: slot IR models (Component/Net ~3-5 KB each); or load hierarchical JSON.
 4. Routing-state memory: wire cells as Python tuples in ~6 structures; verify fork's own owner dict / hidden set.
 5. V-dense arrays (~7 B persistent per world cell + transients).
