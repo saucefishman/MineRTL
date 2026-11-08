@@ -81,6 +81,9 @@ Predicted break order at x512 flat: routing-state memory > verify fork copy > `_
 
 Stopped (time only, user 2026-11-08): clock tree (branch claude/clock-tree), `_compact` sub-quadratic
 (claude/compact-subquadratic), hold/verify time exponent.
+Clock findings (claude/clock-tree 1e0dee3, for the separate time project): first clock route is fast (131 s at x256);
+the blowup is a ripped clock branch sent to the queue's end, then re-routed in a full world; skew 6-220 ticks at x128
+(hold added 2,462 repeaters). Proposed: unrippable balanced trunk + per-group stub jobs; re-queue ripped fanout nets next.
 
 ## Waiting on user
 
