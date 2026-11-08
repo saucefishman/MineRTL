@@ -92,8 +92,14 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   route-state) also passed 16.6 GB and was killed by hand: the synthetic datapath outgrows 12 GB far earlier than
   cpu xN (x48 is ~150-200K cells? to confirm), so it is the harder test design.
 
+- 2026-11-08 3adaaed merged route-keys: solid/dust_owner bits and owners live in the CellGrid, writer map is a packed
+  PosMap. cpu x64 parent peak 6426 (original) -> 5375 MB; x64 routing end 4203 -> 3719. Datapath x48: routing done at
+  10.6 GB (~7 KB per path cell, mostly A*/grid, not Python), then repair/hold/timing climbed past 16.6-18 GB unfinished.
+
 ## TODO (ranked, memory/disk only)
 
+0a. Post-routing phases (repair/hold/timing/verify) memory: datapath x48 grew 10.6 -> 18 GB after routing. (worker3,
+    claude/post-route-mem)
 0. Routing-phase memory at x512 (14+ GB). x32 inventory (worker2): world-sized arrays only ~7 B/world cell (Region
    uint32 4 B, CellGrid uint16 2 B, CellMask 1 B; ~2.7 GB at x512) + CellGrid.__init__ transients (np.nonzero int64
    x3 per non-air cell, astype copies; 2-3 GB spike at x512). Routing growth ~2.7 KB per laid path cell: ~1 KB Python
