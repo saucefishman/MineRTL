@@ -37,6 +37,9 @@ cell; router A* ~1 GB at x32; `_compact` O(n^2) time.
 - Git: commit to this branch only; no merge to main, no push until asked.
 - "why do you need to evaluate like this? can't you map out O of the various steps" (2026-11-07): derive complexity
   from the code first; measure only to fit constants and check the map.
+- "note that the cpu design with the multi gb netlist will be radically different from the extremely basic cpu example
+  in the repo; avoid overly specific optimizations (everything so far seems fine)" (2026-11-08): keep changes
+  general; measure on a second, structurally different design (synthetic datapath, video) besides cpu xN.
 - Standing (memory): all builds via `~/.cache/mcv-jobs/job.py`; one seed while iterating; Opus plans, Sonnet codes
   (kept-alive workers); never idle when SPARE.
 
