@@ -127,6 +127,11 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
 - 2026-11-08 6f6c271 merged synth-flow: synth.sh writes netlist.json.gz + yosys.log.gz directly (cache copies them),
   build reads the .gz; opt-in --hier-synth (flatten after abc). Next: streaming JSON load (worker).
 
+- 2026-11-08 f68c855 (route-fail 05cfc18): failed non-tight A* search retries with the h-radius cull off (capped per
+  cell); fixes the wall-behind-macro pin class on a 14-wall repro; datapath x16 first-pass failures 5 -> 3. c303826
+  streaming netlist load (cpu x512 parse peak 452 -> 277 MB). a64133a verify child: macro gate boxes packed (x24 child
+  574 -> 506 MB). Verify child ~80% private; starts at 184 MB from refcount CoW. Next: arrays pre-built before fork.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
