@@ -2228,41 +2228,33 @@ def _hold_with_detours(workspace: Region, flat: ComponentList, ends: dict, faile
     return period
 
 
-def _report_signal_violations(
-        workspace: Region,
+def _plain_signal_inputs(
         nets: list[NetConnection],
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         dust_owner: dict[tuple[int, int, int], str],
-        component_cells: frozenset[tuple[int, int, int]],
+        component_cells: Collection[tuple[int, int, int]],
         failed: set[str],
-) -> list:
-    """Print verify_signals opens/shorts for the routed nets (routing can 'succeed' yet be broken)."""
+) -> dict:
+    """What the check of a layout without macros reads: every routed net's pins, and who owns what. Made apart from the check, so
+    that a forked check starts from a few contiguous objects it reads, not from the whole layout it would copy by touching."""
     spec = {
         net.net_id: (_pin_for_endpoint(pin_terminal, net.source.component_id, net.source.pin_name),
                      [_pin_for_endpoint(pin_terminal, s.component_id, s.pin_name) for s in net.sinks])
         for net in nets if net.net_id not in failed
     }
-    with ProgressBar("[verify] signals", len(spec)) as bar:
-        violations = verify_signals(workspace, spec, dust_owner, component_cells,
-                                    on_net=lambda net_id: bar.update(info=net_id))
-    for violation in violations:
-        log(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
-    if violations:
-        log(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
-    return violations
+    return {"flat": False, "spec": spec, "owner": dust_owner, "blocked": component_cells, "macros": 0}
 
 
-def _report_flat_violations(
-        workspace: Region,
+def _flat_signal_inputs(
         placed: list[_Placed],
         nets: list[NetConnection],
         pin_terminal: dict[tuple[str, str], tuple[int, int, int]],
         dust_owner: dict[tuple[int, int, int], str],
         macros: dict[str, Macro],
         failed: set[str],
-) -> list:
-    """verify_signals on the stamped layout as if flat: every net of the original netlist, from gate pin to gate
-    pin, through the entry and exit repeaters and the wires inside macros. Only gate interiors are hidden."""
+) -> dict:
+    """What the check of a layout with macros reads: the stamped layout as if flat, every net of the original netlist from gate
+    pin to gate pin, through the entry and exit repeaters and the wires inside macros. Only gate interiors are hidden."""
     stamps = {p.component.id: (macros[p.component.metadata["macro"]], p.origin, bool(p.component.metadata.get("mirror_x")),
                                   bool(p.component.metadata.get("rotate_180")))
               for p in placed if p.component.type == ComponentType.CUSTOM}
@@ -2299,6 +2291,10 @@ def _report_flat_violations(
             else:
                 ends.append(_pin_for_endpoint(pin_terminal, ep.component_id, ep.pin_name))
         spec[net.net_id] = (source, ends)
+    owned: dict[int, tuple[np.ndarray, list[str], np.ndarray]] = {}  # per macro: its owner cells, inner nets, which each is on
+    names: list[str] = []
+    cell_blocks: list[np.ndarray] = []
+    name_blocks: list[np.ndarray] = []
     for cid, (macro, origin, mirrored, rotated) in stamps.items():
         ports = set(macro.port_net.values())
         for inner, (source, sinks) in macro.nets.items():
@@ -2306,8 +2302,21 @@ def _report_flat_violations(
             if inner not in ports:
                 spec[name] = (macro.world(macro.terminals[source], origin, mirrored, rotated),
                               [macro.world(macro.terminals[s], origin, mirrored, rotated) for s in sinks])
-        for rel, inner in macro.owner.items():
-            owner[macro.world(rel, origin, mirrored, rotated)] = exposed[cid].get(inner, f"{cid}/{inner}")
+        if macro.owner:
+            if id(macro) not in owned:
+                inners = list(dict.fromkeys(macro.owner.values()))
+                at = {inner: k for k, inner in enumerate(inners)}
+                owned[id(macro)] = (np.array(list(macro.owner), dtype=np.int64).reshape(-1, 3), inners,
+                                    np.fromiter((at[i] for i in macro.owner.values()), dtype=np.int32, count=len(macro.owner)))
+            rel, inners, which = owned[id(macro)]
+            cells = rel.copy()
+            if mirrored != rotated:  # Macro.oriented
+                cells[:, 0] = macro.footprint.width - 1 - cells[:, 0]
+            if rotated:
+                cells[:, 2] = macro.footprint.depth - 1 - cells[:, 2]
+            cell_blocks.append(cells + np.array(origin, dtype=np.int64))
+            name_blocks.append(which + len(names))
+            names.extend(exposed[cid].get(inner, f"{cid}/{inner}") for inner in inners)
         if macro.settled is not None:
             continue  # all hidden, as one of the opaque boxes
         for (x, y, z), (sx, sy, sz) in macro.gate_boxes:
@@ -2317,12 +2326,25 @@ def _report_flat_violations(
                 near = macro.world((x, y, z), origin, mirrored, rotated)
                 low = tuple(min(a, b) for a, b in zip(near, far))
                 hidden_boxes.append((low, (sx, sy, sz)))
-    with ProgressBar("[verify] flat signals", len(spec)) as bar:
-        violations = verify_signals(workspace, spec, owner, HiddenBoxes(_interior_cellset(placed).union(CellSet.from_boxes(hidden_boxes)), opaque),
+    if cell_blocks:
+        owner.add_block(np.concatenate(cell_blocks), names, np.concatenate(name_blocks))
+    blocked = HiddenBoxes(_interior_cellset(placed).union(CellSet.from_boxes(hidden_boxes)), opaque)
+    return {"flat": True, "spec": spec, "owner": owner, "blocked": blocked, "macros": len(stamps)}
+
+
+def _report_signal_violations(workspace: Region, inputs: dict) -> list:
+    """Print verify_signals opens/shorts for the routed nets (routing can 'succeed' yet be broken); for the stamped
+    layout as if flat, with the macro count, when inputs came from _flat_signal_inputs."""
+    spec, flat = inputs["spec"], inputs["flat"]
+    with ProgressBar("[verify] flat signals" if flat else "[verify] signals", len(spec)) as bar:
+        violations = verify_signals(workspace, spec, inputs["owner"], inputs["blocked"],
                                     on_net=lambda net_id: bar.update(info=net_id))
     for violation in violations:
         log(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
-    log(f"[verify] {len(violations)} violation(s) in {len(spec)} flattened nets through {len(stamps)} macros")
+    if flat:
+        log(f"[verify] {len(violations)} violation(s) in {len(spec)} flattened nets through {inputs['macros']} macros")
+    elif violations:
+        log(f"[verify] {len(violations)} violation(s) in {len(spec)} routed nets")
     return violations
 
 
@@ -2732,11 +2754,13 @@ def build_litematic_from_component_list(
     kept_router.clear()
     gc.collect()
 
+    # What the check reads is made here, before the fork, as a few contiguous objects: a forked check that made it from the
+    # layout would touch (and so copy, a page at a time) a good part of the parent's heap.
+    signal_inputs = [_flat_signal_inputs(placed, work_nets, pin_terminal, dust_owner, macros, failed_nets) if macros
+                     else _plain_signal_inputs(work_nets, pin_terminal, dust_owner, _interior_cellset(placed), failed_nets)]
+
     def check_signals() -> list:
-        if macros:
-            return _report_flat_violations(workspace, placed, work_nets, pin_terminal, dust_owner, macros, failed_nets)
-        return _report_signal_violations(workspace, work_nets, pin_terminal, dust_owner,
-                                         _interior_cellset(placed), failed_nets)
+        return _report_signal_violations(workspace, signal_inputs[0])
 
     # Only a check of the wire as it is now: it runs in a forked process beside what follows, up to writing the build.
     signal_check = Forked(check_signals) if capture is None else None
@@ -2745,6 +2769,7 @@ def build_litematic_from_component_list(
         workspace, dust_owner, _LazyCells(lambda: _hidden_cells(placed)), opaque)) \
         if capture is None and not output_pin_targets else None
     signal_violations = check_signals() if signal_check is None else []
+    signal_inputs.clear()  # the fork has its copy; this one is not needed to the end of the build
 
     def checked_signals() -> list:
         """signal_violations with the forked check's in front, once it's done."""

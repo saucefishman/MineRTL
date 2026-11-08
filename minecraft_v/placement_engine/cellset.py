@@ -17,6 +17,12 @@ def pack(x: int, y: int, z: int) -> int:
     return (x + POS_BIAS) | (y + POS_BIAS) << POS_BITS | (z + POS_BIAS) << 2 * POS_BITS
 
 
+def pack_array(cells: np.ndarray) -> np.ndarray:
+    """pack for an n x 3 array of cells."""
+    c = np.asarray(cells, dtype=np.int64)
+    return (c[:, 0] + POS_BIAS) | (c[:, 1] + POS_BIAS) << POS_BITS | (c[:, 2] + POS_BIAS) << 2 * POS_BITS
+
+
 def unpack(key: int) -> tuple[int, int, int]:
     return (key & POS_MASK) - POS_BIAS, (key >> POS_BITS & POS_MASK) - POS_BIAS, (key >> 2 * POS_BITS) - POS_BIAS
 

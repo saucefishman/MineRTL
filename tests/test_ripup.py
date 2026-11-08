@@ -195,3 +195,27 @@ def test_cells_in_boxes_near_gives_the_same_cells_however_it_is_chunked(monkeypa
     whole = block_utils.cells_in_boxes_near(region, boxes, 2, offsets)
     monkeypatch.setattr(block_utils, "_NEAR_CHUNK", 7)
     assert np.array_equal(block_utils.cells_in_boxes_near(region, boxes, 2, offsets), whole) and len(whole)
+
+
+def test_owner_overlay_packs_blocks_and_reads_like_the_dict_it_stands_for():
+    import numpy as np
+    from minecraft_v.placement_engine.verify import OwnerOverlay
+
+    base = {(1, 1, 1): "a", (2, 2, 2): "b", (5, 5, 5): "z"}
+    owner = OwnerOverlay(base)
+    owner[(9, 9, 9)] = "x"
+    owner.add_block(np.array([[2, 2, 2], [3, 3, 3], [3, 3, 3], [4, 4, 4]]), ["n1", "n2"], np.array([0, 0, 1, 1]))
+    expected = {(1, 1, 1): "a", (2, 2, 2): "n1", (3, 3, 3): "n2", (4, 4, 4): "n2", (5, 5, 5): "z", (9, 9, 9): "x"}
+    assert dict(owner.items()) == expected and len(owner) == len(expected)
+    assert owner.get((3, 3, 3)) == "n2" and owner.get((7, 7, 7)) is None and (4, 4, 4) in owner and (8, 8, 8) not in owner
+    assert sorted(owner.values()) == sorted(expected.values()) and set(owner) == set(expected)
+
+
+def test_fork_batches_splits_in_runs_and_runs_few_items_here():
+    from minecraft_v.placement_engine.forks import fork_batches, fork_map
+
+    items = list(range(300))
+    runs = fork_batches(lambda run: (len(run), sum(run)), items, 3)
+    assert len(runs) == 3 and sum(n for n, _ in runs) == 300 and sum(s for _, s in runs) == sum(items)
+    assert fork_batches(lambda run: len(run), items[:5], 3) == [5]
+    assert fork_map(lambda x: x * x, items, 3) == [x * x for x in items]

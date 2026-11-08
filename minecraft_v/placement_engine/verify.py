@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import itertools
 import os
+from array import array
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
@@ -35,9 +37,9 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 from .block_utils import cells_where, lookup
-from .cellset import CellSet, pack
+from .cellset import POS_BIAS, POS_BITS, POS_MASK, CellSet, pack, pack_array
 from .constants import _DELTA_TO_FACING, _HORIZ_DIRS
-from .forks import fork_map, workers
+from .forks import fork_batches, fork_map, workers
 
 try:
     from . import _signals
@@ -126,14 +128,44 @@ class Either:
 
 class OwnerOverlay:
     """base (a JournaledDict, say) with some cells' owners overridden or added, read like a dict. Nothing of base is
-    copied: its cells are millions of tuples if made all at once."""
+    copied: its cells are millions of tuples if made all at once. The overriding cells are set one by one (extra), or
+    many at once as arrays (add_block), which keeps a million of them to a dozen bytes each."""
 
     def __init__(self, base):
         self.base, self.extra = base, {}
+        self._keys = array("q")           # sorted packed cells set by add_block, and the index of each one's name
+        self._ids = np.empty(0, dtype=np.int32)
+        self._names: list[str] = []
+        self._parts: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def add_block(self, cells: np.ndarray, names: list[str], name_of: np.ndarray) -> None:
+        """Cells (n x 3 int array) owned by names[name_of[i]]; a cell given again takes the later owner."""
+        offset = len(self._names)
+        self._names.extend(names)
+        keys = pack_array(cells)
+        self._parts.append((keys, name_of.astype(np.int32) + offset))
+        # Rebuilt on each call (a few per layout): sorted, the last of a repeated cell kept.
+        all_keys = np.concatenate([k for k, _ in self._parts])
+        all_ids = np.concatenate([i for _, i in self._parts])
+        order = np.argsort(all_keys, kind="stable")
+        all_keys, all_ids = all_keys[order], all_ids[order]
+        last = np.r_[all_keys[1:] != all_keys[:-1], True] if len(all_keys) else np.empty(0, dtype=bool)
+        self._keys = array("q", all_keys[last].tobytes())
+        self._ids = all_ids[last]
+
+    def _packed(self, key):
+        if not self._keys:
+            return None
+        k = pack(*key)
+        i = bisect_left(self._keys, k)
+        return self._names[self._ids[i]] if i < len(self._keys) and self._keys[i] == k else None
 
     def get(self, key, default=None):
         found = self.extra.get(key, _NONE)
-        return self.base.get(key, default) if found is _NONE else found
+        if found is not _NONE:
+            return found
+        found = self._packed(key)
+        return self.base.get(key, default) if found is None else found
 
     def __getitem__(self, key):
         found = self.get(key, _NONE)
@@ -145,14 +177,36 @@ class OwnerOverlay:
         self.extra[key] = value
 
     def __contains__(self, key) -> bool:
-        return key in self.extra or key in self.base
+        return key in self.extra or self._packed(key) is not None or key in self.base
 
     def items(self):
         yield from self.extra.items()
-        extra = self.extra
-        for key, value in self.base.items():
-            if key not in extra:
-                yield key, value
+        extra, packed = self.extra, np.frombuffer(self._keys, dtype=np.int64)
+        for start in range(0, len(packed), 1 << 16):
+            k = packed[start:start + (1 << 16)]
+            xs, ys, zs = (k & POS_MASK) - POS_BIAS, (k >> POS_BITS & POS_MASK) - POS_BIAS, (k >> 2 * POS_BITS) - POS_BIAS
+            for cell, i in zip(zip(xs.tolist(), ys.tolist(), zs.tolist()), self._ids[start:start + (1 << 16)].tolist()):
+                if cell not in extra:
+                    yield cell, self._names[i]
+        batch = []
+        for item in self.base.items():
+            batch.append(item)
+            if len(batch) == 1 << 16:
+                yield from self._base_items(batch)
+                batch = []
+        yield from self._base_items(batch)
+
+    def _base_items(self, batch):
+        """The items of base that nothing here overrides."""
+        if not batch:
+            return
+        if len(self._keys):
+            hit = np.isin(pack_array(np.array([c for c, _ in batch], dtype=np.int64)), np.frombuffer(self._keys, dtype=np.int64))
+        else:
+            hit = np.zeros(len(batch), dtype=bool)
+        for (cell, value), covered in zip(batch, hit.tolist()):
+            if not covered and cell not in self.extra:
+                yield cell, value
 
     def keys(self):
         return (k for k, _ in self.items())
@@ -164,10 +218,18 @@ class OwnerOverlay:
         return self.keys()
 
     def __len__(self) -> int:
-        return len(self.base) + sum(1 for key in self.extra if key not in self.base)
+        return len(self.base) + len(self._keys) + sum(1 for key in self.extra if self._packed(key) is None and key not in self.base) \
+            - sum(1 for key in self._keys_as_cells() if key in self.base)
+
+    def _keys_as_cells(self):
+        packed = np.frombuffer(self._keys, dtype=np.int64)
+        for start in range(0, len(packed), 1 << 16):
+            k = packed[start:start + (1 << 16)]
+            yield from zip(((k & POS_MASK) - POS_BIAS).tolist(), ((k >> POS_BITS & POS_MASK) - POS_BIAS).tolist(),
+                           ((k >> 2 * POS_BITS) - POS_BIAS).tolist())
 
     def __bool__(self) -> bool:
-        return bool(self.extra) or bool(self.base)
+        return bool(self.extra) or len(self._keys) > 0 or bool(self.base)
 
 
 _NONE = object()
@@ -696,32 +758,62 @@ def _verify_on_grid(region: Region, nets: dict[str, tuple[Pos, list[Pos]]], owne
         return net, keys
 
     # Nets are searched one by one, each on its own: forked processes take a share each.
-    same = _unchanged_nets(memo, nets, cells, blocked, terminals) if memo is not None and cells is not None else set()
-    searched = iter(fork_map(check, [item for item in nets.items() if item[0] not in same],
-                             min(workers(), _VERIFY_WORKERS)))
-    checked = [memo.found[n][1:] if n in same else next(searched) for n in nets]
-    found: list[list[Violation]] = [net for net, _ in checked]
-    reached: list[np.ndarray] = [keys for _, keys in checked]
-    if memo is not None and cells is not None:
-        memo.cells, memo.terminals, memo.blocked = cells, terminals, blocked
-        memo.found = {n: (spec, net, keys) for (n, spec), (net, keys) in zip(nets.items(), checked)}
-    del checked
+    processes = min(workers(), _VERIFY_WORKERS)
+    names = list(nets)
+    if memo is None:
+        # Each process answers with one array of every cell its nets reached and one of how many each did, not an
+        # object per net: tens of thousands of small arrays cost more than their cells.
+        def check_run(run):
+            counts = np.empty(len(run), dtype=np.int64)
+            parts, bad = [], []
+            for i, item in enumerate(run):
+                net, keys = check(item)
+                counts[i] = len(keys)
+                parts.append(keys)
+                if net:
+                    bad.append((i, net))
+            return counts, (np.concatenate(parts) if parts else np.empty(0, dtype=np.int64)), bad
+
+        runs = fork_batches(check_run, list(nets.items()), processes)
+        counts = np.concatenate([r[0] for r in runs])
+        all_keys = np.concatenate([r[1] for r in runs])
+        found: list[list[Violation]] = [[] for _ in names]
+        start = 0
+        for run_counts, _, bad in runs:
+            for i, net in bad:
+                found[start + i] = net
+            start += len(run_counts)
+        del runs
+        n_nets = len(names)
+    else:
+        same = _unchanged_nets(memo, nets, cells, blocked, terminals) if cells is not None else set()
+        searched = iter(fork_map(check, [item for item in nets.items() if item[0] not in same], processes))
+        checked = [memo.found[n][1:] if n in same else next(searched) for n in nets]
+        found = [net for net, _ in checked]
+        reached = [keys for _, keys in checked]
+        if cells is not None:
+            memo.cells, memo.terminals, memo.blocked = cells, terminals, blocked
+            memo.found = {n: (spec, net, keys) for (n, spec), (net, keys) in zip(nets.items(), checked)}
+        del checked
+        counts = np.array([len(keys) for keys in reached], dtype=np.int64)
+        all_keys = np.concatenate(reached) if reached else np.empty(0, dtype=np.int64)
+        n_nets = len(reached)
+        del reached
     if on_net is not None:
         for net_id in nets:
             on_net(net_id)
 
-    names = list(nets)
     ids = {net_id: i for i, net_id in enumerate(names)}
-    all_keys = np.concatenate(reached) if reached else np.empty(0, dtype=np.int64)
-    offsets = np.cumsum([0, *map(len, reached)])
-    net_of = np.repeat(np.arange(len(reached)), np.diff(offsets))
-    suspect = np.zeros(len(reached), dtype=bool)
-    first_net = np.empty(len(all_keys), dtype=np.int64)
+    offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
+    suspect = np.zeros(n_nets, dtype=bool)
+    first_net = np.empty(0, dtype=np.int64)
     if len(all_keys) and _signals is not None and hasattr(_signals, "short_suspects"):
         suspect, first_net = _signals.short_suspects(np.ascontiguousarray(all_keys, dtype=np.int64),
                                                      np.ascontiguousarray(offsets, dtype=np.int64), owner, ids,
                                                      *region._Region__blocks.shape)
     elif len(all_keys):
+        net_of = np.repeat(np.arange(n_nets), np.diff(offsets))
+        first_net = np.empty(len(all_keys), dtype=np.int64)
         by_key = np.argsort(all_keys, kind="stable")
         sorted_keys = all_keys[by_key]
         sorted_nets = net_of[by_key]
