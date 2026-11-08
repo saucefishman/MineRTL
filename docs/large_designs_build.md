@@ -119,6 +119,11 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   Rejected: opt_clean -purge before abc (changes gates +-5% on small examples), no &dch (+5-10% gates, no peak gain).
   Hier flow (+src strip): -64%/-46% memory, +19% gates on synthetic -> opt-in flag next. job.py: bare --mem = GB.
 
+- 2026-11-08 cd1654b merged streaming save (708c8b8): packed states byteswapped in place, LongArray written in 1M-long
+  pieces into a threaded gzip sink (<=~150 MB buffered); was ~5 copies + whole NBT in BytesIO. Same decompressed content.
+  cpu x64 parent peak 2,837 (b4c9583) -> 2,304 MB; datapath x16 2,432 -> 2,164 MB. Datapath x24 repair spike gone
+  after the traceback fix (peak 2,576 MB vs ~4.2 GB). Next: pack router.paths/laid.paths, free grids before save/fork.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets incl. clock): classify + smallest repro. (worker4, prio -10)
