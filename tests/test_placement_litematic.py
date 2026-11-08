@@ -1,3 +1,4 @@
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -262,3 +263,22 @@ endmodule
     assert netlists[0] == netlists[1]
     assert "$print" in netlists[0] or "$write" in netlists[0]
     assert str(tmp_path) not in netlists[0] and not re.search(r"\$0x[0-9a-f]+:", netlists[0])
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_hier_synth_builds_a_design_of_modules_with_the_same_gates(tmp_path: Path):
+    """--hier-synth maps each module before flattening: for modules that share nothing, the netlist has the same gates."""
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    counts = {}
+    for flag in ("flat", "--hier-synth"):
+        out = tmp_path / f"{flag.strip('-')}.litematic"
+        run = subprocess.run(["./synth.sh", "examples/multimodule", *([] if flag == "flat" else [flag]), "--no-synth-cache",
+                              "--artifacts-dir", str(tmp_path / f"art {flag}"), "--out-litematic", str(out)],
+                             cwd=root, capture_output=True, text=True, timeout=300)
+        assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+        assert out.exists() and "0 failed" in run.stdout + run.stderr
+        with open_artifact(tmp_path / f"art {flag}" / "netlist.json") as f:
+            counts[flag] = len(json.load(f)["modules"]["main"]["cells"])
+    assert counts["flat"] == counts["--hier-synth"]
