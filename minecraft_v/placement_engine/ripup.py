@@ -58,6 +58,8 @@ class _Tables:
         i = self.target_index.get(id(obj))
         if i is None:
             i = self.target_index[id(obj)] = len(self.targets)
+            if i >= 64:  # PackedJournal keeps it in the 6 high bits of a uint8
+                raise OverflowError("more than 64 journal targets")
             self.targets.append(obj)  # kept alive, so the id stays this object's
         return i
 
