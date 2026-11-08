@@ -41,7 +41,7 @@ from .layout import (
 from .poisson import _poisson_placement
 from .propagate import comparator_entity, settle as settle_blocks
 from .pathfinding import IndexedWorkspace, _astar, _find_wire_path, _signal_depths
-from .cellset import CellSet, pack
+from .cellset import CellSet
 from .ripup import Recorder, JournaledSet, JournaledDict, JournalingWorkspace, rip_up, rollback
 from .template import (
     _pin_world, _io_repeater_cell, _io_repeater_facing,
@@ -2233,7 +2233,7 @@ def _report_flat_violations(
     stamps = {p.component.id: (macros[p.component.metadata["macro"]], p.origin, bool(p.component.metadata.get("mirror_x")),
                                   bool(p.component.metadata.get("rotate_180")))
               for p in placed if p.component.type == ComponentType.CUSTOM}
-    hidden_keys: list[int] = []  # gate cells inside stamped macros, on top of the placed gates'
+    hidden_boxes: list[tuple[tuple[int, int, int], tuple[int, int, int]]] = []  # gates inside stamped macros: (lowest cell, size)
     opaque = _opaque_boxes(placed, macros)
     owner = OwnerOverlay(dust_owner)
     spec: dict[str, tuple[tuple[int, int, int], list[tuple[int, int, int]]]] = {}
@@ -2278,12 +2278,14 @@ def _report_flat_violations(
         if macro.settled is not None:
             continue  # all hidden, as one of the opaque boxes
         for (x, y, z), (sx, sy, sz) in macro.gate_boxes:
-            for dx in range(sx):
-                for dy in range(sy):
-                    for dz in range(sz):
-                        hidden_keys.append(pack(*macro.world((x + dx, y + dy, z + dz), origin, mirrored, rotated)))
+            # A turned or mirrored box is a box: its lowest cell is where the box's far corner goes.
+            if sx > 0 and sy > 0 and sz > 0:
+                far = macro.world((x + sx - 1, y + sy - 1, z + sz - 1), origin, mirrored, rotated)
+                near = macro.world((x, y, z), origin, mirrored, rotated)
+                low = tuple(min(a, b) for a, b in zip(near, far))
+                hidden_boxes.append((low, (sx, sy, sz)))
     with ProgressBar("[verify] flat signals", len(spec)) as bar:
-        violations = verify_signals(workspace, spec, owner, HiddenBoxes(_interior_cellset(placed).with_keys(hidden_keys), opaque),
+        violations = verify_signals(workspace, spec, owner, HiddenBoxes(_interior_cellset(placed).union(CellSet.from_boxes(hidden_boxes)), opaque),
                                     on_net=lambda net_id: bar.update(info=net_id))
     for violation in violations:
         log(f"[verify] {violation.kind} {sorted(violation.nets)} at {violation.pos}")
