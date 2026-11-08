@@ -75,7 +75,10 @@ Predicted break order at x512 flat: routing-state memory > verify fork copy > `_
    shared modules. Next: direct 1 GB netlist synth + load acceptance test on the current flow. (worker, queued)
 2. DONE af66228: repeat finder kept blocks out of instances (different-ROM cores could share a tile); coverage counts
    gates only. Parked: forced small macros (x4/x8, --macro-min-instances 2) fail routing/verify (separate issue).
-2b. Disk per build audit + cuts. (worker3, running)
+2b. Disk per build: 89fa580 gzips component_list/component_layout/repeats cache (x64 artifacts 42.5 -> ~19 MB now,
+    -> 7.6 MB once synth.sh writes netlist.json.gz + yosys.log.gz; patch ready in scratch repeats/disk/patch_synth.py,
+    held until the acceptance runs leave the queue). 1 GB netlist: ~3.8 GB -> ~0.7 GB artifacts + litematic.
+2d. Forked verify memory (owner dict / hidden set in the child, CoW from parent writes). (worker3, running)
 2c. cpu x512 acceptance build, base branch. (worker2, running)
 3. Python load ~8.5x netlist: slot IR models (Component/Net ~3-5 KB each); or load hierarchical JSON.
 4. Routing-state memory: wire cells as Python tuples in ~6 structures; verify fork's own owner dict / hidden set.
