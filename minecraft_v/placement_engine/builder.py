@@ -52,7 +52,7 @@ from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_ca
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
 from .forks import Forked
 from .block_utils import _signals  # None when the kernels aren't built
-from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, VerifyMemo, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, OwnerOverlay, VerifyMemo, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -2224,7 +2224,7 @@ def _report_flat_violations(
               for p in placed if p.component.type == ComponentType.CUSTOM}
     hidden = _component_interior(placed)
     opaque = _opaque_boxes(placed, macros)
-    owner = {pos: net for pos, net in dust_owner.items()}
+    owner = OwnerOverlay(dust_owner)
     spec: dict[str, tuple[tuple[int, int, int], list[tuple[int, int, int]]]] = {}
 
     def inner_ends(cid: str, pin: str) -> list[tuple[int, int, int]]:

@@ -122,6 +122,55 @@ class Either:
         return p in self.a or p in self.b
 
 
+class OwnerOverlay:
+    """base (a JournaledDict, say) with some cells' owners overridden or added, read like a dict. Nothing of base is
+    copied: its cells are millions of tuples if made all at once."""
+
+    def __init__(self, base):
+        self.base, self.extra = base, {}
+
+    def get(self, key, default=None):
+        found = self.extra.get(key, _NONE)
+        return self.base.get(key, default) if found is _NONE else found
+
+    def __getitem__(self, key):
+        found = self.get(key, _NONE)
+        if found is _NONE:
+            raise KeyError(key)
+        return found
+
+    def __setitem__(self, key, value) -> None:
+        self.extra[key] = value
+
+    def __contains__(self, key) -> bool:
+        return key in self.extra or key in self.base
+
+    def items(self):
+        yield from self.extra.items()
+        extra = self.extra
+        for key, value in self.base.items():
+            if key not in extra:
+                yield key, value
+
+    def keys(self):
+        return (k for k, _ in self.items())
+
+    def values(self):
+        return (v for _, v in self.items())
+
+    def __iter__(self):
+        return self.keys()
+
+    def __len__(self) -> int:
+        return len(self.base) + sum(1 for key in self.extra if key not in self.base)
+
+    def __bool__(self) -> bool:
+        return bool(self.extra) or bool(self.base)
+
+
+_NONE = object()
+
+
 class HiddenBoxes:
     """Cells of a set, and of a few boxes that would be too many cells to list."""
 

@@ -336,22 +336,23 @@ class JournaledDict:
         for key in [k for k in self._back if grid.owner_at(k) is not _NOT_IN_GRID]:
             del self._back[key]
 
-    def items(self) -> list:
+    def items(self) -> Iterator[tuple[tuple[int, int, int], str]]:
+        """Each cell and its owner. In chunks, so the grid's millions of cells aren't tuples all at once."""
+        yield from list(self._back.items())
         grid = self._grid
-        items = list(self._back.items())
         if grid is not None:
             cells, owners = grid.owned_cells()
-            items.extend(zip(map(tuple, cells.tolist()), owners))
-        return items
+            for start in range(0, len(cells), 1 << 16):
+                yield from zip(map(tuple, cells[start:start + (1 << 16)].tolist()), owners[start:start + (1 << 16)])
 
-    def keys(self) -> list:
-        return [k for k, _ in self.items()]
+    def keys(self) -> Iterator[tuple[int, int, int]]:
+        return (k for k, _ in self.items())
 
-    def values(self) -> list:
-        return [v for _, v in self.items()]
+    def values(self) -> Iterator[str]:
+        return (v for _, v in self.items())
 
     def __iter__(self) -> Iterator[tuple[int, int, int]]:
-        return iter(self.keys())
+        return self.keys()
 
     def __len__(self) -> int:
         grid = self._grid
