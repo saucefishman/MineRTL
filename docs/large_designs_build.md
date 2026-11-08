@@ -126,7 +126,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
 
 ## TODO (ranked, memory/disk only)
 
-0c. Routing failures at x512 (10 nets incl. clock): classify + smallest repro. (worker4, prio -10)
+0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
+    over-the-wall route (needs h>=82, cull at 2x30=60); cull-off fallback only runs when the open list is dry, not on
+    stagnation. B) net_2 clock 12.8K sinks: lay-time repeater placement fails in a dense trunk. C) 1 gate pin, open.
+    Next: confirm A by replay with MCV_H_RADIUS=0, then re-search cull-off after any failed search. (worker4)
 0b. Save step streaming (parent +1 GB at x512 save). (worker2)
 0a. Post-routing phases (repair/hold/timing/verify) memory: datapath x48 grew 10.6 -> 18 GB after routing. (worker3,
     claude/post-route-mem)
