@@ -173,6 +173,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   NOT CLEAN: 2 verify opens on net_17737 (re-routed in repair) and net_2 unrouted (new error: wire past a repeater feeds
   back into it, latch). Correctness bug in repair -> worker2. 5d98df2 merged the parked grid _compact (same output).
 
+- 2026-11-08 merged (cherry-pick) route-fail: ripped big-fanout net re-queued right after its ripper (unmeasured; seed 2
+  tests it) + lay-time fault rejection reasons logged. Not merged: reserved repeater slots (dp16 lay faults 11 -> 16).
+  Lay faults are "returns" (own wire touches repeater input) and later branches at the slot; next: local retry (worker4).
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
