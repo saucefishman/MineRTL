@@ -1710,7 +1710,8 @@ class _GreedyRouter:
                     log(f"[lay] {job.key}: attempt {lay_attempts}, {len(e.cells)}-cell stretch with {on_stretch} branches starting on it; "
                         f"{re.search(r'rejected [^)]*?[}]', str(e))[0] if 'rejected' in str(e) else ''}; "
                         f"loops {[len(w) for w in e.loops]}")
-                if stretch and "cannot place repeater" in str(e) and lay_attempts == 1:
+
+                if stretch and ("cannot place repeater" in str(e) or "(latch)" in str(e)) and lay_attempts == 1:
                     # Every sink is laid by now: only the branch at the fault has to go. The stretch can
                     # run back up the wire feeding that branch, whose last cells are where it ran out.
                     # Signal that comes back round to a repeater slot does so through other wire of the net: that branch is
@@ -1718,6 +1719,7 @@ class _GreedyRouter:
                     stretch_cells = set(e.cells)
                     loop = [c for way in e.loops for c in way if c not in stretch_cells]
                     self.rip_branch(job, loop or list(e.cells[-1:]))
+                    stretch = stretch | (frozenset(loop) - near_terminal - job_blocked)  # or the search lays it again
                 else:  # a contact can involve any two branches, and a second fault means this branch wasn't all of it
                     self._undo_job(job.key, mark)
                 job_blocked |= stretch
