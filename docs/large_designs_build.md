@@ -177,6 +177,10 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   tests it) + lay-time fault rejection reasons logged. Not merged: reserved repeater slots (dp16 lay faults 11 -> 16).
   Lay faults are "returns" (own wire touches repeater input) and later branches at the slot; next: local retry (worker4).
 
+- 2026-11-08 3a030fd merged route-fail loop fix: a repeater fault with signal returning through a 5-9 cell loop (a
+  parallel branch of the same net) rips only that branch and blocks the loop cells for the re-route; latch faults too
+  (untested). dp16: lay faults 11 -> 7, none needing a 2nd attempt, first-pass failures 5 -> 1. Clock at x512: seed 2.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the
