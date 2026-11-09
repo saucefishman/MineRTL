@@ -4,29 +4,29 @@ Branch `claude/verilog-synthesis-memory-disk-b9eff2`. Machine: 16 GB RAM, ~30 GB
 
 ## Findings summary
 
-Goal (user, 2026-11-07; time dropped 2026-11-08):
-- cpu x512 (~150K cells): full synth + build under 12 GB peak, 0 routing failures, on 3 seeds. No time limit, but no
-  significant time regression.
-- A 1 GB netlist through synth + load under 12 GB.
-- Memory and disk only. Time work only as a side effect.
+Status at merge (2026-11-08). Memory measured as physical footprint (`vmmap`/`footprint`), not RSS.
 
-Done so far (all on this branch, unmerged):
-- 3e5d482: lean netlist load (20x -> 8.5x netlist bytes), gzipped capped synth cache, fifo yosys -> unplace, tail-only
-  spinner. Output identical.
-- 7601f17: legalizer pair array 48 B -> 1 B per pair. Output identical. cpu x64 3.4 GB (was killed at 16 GB).
-- 1ef06ef: legalizer sub-quadratic (neighbour grid + overlap re-check). 1M boxes 208 s / 2.3 GB. Placement changes
-  slightly; cpu x128 routing failures 3 -> 4 (one seed).
+Goal and result:
+- 1 GB netlist through synth + load under 12 GB: MET on both designs. Synthetic N=5600 (1.01 GB, 1.65M gates): yosys+abc
+  8.9 GB, load 2.7 GB (streaming loader). cpu N=5900 (1.05 GB, 1.74M gates): yosys 9.0 GB, load 4.5 GB (old loader).
+- cpu x512 (~151K components) under 12 GB: MET on seeds 0 and 1. Peak total = parent 11.26 GB; forks size themselves to
+  free memory and ran in-process. Was killed at 14 GB before this work.
+- 0 routing failures on 3 seeds: NOT met. Seed 0: net_2 (clock, repeater extension). Seed 1: net_2 (latch) + 2 verify
+  opens on net_17737 after repair (cause open; repair now escalates and reports instead of shipping). Seed 2 skipped
+  at the user's request.
 
-Current numbers (one seed, cpu xN = N copies of examples/cpu's core, scratch generator `gen_cpu.py`):
+What changed (general, not cpu-specific): lean streaming netlist load and slotted IR; gzipped artifacts and capped
+synth cache; yosys src-attribute strip (-20% yosys peak), opt-in --hier-synth; sub-quadratic legalizer and _compact;
+slab-filled routing grid and capped search pools; packed journals, grid-backed solid/dust_owner/writer, packed paths;
+failed-net tracebacks no longer kept (big leak); streaming litematic save; verify fork inputs pre-built and compact;
+memory-aware fork sizing; A* re-search without the h-radius cull after a failed search (wall-pin failures); repeater
+loop local retry; repair escalation. Example outputs identical to main throughout (check_same_output).
 
-| design | cells | peak RSS | wall | routing failures |
-|---|---|---|---|---|
-| cpu x32 | 9.4K | ~2.5 GB | 112 s | 0 |
-| cpu x128 | 37.6K | 5.5 GB | 875 s | 4 (needs --allow-routing-failures) |
-| cpu x512 | ~150K | not run | | |
+Limits: ~1M gates needs ~70-80 GB and ~1-2 days (R640 estimate); the 3D layout exceeds Minecraft's 384 height from
+cpu x64 up; MCHPRS needs ~5-17 B per world block. See docs/partition_feasibility.md on claude/partition-feasibility-dea891.
 
-Known limits: yosys ~12.7x netlist bytes (16 GB at ~1.2 GB netlist); Python load ~8.5x; layout stamp ~70 B per world
-cell; router A* ~1 GB at x32; `_compact` O(n^2) time.
+Open follow-ups: clock net repeater faults at x512; repair opens (net_17737 class); native allocator memory (~1.7 GB
+of x64 peak unattributed; idle search pools never trimmed); scipy FFT "Work item submitted after shutdown" flake.
 
 ## User's rules
 
