@@ -80,6 +80,7 @@ class LayConflict(ValueError):
     def __init__(self, msg: str, cells: tuple[tuple[int, int, int], ...]):
         super().__init__(msg)
         self.cells = cells
+        self.loops: list[list[tuple[int, int, int]]] = []  # for a repeater slot that signal returns to: the way it does
 
 
 def _place_support(
@@ -495,6 +496,61 @@ def _signal_returns(
     return False
 
 
+def _signal_return_path(
+        workspace: Region,
+        dust_owner: dict[tuple[int, int, int], str],
+        net_id: str,
+        start: tuple[int, int, int],
+        target: tuple[int, int, int],
+        cut: tuple[int, int, int],
+) -> list[tuple[int, int, int]]:
+    """The cells signal follows from start to target through net_id's wire, avoiding cut: _signal_returns' search,
+    with the way kept. Empty if it doesn't reach."""
+    def block_at(pos):
+        try:
+            return workspace[pos] if pos[1] >= 0 else None
+        except IndexError:
+            return None
+
+    def input_side(block):
+        return next(d for d, f in _DELTA_TO_FACING.items() if f == block["facing"])
+
+    parent = {start: None, cut: None}
+    stack = [start]
+    while stack:
+        pos = stack.pop()
+        if pos == target:
+            way = []
+            while pos is not None:
+                way.append(pos)
+                pos = parent[pos]
+            return way[::-1]
+        x, y, z = pos
+        block = block_at(pos)
+        if block is not None and _is_repeater(block):
+            dx, dz = input_side(block)
+            nexts = [(x - dx, y + dy, z - dz) for dy in (-1, 0, 1)]
+        else:
+            nexts = [(x + dx, y + dy, z + dz) for dx, dz in _HORIZ_DIRS for dy in (-1, 0, 1)]
+        for nxt in nexts:
+            if nxt in parent:
+                continue
+            other = block_at(nxt)
+            if other is None:
+                continue
+            if _is_redstone_wire(other):
+                follows = dust_owner.get(nxt) == net_id
+            elif _is_repeater(other) and block is not None and not _is_repeater(block):
+                dx, dz = input_side(other)
+                follows = dust_owner.get(nxt, net_id) == net_id and (nxt[0] + dx, nxt[2] + dz) == (x, z)
+            else:
+                follows = False
+            if follows:
+                parent[nxt] = pos
+                stack.append(nxt)
+    return []
+
+
 def _place_repeaters_for_net(
         workspace: Region,
         dust_owner: dict[tuple[int, int, int], str],
@@ -626,9 +682,16 @@ def _place_repeaters_for_net(
                         break
                 else:
                     reasons = collections.Counter(reject_reason(path, j) for j in range(cap, reset_idx, -1))
-                    raise LayConflict(
+                    conflict = LayConflict(
                         f"Net {net_id!r}: cannot place repeater to extend signal at path depth {pos_idx} "
                         f"(signal dist {dist} >= {_REPEATER_INTERVAL}, rejected {dict(reasons)}, no viable position in "
                         f"{path[reset_idx+1:cap+1]})",
                         tuple(path[reset_idx + 1:pos_idx]),
                     )
+                    # Where signal comes back, so the wire that does it can be redone rather than the whole net.
+                    for j in range(cap, reset_idx, -1):
+                        if reject_reason(path, j) == "returns":
+                            way = _signal_return_path(workspace, dust_owner, net_id, path[j + 1], path[j - 1], path[j])
+                            if way:
+                                conflict.loops.append(way)
+                    raise conflict
