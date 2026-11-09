@@ -763,7 +763,42 @@ def _legalize_all_pairs(pos: np.ndarray, sizes: np.ndarray, flat: bool) -> np.nd
 
 
 def _compact(pos: np.ndarray, sizes: np.ndarray, axis: int) -> None:
-    """Slide every box towards lower ``axis`` until it touches another box or zero."""
+    """Slide every box towards lower ``axis`` until it touches another box or zero.
+
+    Same result as _compact_all_pairs, found the way skyline packing does: a box's floor is the highest top among the
+    placed boxes it overlaps on the other two axes, so the placed boxes are kept in a grid over those two axes and only the
+    cells a box touches are read (each box is entered in every cell it touches, and the overlap is still tested exactly)."""
+    n = len(pos)
+    a, b = [x for x in range(3) if x != axis]
+    order = np.argsort(pos[:, axis], kind="stable")
+    cell_a, cell_b = (max(float(np.median(sizes[:, x])) * 1.5, 1.0) for x in (a, b))
+    lo_a, lo_b = pos[:, a].tolist(), pos[:, b].tolist()
+    hi_a, hi_b = (pos[:, a] + sizes[:, a]).tolist(), (pos[:, b] + sizes[:, b]).tolist()
+    ca0, ca1 = np.floor(pos[:, a] / cell_a).astype(np.int64).tolist(), np.floor((pos[:, a] + sizes[:, a]) / cell_a).astype(np.int64).tolist()
+    cb0, cb1 = np.floor(pos[:, b] / cell_b).astype(np.int64).tolist(), np.floor((pos[:, b] + sizes[:, b]) / cell_b).astype(np.int64).tolist()
+    height = sizes[:, axis].tolist()
+    low = pos[:, axis].tolist()
+    grid: dict[tuple[int, int], list[tuple[float, float, float, float, float]]] = {}
+    for k, i in enumerate(order.tolist()):
+        if k % _STATUS_EVERY == 0:
+            status(f"compacting, axis {'xyz'[axis]}, {k}/{n}")
+        floor = 0.0
+        x0, x1, y0, y1 = lo_a[i], hi_a[i], lo_b[i], hi_b[i]
+        cells = [(u, v) for u in range(ca0[i], ca1[i] + 1) for v in range(cb0[i], cb1[i] + 1)]
+        for c in cells:
+            for d0, d1, e0, e1, top in grid.get(c, ()):
+                if top > floor and d0 < x1 and x0 < d1 and e0 < y1 and y0 < e1:
+                    floor = top
+        put = min(low[i], floor)
+        low[i] = put
+        entry = (x0, x1, y0, y1, put + height[i])
+        for c in cells:
+            grid.setdefault(c, []).append(entry)
+    pos[:, axis] = low
+
+
+def _compact_all_pairs(pos: np.ndarray, sizes: np.ndarray, axis: int) -> None:
+    """_compact over every placed box for each one, n*n pair checks: the reference."""
     others = [a for a in range(3) if a != axis]
     order = np.argsort(pos[:, axis], kind="stable")
     done: list[int] = []
