@@ -134,7 +134,8 @@ Tests that need `yosys` or `mchprs_headless` are skipped when those aren't found
 Developer build options:
 
 - `--synth-only`: stop after writing the netlist.
-- `--artifacts-dir <dir>`: where the netlist and build files go (default: `build/artifacts`, or `$MINECRAFT_V_ARTIFACTS_DIR`). Give each build its own to run builds in parallel.
+- `--artifacts-dir <dir>`: where the netlist and build files go (default: `build/artifacts`, or `$MINECRAFT_V_ARTIFACTS_DIR`). Give each build its own to run builds in parallel. The netlist and the larger build files are written gzipped (`netlist.json.gz`, `component_list.json.gz`); scripts and `--netlist` take either name.
+- `--hier-synth`: map each module before flattening. Less Yosys memory for designs made of repeated modules, at the cost of optimizing across module boundaries.
 - `--resume-dir <dir>`, `--resume-reroute <nets>`: save the placement and wires and reuse them on the next build, rerouting only the listed nets.
 - `--route-deadline <s>`: stop routing after that many seconds and write a partial result.
 - `--allow-routing-failures`: write the schematic even when some wires fail.

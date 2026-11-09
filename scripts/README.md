@@ -10,9 +10,9 @@ Run from the repo root with `uv run python scripts/<name>.py`. Scripts that run 
 - `check_same_output.py`: hashes each example's placed blocks, to check a refactor leaves output unchanged.
 - `clock_sweep.py`: finds the fastest clock a build really runs at, against a slow reference run.
 - `clock_timing.py`: reports clock skew and hold margins from the routed wire.
-- `simulate.py`: simulates net power states from `component_list.json` for N clock cycles.
+- `simulate.py`: simulates net power states from `component_list.json` (or its `.gz`) for N clock cycles.
 - `dev/`: acceptance checks for single designs in `examples/` and `tests/designs/` (`check_cpu.py`, `check_memread.py`, `check_powerup.py`, `check_preload.py`, `check_ram.py`); each has its usage in its docstring.
 
-Environment variables the scripts and build read, besides the `MCHPRS_*` ones: `MINECRAFT_V_ARTIFACTS_DIR` (where a build writes its netlist and artifacts), `RAM_WORKERS` (processes that settle RAM banks, default the core count), `STACK_DUMP_EVERY` (`build_with_pins.py`), `QUIET` (`dev/check_cpu.py`, `dev/check_memread.py`), `CYCLES` (`dev/check_cpu.py`), `STEPS` (`dev/check_preload.py`).
+Environment variables the scripts and build read, besides the `MCHPRS_*` ones: `MINECRAFT_V_ARTIFACTS_DIR` (where a build writes its netlist and artifacts), `MINECRAFT_V_SYNTH_CACHE_MAX_GB` (size cap of `build/synth_cache`, default 5), `MINECRAFT_V_WORKERS` (forked processes, default the core count; fewer fork when free memory is short), `MINECRAFT_V_VERIFY_WORKERS` (verify's processes, default 4), `RAM_WORKERS` (processes that settle RAM banks, default the core count), `STACK_DUMP_EVERY` (`build_with_pins.py`), `QUIET` (`dev/check_cpu.py`, `dev/check_memread.py`), `CYCLES` (`dev/check_cpu.py`), `STEPS` (`dev/check_preload.py`).
 
 `compare_gate_rtl.py --rtl` needs `iverilog` and `vvp` on `PATH`, and `nbtlib` (in the dev dependencies).
