@@ -1703,10 +1703,23 @@ class _GreedyRouter:
                 if (lay_attempts > _NET_RETRIES or (not stretch and job.key not in self.has_kept_wire)
                         or not any(m in str(e) for m in ("cannot place repeater", "(latch)", "(inverted)", "(gate contact)"))):
                     raise
-                if stretch and "cannot place repeater" in str(e) and lay_attempts == 1:
+                if "cannot place repeater" in str(e):
+                    laid = self.laid.get(job.key)
+                    cells = set(e.cells)
+                    on_stretch = sum(1 for path in laid.paths if path[0] in cells) if laid else -1
+                    log(f"[lay] {job.key}: attempt {lay_attempts}, {len(e.cells)}-cell stretch with {on_stretch} branches starting on it; "
+                        f"{re.search(r'rejected [^)]*?[}]', str(e))[0] if 'rejected' in str(e) else ''}; "
+                        f"loops {[len(w) for w in e.loops]}")
+
+                if stretch and ("cannot place repeater" in str(e) or "(latch)" in str(e)) and lay_attempts == 1:
                     # Every sink is laid by now: only the branch at the fault has to go. The stretch can
                     # run back up the wire feeding that branch, whose last cells are where it ran out.
-                    self.rip_branch(job, list(e.cells[-1:]))
+                    # Signal that comes back round to a repeater slot does so through other wire of the net: that branch is
+                    # the one to redo, not the end of the stretch.
+                    stretch_cells = set(e.cells)
+                    loop = [c for way in e.loops for c in way if c not in stretch_cells]
+                    self.rip_branch(job, loop or list(e.cells[-1:]))
+                    stretch = stretch | (frozenset(loop) - near_terminal - job_blocked)  # or the search lays it again
                 else:  # a contact can involve any two branches, and a second fault means this branch wasn't all of it
                     self._undo_job(job.key, mark)
                 job_blocked |= stretch
@@ -1902,8 +1915,12 @@ class _GreedyRouter:
                             self.rip_branch(by_key[v], [where])
                             ripped.add(v)
                         queue = deque(entry for entry in queue if entry[1].key not in wider)
+                        queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in wider and entry[1].key not in big_keys)
+                        # A net routed first for its fanout re-routes its ripped branch at once: at the end of the queue
+                        # the world is full by then, and its sinks (the clock's, thousands) each fail and rip their way in.
+                        queue.extendleft(reversed([entry for entry in enumerate(pool, 1) if entry[1].key in wider
+                                                   and entry[1].key in big_keys]))
                         queue.appendleft((i, job))
-                        queue.extend(entry for entry in enumerate(pool, 1) if entry[1].key in wider)
                         continue
                     if fail_fast:
                         raise RuntimeError(f"Routing failed for net {job.key}: {e}") from e

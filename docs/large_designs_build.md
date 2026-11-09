@@ -169,6 +169,18 @@ pressure; the ~5 GB x512 estimate was wrong. Goal is judged on physical footprin
   1 failure (net_2 clock repeater), verify 0. Build stats time 7,138 s (was 6,841). MEMORY GOAL MET for seed 0.
   Remaining: net_2 (worker4: reserve repeater slots on big nets), seeds 1 and 2.
 
+- 2026-11-08 cpu x512 seed 1 (9b55de9): parent 11.26 GB, no forks (free 2.6-3.6 GB at each decision) -> memory OK.
+  NOT CLEAN: 2 verify opens on net_17737 (re-routed in repair) and net_2 unrouted (new error: wire past a repeater feeds
+  back into it, latch). Correctness bug in repair -> worker2. 5d98df2 merged the parked grid _compact (same output).
+
+- 2026-11-08 merged (cherry-pick) route-fail: ripped big-fanout net re-queued right after its ripper (unmeasured; seed 2
+  tests it) + lay-time fault rejection reasons logged. Not merged: reserved repeater slots (dp16 lay faults 11 -> 16).
+  Lay faults are "returns" (own wire touches repeater input) and later branches at the slot; next: local retry (worker4).
+
+- 2026-11-08 3a030fd merged route-fail loop fix: a repeater fault with signal returning through a 5-9 cell loop (a
+  parallel branch of the same net) rips only that branch and blocks the loop cells for the re-route; latch faults too
+  (untested). dp16: lay faults 11 -> 7, none needing a 2nd attempt, first-pass failures 5 -> 1. Clock at x512: seed 2.
+
 ## TODO (ranked, memory/disk only)
 
 0c. Routing failures at x512 (10 nets): A) 8 = back-face pins of 76x10x28 regfile macros: A* h-radius cull prunes the

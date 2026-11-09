@@ -674,3 +674,27 @@ def test_goal_behind_a_wall_found_after_the_h_radius_cull_floods_the_near_face()
                                        protected=wall)
     assert path[0] == (28, 1, 10) and path[-1] == (28, 1, 54)
     assert max(y for _, y, _ in path) >= 14
+
+
+def test_signal_return_path_names_the_wire_signal_comes_back_through():
+    # A trunk along z=5 at y=3, and a second branch of the same net one row over and one up (z=4, y=4) that joins it at
+    # both ends by slopes: a repeater on the trunk between them has signal coming back round through the second branch.
+    from minecraft_v.placement_engine.constants import REDSTONE
+    from minecraft_v.placement_engine.wire import _signal_return_path
+    region = Region(0, 0, 0, 12, 8, 12)
+    trunk = [(x, 3, 5) for x in range(2, 9)]
+    upper = [(2, 4, 4), (3, 4, 4), (4, 4, 4), (5, 4, 4), (6, 4, 4), (7, 4, 4), (8, 4, 4)]
+    owner = {}
+    for c in trunk + upper:
+        region[c] = REDSTONE
+        owner[c] = "n"
+    cut = (5, 3, 5)
+    way = _signal_return_path(region, owner, "n", (6, 3, 5), (4, 3, 5), cut)
+    assert way and way[0] == (6, 3, 5) and way[-1] == (4, 3, 5) and cut not in way
+    assert any(c in upper for c in way)
+    assert _signal_returns(region, owner, "n", (6, 3, 5), (4, 3, 5), cut)
+    # With the second branch gone there is no way back.
+    for c in upper:
+        region[c] = BlockState("minecraft:air")
+        owner.pop(c)
+    assert _signal_return_path(region, owner, "n", (6, 3, 5), (4, 3, 5), cut) == []
