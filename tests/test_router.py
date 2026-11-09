@@ -576,6 +576,29 @@ def test_repair_reroutes_a_net_verify_finds_fault_with():
     assert verify_signals(region, {"n": (job.src, job.sinks)}, dust_owner) == []
 
 
+def test_repair_of_a_fault_that_repeats_rips_the_nets_around_it_and_reports_what_stays_faulty(monkeypatch):
+    from minecraft_v.placement_engine.verify import Violation
+
+    router, region, solid, dust_owner = _router()
+    n = _job("n", (2, 1, 2), [(8, 1, 2)])
+    m = _job("m", (2, 1, 4), [(8, 1, 4)])
+    assert router.run([n, m], "[test]") == []
+    fault = Violation("open", frozenset({"n"}), (8, 1, 2))  # at the sink, a terminal: nothing to keep out of a re-route
+    monkeypatch.setattr(builder, "verify_signals", lambda *a, **k: [fault])
+    rounds = []
+    real = router.run
+
+    def spy(jobs, *args, **kwargs):
+        rounds.append([j.key for j in jobs])
+        return real(jobs, *args, **kwargs)
+
+    monkeypatch.setattr(router, "run", spy)
+    failures = _repair_faulty_nets(router, [n, m], set(), frozenset(), None)
+    assert rounds[0] == ["n"]  # the first time, only the faulty net
+    assert all(set(r) == {"n", "m"} for r in rounds[1:]) and len(rounds) == builder._REPAIR_ROUNDS  # then its neighbour too
+    assert [key for key, _ in failures] == ["n"] and "still has a open fault" in str(failures[0][1])
+
+
 def test_repair_runs_on_a_layout_with_a_macro(monkeypatch):
     # One RAM block turned repair off for the whole design, so faults only surfaced at the flat verify.
     from types import SimpleNamespace

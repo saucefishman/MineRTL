@@ -53,7 +53,7 @@ from .macro import BlockArrays, Macro, io_column_pins, load_macro, macro_from_ca
 from .cosmetics import apply_dust_shapes, place_io_fixtures, place_io_signs
 from .forks import Forked
 from .block_utils import _signals  # None when the kernels aren't built
-from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, OwnerOverlay, VerifyMemo, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
+from .verify import Either, find_live_pin_wire, Excluding, HiddenBoxes, OwnerOverlay, VerifyMemo, Violation, _World, classify_block, find_gate_contacts, find_inverted_contacts, find_latch, verify_signals, verify_support
 from .wire import LayConflict, _lay_redstone_path, _place_repeaters_for_net
 
 REDSTONE_BLOCK = BlockState("minecraft:redstone_block")
@@ -2159,6 +2159,10 @@ def _route_all_nets(
     return failures, inverted_cells, router.paths
 
 
+_REPAIR_NEIGHBOUR_RADIUS = 3  # a net faulty twice running has the nets this close to the fault ripped too, then this much further
+_REPAIR_NEIGHBOUR_MAX = 4
+
+
 def _repair_faulty_nets(
         router: _GreedyRouter,
         jobs: list[_RouteJob],
@@ -2167,14 +2171,22 @@ def _repair_faulty_nets(
         deadline: float | None,
 ) -> list[tuple[str, Exception]]:
     """Re-route nets verify finds fault with, away from the fault. Routing can succeed yet leave one:
-    a later net's wire can touch an earlier one in a way only the two together show."""
+    a later net's wire can touch an earlier one in a way only the two together show.
+
+    A fault at a sink leaves nothing to avoid (the sink is a terminal), and the search is deterministic, so a net that
+    is faulty again is not laid the same way again: the nets around the fault are ripped with it, a cell further out
+    each round it stays faulty. What is still faulty after the last round is returned as a failure, not left in the
+    build unreported."""
     order = {job.key: i for i, job in enumerate(jobs)}
     by_key = {job.key: job for job in jobs}
     failures: list[tuple[str, Exception]] = []
     memo = VerifyMemo()  # a round searches again only the nets near what the last one re-routed
-    for _ in range(_REPAIR_ROUNDS):
+    streak: dict[str, int] = {}  # rounds in a row a net has been faulty
+
+    def find_faults() -> tuple[dict[str, set[Pos]], dict[str, Violation]]:
         spec = {job.key: (job.src, job.sinks) for job in jobs if job.key not in failed}
         faults: dict[str, set[Pos]] = {}
+        first: dict[str, Violation] = {}
         with ProgressBar("[repair] verify", len(spec)) as bar:
             violations = verify_signals(router.region, spec, router.dust_owner, component_cells,
                                         on_net=lambda net_id: bar.update(info=net_id), memo=memo)
@@ -2183,18 +2195,44 @@ def _repair_faulty_nets(
             key = max((n for n in v.nets if n in by_key), key=order.__getitem__, default=None)
             if key is not None and v.kind != "unsupported":
                 faults.setdefault(key, set()).add(v.pos)
+                first.setdefault(key, v)
+        return faults, first
+
+    for _ in range(_REPAIR_ROUNDS):
+        faults, __ = find_faults()
         if not faults:
             return failures
+        for key in list(streak):
+            if key not in faults:
+                del streak[key]
+        for key in faults:
+            streak[key] = streak.get(key, 0) + 1
         log(f"[repair] re-routing {', '.join(sorted(faults))}")
-        requeue = sorted(faults, key=order.__getitem__)
-        for key in requeue:
+        requeue = set(faults)
+        for key in sorted(faults, key=order.__getitem__):
+            if streak[key] < 2:
+                continue
+            reach = _REPAIR_NEIGHBOUR_RADIUS + (streak[key] - 2)
+            nearby = [n for pos in sorted(faults[key]) for n in router.blockers(pos, key, set(by_key) - failed, reach)]
+            for n in list(dict.fromkeys(nearby))[:_REPAIR_NEIGHBOUR_MAX]:
+                if n not in requeue and n in router.paths:
+                    requeue.add(n)
+        for key in sorted(requeue, key=order.__getitem__):
             router.rip(key)
-            job = by_key[key]
-            job.avoid |= frozenset(faults[key]) - job.terminals
-            job.first += tuple(p for p in sorted(faults[key]) if p in job.sinks and p not in job.first)
-        new = router.run([by_key[key] for key in requeue], "[repair]", deadline=deadline, rip_blockers=False)
+            if key in faults:
+                job = by_key[key]
+                job.avoid |= frozenset(faults[key]) - job.terminals
+                job.first += tuple(p for p in sorted(faults[key]) if p in job.sinks and p not in job.first)
+        new = router.run([by_key[key] for key in sorted(requeue, key=order.__getitem__)], "[repair]", deadline=deadline,
+                         rip_blockers=False)
         failures += new
         failed |= {key for key, _ in new}
+    faults, first = find_faults()
+    for key in sorted(faults, key=order.__getitem__):
+        v = first[key]
+        failed.add(key)
+        failures.append((key, ValueError(f"Net {key!r} still has a {v.kind} fault at {v.pos} after {_REPAIR_ROUNDS} repair rounds")))
+        log(f"[repair] net {key} still has a {v.kind} fault at {v.pos} after {_REPAIR_ROUNDS} rounds")
     return failures
 
 
